@@ -7,6 +7,8 @@ from decimal import Decimal
 
 import pytest
 
+from tests.snapshot_helpers import make_broker_snapshot
+
 from src.account_state import (
     AccountInfo,
     AccountState,
@@ -562,14 +564,14 @@ def test_clean_unrelated_trade_does_not_clear_halt(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=make_account_state(
+        snapshot=make_broker_snapshot(make_account_state(
             positions=(
                 make_position("MSFT", "10"),
             ),
             orders=(
                 make_stop("MSFT", "10"),
             ),
-        ),
+        )),
     )
     assert not store.is_entry_halted(STRATEGY)
 
@@ -600,7 +602,7 @@ def test_clean_unrelated_trade_does_not_clear_halt(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=state,
+        snapshot=make_broker_snapshot(state),
     )
 
     assert store.is_entry_halted(STRATEGY)
@@ -625,7 +627,7 @@ def test_flat_reconciliation_clears_recovery_condition(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=make_account_state(),
+        snapshot=make_broker_snapshot(make_account_state()),
     )
 
     recovered = store.get_trade(
@@ -672,7 +674,7 @@ def test_fully_protected_reconciliation_clears_recovery_condition(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=state,
+        snapshot=make_broker_snapshot(state),
     )
 
     recovered = store.get_trade(
@@ -720,7 +722,7 @@ def test_other_strategy_cannot_clear_orb_halt(
     )
     store.apply_startup_reconciliation(
         strategy=OTHER_STRATEGY,
-        account_state=make_account_state(),
+        snapshot=make_broker_snapshot(make_account_state()),
     )
 
     assert store.is_entry_halted(STRATEGY)
@@ -1072,6 +1074,38 @@ def test_legacy_schema_migration_is_idempotent_and_preserves_data(
         EntryRecoveryAction.NONE
     )
     assert first_trade.recovery_attempt_count == 0
+    assert (
+        first_trade.last_protection_reconciliation_id
+        is None
+    )
+    assert first_trade.protection_confirmed_at is None
+
+    with sqlite3.connect(database_path) as connection:
+        proof_objects = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE name IN (
+                    'broker_reconciliation_runs',
+                    'protection_reconciliation_events',
+                    'prevent_broker_reconciliation_run_update',
+                    'prevent_broker_reconciliation_run_delete',
+                    'prevent_protection_reconciliation_event_update',
+                    'prevent_protection_reconciliation_event_delete'
+                )
+                """
+            )
+        }
+        assert connection.execute(
+            "SELECT COUNT(*) FROM broker_reconciliation_runs"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM protection_reconciliation_events"
+        ).fetchone()[0] == 0
+
+    assert len(proof_objects) == 6
     assert first_store.count_trade_events() == 1
     assert first_store.count_order_events() == 1
     assert (
@@ -1089,6 +1123,8 @@ def test_legacy_schema_migration_is_idempotent_and_preserves_data(
         "recovery_failure_reason",
         "operator_ack_required",
         "last_entry_observation_key",
+        "last_protection_reconciliation_id",
+        "protection_confirmed_at",
     }
     assert required_trade_columns.issubset(
         set(first_snapshot[0])
@@ -1353,12 +1389,12 @@ def test_invalid_or_unrelated_stop_cannot_clear_entry_halt(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=make_account_state(
+        snapshot=make_broker_snapshot(make_account_state(
             positions=(
                 make_position("AAPL", "4"),
             ),
             orders=(invalid_stop,),
-        ),
+        )),
     )
 
     assert store.is_entry_halted(STRATEGY)
@@ -1387,12 +1423,12 @@ def test_missing_stale_linked_stop_cannot_clear_entry_halt(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=make_account_state(
+        snapshot=make_broker_snapshot(make_account_state(
             positions=(
                 make_position("AAPL", "4"),
             ),
             orders=(),
-        ),
+        )),
     )
 
     assert store.is_entry_halted(STRATEGY)
@@ -1425,12 +1461,12 @@ def test_other_strategy_or_unlinked_stop_cannot_satisfy_orb_halt(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=make_account_state(
+        snapshot=make_broker_snapshot(make_account_state(
             positions=(
                 make_position("AAPL", "4"),
             ),
             orders=(other_strategy_stop,),
-        ),
+        )),
     )
 
     assert store.is_entry_halted(STRATEGY)
@@ -1463,7 +1499,7 @@ def test_close_cannot_clear_halt_without_flat_reconciliation(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=make_account_state(),
+        snapshot=make_broker_snapshot(make_account_state()),
     )
 
     assert not store.is_entry_halted(STRATEGY)
@@ -1477,6 +1513,11 @@ class StaticAccountReader:
     async def read(self, **kwargs):
         self.calls += 1
         return self.state
+
+    async def read_snapshot(self, **kwargs):
+        return make_broker_snapshot(
+            await self.read(**kwargs)
+        )
 
 
 @pytest.mark.anyio
@@ -1603,7 +1644,7 @@ def test_linked_open_entry_order_blocks_protection_clearance(
     )
     store.apply_startup_reconciliation(
         strategy=STRATEGY,
-        account_state=make_account_state(
+        snapshot=make_broker_snapshot(make_account_state(
             positions=(
                 make_position("AAPL", "4"),
             ),
@@ -1611,7 +1652,48 @@ def test_linked_open_entry_order_blocks_protection_clearance(
                 still_open_entry,
                 linked_stop,
             ),
-        ),
+        )),
     )
 
     assert store.is_entry_halted(STRATEGY)
+
+def test_legacy_open_protected_requires_fresh_snapshot_proof(
+    tmp_path,
+):
+    database_path = (
+        tmp_path / "legacy-open-protected.sqlite"
+    )
+    create_legacy_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE trades
+            SET status = 'open_protected',
+                protective_stop_order_id = 'legacy-stop',
+                average_exit_price = NULL,
+                close_reason = NULL,
+                closed_at = NULL
+            WHERE trade_id = 'legacy-trade'
+            """
+        )
+
+    store = TradeStateStore(database_path)
+    legacy = store.get_trade("legacy-trade")
+
+    assert legacy.status == TradeStatus.OPEN_PROTECTED
+    assert legacy.last_protection_reconciliation_id is None
+    assert legacy.protection_confirmed_at is None
+
+    store.begin_startup_reconciliation(
+        STRATEGY,
+        occurred_at=OBSERVED_AT,
+    )
+    restarted = TradeStateStore(database_path)
+    pending = restarted.get_trade("legacy-trade")
+
+    assert pending.status == TradeStatus.STOP_LINKED
+    assert pending.protected_quantity == 0
+    assert restarted.is_entry_halted(STRATEGY)
+    assert restarted.count_order_events() == 1
+    assert restarted.count_trade_events() == 2

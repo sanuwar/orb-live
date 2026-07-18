@@ -171,6 +171,7 @@ def expected_position_count(
                 TradeStatus.PROTECTION_PENDING,
                 TradeStatus.RECOVERY_REQUIRED,
                 TradeStatus.OPEN_UNPROTECTED,
+                TradeStatus.STOP_LINKED,
                 TradeStatus.OPEN_PROTECTED,
                 TradeStatus.EXIT_PENDING,
             }
@@ -191,6 +192,7 @@ def unprotected_trade_count(
             TradeStatus.PROTECTION_PENDING,
             TradeStatus.RECOVERY_REQUIRED,
             TradeStatus.OPEN_UNPROTECTED,
+            TradeStatus.STOP_LINKED,
         }
     )
 
@@ -289,10 +291,13 @@ class ShadowRuntime:
             self.strategy_name
         )
 
-        initial_account_state = (
-            await self.account_reader.read(
+        initial_account_snapshot = (
+            await self.account_reader.read_snapshot(
                 account_number=account_number
             )
+        )
+        initial_account_state = (
+            initial_account_snapshot.account_state
         )
 
         selected_account_number = (
@@ -354,12 +359,15 @@ class ShadowRuntime:
                     )
                 )
 
-        refreshed_account_state = (
-            await self.account_reader.read(
+        refreshed_account_snapshot = (
+            await self.account_reader.read_snapshot(
                 account_number=(
                     selected_account_number
                 )
             )
+        )
+        refreshed_account_state = (
+            refreshed_account_snapshot.account_state
         )
 
         timestamp = datetime.now(EASTERN)
@@ -368,8 +376,8 @@ class ShadowRuntime:
             self.trade_store
             .apply_startup_reconciliation(
                 strategy=self.strategy_name,
-                account_state=(
-                    refreshed_account_state
+                snapshot=(
+                    refreshed_account_snapshot
                 ),
                 occurred_at=timestamp,
             )
@@ -561,7 +569,7 @@ def print_report(
     watchdog = report.watchdog_decision
 
     print(
-        "\nORB SHADOW RUNTIME REPORT â€” "
+        "\nORB SHADOW RUNTIME REPORT Ã¢â‚¬â€ "
         "READ ONLY\n"
     )
 

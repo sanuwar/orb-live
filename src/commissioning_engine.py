@@ -177,6 +177,7 @@ class CommissioningEngine:
                     .PROTECTION_PENDING,
                     TradeStatus.RECOVERY_REQUIRED,
                     TradeStatus.OPEN_UNPROTECTED,
+                    TradeStatus.STOP_LINKED,
                     TradeStatus.OPEN_PROTECTED,
                     TradeStatus.EXIT_PENDING,
                 }
@@ -192,9 +193,12 @@ class CommissioningEngine:
             self.strategy_name
         )
 
-        account_state = await self.account_reader.read(
-            account_number=account_number
+        account_snapshot = (
+            await self.account_reader.read_snapshot(
+                account_number=account_number
+            )
         )
+        account_state = account_snapshot.account_state
 
         started_at = datetime.now(EASTERN)
         session_date = started_at.date()
@@ -203,7 +207,7 @@ class CommissioningEngine:
             self.trade_store
             .apply_startup_reconciliation(
                 strategy=self.strategy_name,
-                account_state=account_state,
+                snapshot=account_snapshot,
                 occurred_at=started_at,
             )
         )
@@ -429,7 +433,7 @@ def print_report(
     plan = report.dry_run_plan
 
     print(
-        "\nORB COMMISSIONING REPORT â€” READ ONLY\n"
+        "\nORB COMMISSIONING REPORT Ã¢â‚¬â€ READ ONLY\n"
     )
 
     print(

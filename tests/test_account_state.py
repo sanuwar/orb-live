@@ -13,6 +13,7 @@ from src.account_state import (
     parse_order,
     select_agentic_account,
 )
+from src.broker_snapshot import account_fingerprint
 
 
 class FakeResult:
@@ -289,3 +290,44 @@ async def test_read_account_state():
             },
         ),
     ]
+
+@pytest.mark.anyio
+async def test_read_snapshot_records_one_complete_read_cycle():
+    client = FakeClient()
+    snapshot = await AccountStateReader(
+        client=client
+    ).read_snapshot()
+    metadata = snapshot.metadata
+
+    assert metadata.reconciliation_id
+    assert (
+        metadata.positions_cycle_id
+        == metadata.reconciliation_id
+    )
+    assert (
+        metadata.orders_cycle_id
+        == metadata.reconciliation_id
+    )
+    assert metadata.positions_complete is True
+    assert metadata.orders_complete is True
+    assert (
+        metadata.started_at
+        <= metadata.positions_read_at
+        <= metadata.orders_read_at
+        <= metadata.completed_at
+    )
+    assert metadata.account_fingerprint == (
+        account_fingerprint("TEST12345678")
+    )
+    assert metadata.account_fingerprint != (
+        snapshot.account_state.account.account_number
+    )
+    assert {
+        tool_name
+        for tool_name, _ in client.fake_session.calls
+    } == {
+        "get_accounts",
+        "get_portfolio",
+        "get_equity_positions",
+        "get_equity_orders",
+    }

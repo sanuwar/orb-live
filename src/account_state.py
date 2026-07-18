@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 try:
+    from .broker_snapshot import (
+        BrokerSnapshot,
+        BrokerSnapshotMetadata,
+        account_fingerprint,
+    )
     from .robinhood_client import (
         RobinhoodClient,
         RobinhoodClientError,
         _unwrap_tool_result,
     )
 except ImportError:
+    from broker_snapshot import (
+        BrokerSnapshot,
+        BrokerSnapshotMetadata,
+        account_fingerprint,
+    )
     from robinhood_client import (
         RobinhoodClient,
         RobinhoodClientError,
@@ -304,6 +316,19 @@ class AccountStateReader:
         *,
         account_number: str | None = None,
     ) -> AccountState:
+        snapshot = await self.read_snapshot(
+            account_number=account_number
+        )
+        return snapshot.account_state
+
+    async def read_snapshot(
+        self,
+        *,
+        account_number: str | None = None,
+    ) -> BrokerSnapshot:
+        reconciliation_id = str(uuid.uuid4())
+        started_at = datetime.now(timezone.utc)
+
         async with self.client.session() as session:
             accounts_result = await session.call_tool(
                 "get_accounts",
@@ -339,6 +364,9 @@ class AccountStateReader:
                         selected_account_number,
                 },
             )
+            positions_read_at = datetime.now(
+                timezone.utc
+            )
 
             orders_result = await session.call_tool(
                 "get_equity_orders",
@@ -347,6 +375,7 @@ class AccountStateReader:
                         selected_account_number,
                 },
             )
+            orders_read_at = datetime.now(timezone.utc)
 
         portfolio_data = _unwrap_tool_result(
             portfolio_result,
@@ -408,7 +437,7 @@ class AccountStateReader:
             in OPEN_ORDER_STATES
         )
 
-        return AccountState(
+        account_state = AccountState(
             account=AccountInfo(
                 account_number=
                     selected_account_number,
@@ -479,11 +508,31 @@ class AccountStateReader:
             open_orders=parsed_orders,
         )
 
+        completed_at = datetime.now(timezone.utc)
+
+        return BrokerSnapshot(
+            account_state=account_state,
+            metadata=BrokerSnapshotMetadata(
+                reconciliation_id=reconciliation_id,
+                account_fingerprint=account_fingerprint(
+                    selected_account_number
+                ),
+                started_at=started_at,
+                positions_read_at=positions_read_at,
+                orders_read_at=orders_read_at,
+                completed_at=completed_at,
+                positions_cycle_id=reconciliation_id,
+                orders_cycle_id=reconciliation_id,
+                positions_complete=True,
+                orders_complete=True,
+            ),
+        )
+
 
 def print_account_state(
     state: AccountState,
 ) -> None:
-    print("\nROBINHOOD ACCOUNT STATE — READ ONLY\n")
+    print("\nROBINHOOD ACCOUNT STATE â€” READ ONLY\n")
 
     print(
         f"Account: "

@@ -403,6 +403,29 @@ class ReadOnlyOrderMonitor:
                 ),
             )
 
+        if trade.status == TradeStatus.STOP_LINKED:
+            return OrderMonitorResult(
+                role=(
+                    MonitoredOrderRole.PROTECTIVE_STOP
+                ),
+                action=(
+                    OrderMonitorAction
+                    .RECONCILE_IMMEDIATELY
+                ),
+                trade_before=trade,
+                trade_after=trade,
+                observed_order=None,
+                ledger_changed=False,
+                order_event_recorded=False,
+                requires_immediate_protection=True,
+                requires_reconciliation=True,
+                reason=(
+                    "The protective-stop ID is linked "
+                    "locally, but fresh complete broker "
+                    "snapshot proof is still required."
+                ),
+            )
+
         if trade.status in {
             TradeStatus.CLOSED,
             TradeStatus.CANCELLED,

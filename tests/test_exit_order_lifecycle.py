@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from tests.snapshot_helpers import confirm_linked_stop
+
 from src.account_state import EquityOrder
 from src.exit_order_lifecycle import (
     ExitOrderAction,
@@ -49,6 +51,7 @@ def make_exit_pending_trade(
             trade.trade_id,
             broker_order_id="stop-1",
         )
+        trade = confirm_linked_stop(store, trade)
 
     return store.begin_exit(
         trade.trade_id,
