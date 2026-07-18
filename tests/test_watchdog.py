@@ -1,4 +1,4 @@
-﻿from copy import deepcopy
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal

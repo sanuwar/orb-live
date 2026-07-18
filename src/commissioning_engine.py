@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -20,6 +20,7 @@ try:
     from .journal import Journal
     from .robinhood_client import RobinhoodClient
     from .trade_state import (
+        DEFAULT_DB_PATH,
         ReconciliationIssue,
         TradeStateStore,
         TradeStatus,
@@ -42,6 +43,7 @@ except ImportError:
     from journal import Journal
     from robinhood_client import RobinhoodClient
     from trade_state import (
+        DEFAULT_DB_PATH,
         ReconciliationIssue,
         TradeStateStore,
         TradeStatus,
@@ -121,9 +123,9 @@ class CommissioningEngine:
         self,
         config: dict[str, Any],
         *,
+        trade_store: TradeStateStore,
         client: RobinhoodClient | None = None,
         journal: Journal | None = None,
-        trade_store: TradeStateStore | None = None,
     ):
         self.config = config
         self.strategy_name = get_strategy_name(
@@ -131,9 +133,7 @@ class CommissioningEngine:
         )
         self.client = client or RobinhoodClient()
         self.journal = journal
-        self.trade_store = (
-            trade_store or TradeStateStore()
-        )
+        self.trade_store = trade_store
 
         self.account_reader = AccountStateReader(
             client=self.client
@@ -582,7 +582,11 @@ def print_report(
 
 async def main() -> None:
     config = load_config()
-    engine = CommissioningEngine(config)
+    trade_store = TradeStateStore(DEFAULT_DB_PATH)
+    engine = CommissioningEngine(
+        config,
+        trade_store=trade_store,
+    )
     report = await engine.run()
     print_report(report)
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
@@ -166,6 +166,19 @@ def close_trade(
         reason="regression_test",
         occurred_at=occurred_at + timedelta(
             seconds=3
+        ),
+    )
+    store.begin_startup_reconciliation(
+        strategy,
+        occurred_at=occurred_at + timedelta(
+            seconds=4
+        ),
+    )
+    store.apply_startup_reconciliation(
+        strategy=strategy,
+        account_state=make_account_state(),
+        occurred_at=occurred_at + timedelta(
+            seconds=5
         ),
     )
 

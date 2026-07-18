@@ -16,6 +16,7 @@ from src.commissioning_engine import (
 )
 from src.config import load_config
 from src.dry_run_engine import DryRunPlan
+from src.trade_state import TradeStateStore
 
 
 class FakeAccountReader:
@@ -147,6 +148,7 @@ def test_hypothetical_cash_never_negative():
 @pytest.mark.anyio
 async def test_run_uses_account_cash_for_dry_run(
     monkeypatch,
+    tmp_path,
 ):
     state = make_account_state(
         cash="1000",
@@ -168,6 +170,9 @@ async def test_run_uses_account_cash_for_dry_run(
 
     engine = CommissioningEngine(
         load_config(),
+        trade_store=TradeStateStore(
+            tmp_path / "cash.sqlite"
+        ),
         client=client,
     )
 
@@ -212,6 +217,7 @@ async def test_run_uses_account_cash_for_dry_run(
 @pytest.mark.anyio
 async def test_zero_cash_skips_market_scan(
     monkeypatch,
+    tmp_path,
 ):
     state = make_account_state(
         cash="0",
@@ -232,6 +238,9 @@ async def test_zero_cash_skips_market_scan(
 
     engine = CommissioningEngine(
         load_config(),
+        trade_store=TradeStateStore(
+            tmp_path / "zero_cash.sqlite"
+        ),
         client=object(),
     )
 
@@ -259,6 +268,7 @@ async def test_zero_cash_skips_market_scan(
 @pytest.mark.anyio
 async def test_existing_account_activity_adds_warnings(
     monkeypatch,
+    tmp_path,
 ):
     position = EquityPosition(
         symbol="AAPL",
@@ -319,6 +329,9 @@ async def test_existing_account_activity_adds_warnings(
 
     engine = CommissioningEngine(
         load_config(),
+        trade_store=TradeStateStore(
+            tmp_path / "zero_cash.sqlite"
+        ),
         client=object(),
     )
 
@@ -343,6 +356,7 @@ async def test_existing_account_activity_adds_warnings(
 @pytest.mark.anyio
 async def test_inactive_account_is_not_shadow_safe(
     monkeypatch,
+    tmp_path,
 ):
     state = make_account_state(
         agentic_allowed=True,
@@ -360,6 +374,9 @@ async def test_inactive_account_is_not_shadow_safe(
 
     engine = CommissioningEngine(
         load_config(),
+        trade_store=TradeStateStore(
+            tmp_path / "zero_cash.sqlite"
+        ),
         client=object(),
     )
 

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
@@ -94,7 +94,7 @@ def make_account_state(
     return AccountState(
         account=AccountInfo(
             account_number="TEST12345678",
-            masked_account_number="â€¢â€¢â€¢â€¢5678",
+            masked_account_number="••••5678",
             brokerage_account_type="individual",
             trading_type="cash",
             nickname="Test",

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -20,6 +20,7 @@ try:
     from .order_observer import mask_identifier
     from .robinhood_client import RobinhoodClient
     from .trade_state import (
+        DEFAULT_DB_PATH,
         ReconciliationIssue,
         TradeRecord,
         TradeStateStore,
@@ -43,6 +44,7 @@ except ImportError:
     from order_observer import mask_identifier
     from robinhood_client import RobinhoodClient
     from trade_state import (
+        DEFAULT_DB_PATH,
         ReconciliationIssue,
         TradeRecord,
         TradeStateStore,
@@ -233,8 +235,8 @@ class ShadowRuntime:
         self,
         config: dict[str, Any],
         *,
+        trade_store: TradeStateStore,
         client: RobinhoodClient | None = None,
-        trade_store: TradeStateStore | None = None,
         order_monitor: (
             ReadOnlyOrderMonitor | None
         ) = None,
@@ -245,9 +247,7 @@ class ShadowRuntime:
         )
         self.client = client or RobinhoodClient()
 
-        self.trade_store = (
-            trade_store or TradeStateStore()
-        )
+        self.trade_store = trade_store
 
         self.account_reader = AccountStateReader(
             client=self.client
@@ -734,7 +734,11 @@ def print_report(
 
 async def main() -> None:
     config = load_config()
-    runtime = ShadowRuntime(config)
+    trade_store = TradeStateStore(DEFAULT_DB_PATH)
+    runtime = ShadowRuntime(
+        config,
+        trade_store=trade_store,
+    )
     report = await runtime.run()
     print_report(report)
 

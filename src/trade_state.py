@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import sqlite3
@@ -260,7 +260,7 @@ class TradeStateStore:
 
     def __init__(
         self,
-        db_path: str | Path = DEFAULT_DB_PATH,
+        db_path: str | Path,
     ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(
@@ -914,9 +914,24 @@ class TradeStateStore:
 
             current = self._row_to_trade(row)
 
+            observation_seen = connection.execute(
+                """
+                SELECT 1
+                FROM entry_recovery_events
+                WHERE trade_id = ?
+                  AND observation_key = ?
+                LIMIT 1
+                """,
+                (
+                    trade_id,
+                    observation_key,
+                ),
+            ).fetchone()
+
             if (
                 current.last_entry_observation_key
                 == observation_key
+                or observation_seen is not None
             ):
                 return current, False
 
@@ -1675,13 +1690,21 @@ class TradeStateStore:
         current = self.get_trade(trade_id)
 
         if current.status not in {
+            TradeStatus.ENTRY_PARTIALLY_FILLED,
             TradeStatus.PROTECTION_PENDING,
+            TradeStatus.RECOVERY_REQUIRED,
             TradeStatus.OPEN_UNPROTECTED,
             TradeStatus.OPEN_PROTECTED,
         }:
             raise InvalidTransitionError(
                 "A protective stop can only be "
                 "attached to an open trade."
+            )
+
+        if current.filled_quantity <= 0:
+            raise TradeStateError(
+                "A protective stop cannot be attached "
+                "without a positive confirmed fill."
             )
 
         if (
@@ -1720,16 +1743,7 @@ class TradeStateStore:
             occurred_at=occurred_at,
         )
 
-        timestamp = occurred_at or utc_now()
-
-        with self._connect() as connection:
-            self._clear_entry_halt(
-                connection,
-                halt_key=f"trade:{trade_id}",
-                occurred_at=timestamp,
-            )
-
-        return self.get_trade(updated.trade_id)
+        return updated
 
     def mark_protective_stop_inactive(
         self,
@@ -1859,14 +1873,7 @@ class TradeStateStore:
             occurred_at=timestamp,
         )
 
-        with self._connect() as connection:
-            self._clear_entry_halt(
-                connection,
-                halt_key=f"trade:{trade_id}",
-                occurred_at=timestamp,
-            )
-
-        return self.get_trade(closed.trade_id)
+        return closed
 
     def cancel_unfilled_trade(
         self,
@@ -2178,6 +2185,26 @@ class TradeStateStore:
             TradeStatus.PROTECTION_PENDING,
             TradeStatus.RECOVERY_REQUIRED,
         }
+        protectable_statuses = recovery_statuses | {
+            TradeStatus.OPEN_UNPROTECTED,
+            TradeStatus.OPEN_PROTECTED,
+        }
+        active_entry_states = {
+            "new",
+            "queued",
+            "confirmed",
+            "unconfirmed",
+            "partially_filled",
+            "pending_cancelled",
+            "locating",
+        }
+        valid_stop_states = {
+            "new",
+            "queued",
+            "confirmed",
+            "unconfirmed",
+            "locating",
+        }
 
         broker_positions = {
             position.symbol: position
@@ -2189,14 +2216,29 @@ class TradeStateStore:
             account_state.open_orders
         )
 
-        active_trades = tuple(
-            trade
-            for trade in self.list_active_trades()
-            if trade.strategy == strategy
-            and trade.status in recovery_statuses
+        with self._connect() as connection:
+            halted_rows = connection.execute(
+                """
+                SELECT trades.*
+                FROM trades
+                JOIN entry_halts
+                  ON entry_halts.trade_id
+                     = trades.trade_id
+                WHERE entry_halts.strategy = ?
+                  AND entry_halts.active = 1
+                  AND entry_halts.trade_id IS NOT NULL
+                ORDER BY trades.created_at,
+                         trades.trade_id
+                """,
+                (strategy,),
+            ).fetchall()
+
+        halted_trades = tuple(
+            self._row_to_trade(row)
+            for row in halted_rows
         )
 
-        for trade in active_trades:
+        for trade in halted_trades:
             position = broker_positions.get(
                 trade.symbol
             )
@@ -2205,6 +2247,8 @@ class TradeStateStore:
                 order.order_id
                 == trade.entry_order_id
                 and order.side == "buy"
+                and order.state.strip().lower()
+                in active_entry_states
                 for order in broker_orders
             )
 
@@ -2212,30 +2256,31 @@ class TradeStateStore:
                 position is None
                 and not entry_still_open
             ):
-                self._transition(
-                    trade.trade_id,
-                    new_status=TradeStatus.ERROR,
-                    event_type=(
-                        "entry_recovery_flat_confirmed"
-                    ),
-                    updates={
-                        "protected_quantity": 0,
-                        "required_recovery_action":
-                            EntryRecoveryAction
-                            .NONE.value,
-                        "last_completed_recovery_step":
-                            EntryRecoveryStep
-                            .FLAT_CONFIRMED.value,
-                        "operator_ack_required": 0,
-                    },
-                    details={
-                        "proof": (
-                            "No broker position and no "
-                            "open linked entry order."
-                        )
-                    },
-                    occurred_at=timestamp,
-                )
+                if trade.status in recovery_statuses:
+                    self._transition(
+                        trade.trade_id,
+                        new_status=TradeStatus.ERROR,
+                        event_type=(
+                            "entry_recovery_flat_confirmed"
+                        ),
+                        updates={
+                            "protected_quantity": 0,
+                            "required_recovery_action":
+                                EntryRecoveryAction
+                                .NONE.value,
+                            "last_completed_recovery_step":
+                                EntryRecoveryStep
+                                .FLAT_CONFIRMED.value,
+                            "operator_ack_required": 0,
+                        },
+                        details={
+                            "proof": (
+                                "No broker position and no "
+                                "open linked entry order."
+                            )
+                        },
+                        occurred_at=timestamp,
+                    )
 
                 with self._connect() as connection:
                     self._clear_entry_halt(
@@ -2248,12 +2293,15 @@ class TradeStateStore:
 
                 continue
 
-            if position is None:
-                continue
-
             if (
-                position.quantity
+                position is None
+                or entry_still_open
+                or position.quantity
                 != Decimal(trade.filled_quantity)
+                or trade.filled_quantity <= 0
+                or trade.status
+                not in protectable_statuses
+                or not trade.protective_stop_order_id
             ):
                 continue
 
@@ -2261,11 +2309,15 @@ class TradeStateStore:
                 order
                 for order in broker_orders
                 if (
-                    order.symbol == trade.symbol
+                    order.order_id
+                    == trade.protective_stop_order_id
+                    and order.symbol == trade.symbol
                     and order.side == "sell"
                     and order.trigger == "stop"
                     and order.order_type
                     == "stop_market"
+                    and order.state.strip().lower()
+                    in valid_stop_states
                     and order.cumulative_quantity == 0
                     and order.quantity
                     == position.quantity
@@ -2277,37 +2329,47 @@ class TradeStateStore:
             if len(matching_stops) != 1:
                 continue
 
-            stop_order = matching_stops[0]
+            if (
+                trade.status
+                == TradeStatus.OPEN_PROTECTED
+            ):
+                if (
+                    trade.protected_quantity
+                    != trade.filled_quantity
+                ):
+                    continue
+            else:
+                stop_order = matching_stops[0]
 
-            self._transition(
-                trade.trade_id,
-                new_status=(
-                    TradeStatus.OPEN_PROTECTED
-                ),
-                event_type=(
-                    "entry_recovery_protection_"
-                    "confirmed"
-                ),
-                updates={
-                    "protective_stop_order_id":
-                        stop_order.order_id,
-                    "protected_quantity":
-                        trade.filled_quantity,
-                    "required_recovery_action":
-                        EntryRecoveryAction
-                        .NONE.value,
-                    "last_completed_recovery_step":
-                        EntryRecoveryStep
-                        .PROTECTION_CONFIRMED.value,
-                    "recovery_failure_reason": None,
-                    "operator_ack_required": 0,
-                },
-                details={
-                    "protected_quantity":
-                        trade.filled_quantity,
-                },
-                occurred_at=timestamp,
-            )
+                self._transition(
+                    trade.trade_id,
+                    new_status=(
+                        TradeStatus.OPEN_PROTECTED
+                    ),
+                    event_type=(
+                        "entry_recovery_protection_"
+                        "confirmed"
+                    ),
+                    updates={
+                        "protective_stop_order_id":
+                            stop_order.order_id,
+                        "protected_quantity":
+                            trade.filled_quantity,
+                        "required_recovery_action":
+                            EntryRecoveryAction
+                            .NONE.value,
+                        "last_completed_recovery_step":
+                            EntryRecoveryStep
+                            .PROTECTION_CONFIRMED.value,
+                        "recovery_failure_reason": None,
+                        "operator_ack_required": 0,
+                    },
+                    details={
+                        "protected_quantity":
+                            trade.filled_quantity,
+                    },
+                    occurred_at=timestamp,
+                )
 
             with self._connect() as connection:
                 self._clear_entry_halt(
@@ -2317,7 +2379,6 @@ class TradeStateStore:
                     ),
                     occurred_at=timestamp,
                 )
-
         issues = self.startup_reconciliation_issues(
             strategy=strategy,
             account_state=account_state,
@@ -2694,7 +2755,7 @@ class TradeStateStore:
 
 
 def main() -> None:
-    store = TradeStateStore()
+    store = TradeStateStore(DEFAULT_DB_PATH)
 
     print("\nTRADE-STATE LEDGER\n")
     print(f"Database: {store.db_path}")

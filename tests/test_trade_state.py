@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime, timezone
@@ -95,7 +95,7 @@ def make_account_state(
     return AccountState(
         account=AccountInfo(
             account_number="TEST12345678",
-            masked_account_number="â€¢â€¢â€¢â€¢5678",
+            masked_account_number="••••5678",
             brokerage_account_type="individual",
             trading_type="cash",
             nickname="Test",
@@ -500,13 +500,21 @@ def close_test_trade(
         quantity=1,
     )
 
-    return store.close_trade(
+    closed = store.close_trade(
         trade.trade_id,
         average_exit_price=Decimal(
             exit_price
         ),
         reason="test_close",
     )
+    store.begin_startup_reconciliation(
+        "orb_v0"
+    )
+    store.apply_startup_reconciliation(
+        strategy="orb_v0",
+        account_state=make_account_state(),
+    )
+    return closed
 
 
 def test_daily_weekly_pnl_and_current_drawdown(
