@@ -1,0 +1,60 @@
+strategy:
+  name: orb_long_v0
+  version: "0.1.0"
+  timezone: America/New_York
+  enabled: false
+
+universe:
+  symbols:
+    - AAPL
+    - MSFT
+    - NVDA
+    - AMZN
+    - META
+    - GOOGL
+    - TSLA
+    - AVGO
+    - AMD
+    - JPM
+    - XOM
+    - LLY
+    - COST
+    - WMT
+    - NFLX
+
+signal:
+  minimum_gap_percent: 1.0
+  opening_range_minutes: 5
+  minimum_relative_volume: 3.0
+  relative_volume_lookback_days: 20
+  require_spy_above_vwap: true
+  entry_start: "09:40"
+  entry_end: "11:00"
+  one_entry_per_symbol_per_day: true
+
+exit:
+  initial_stop: opening_range_low
+  move_stop_to_break_even_at_r: 1.0
+  full_profit_exit_at_r: 2.0
+  time_exit: "15:45"
+  overnight_positions_allowed: false
+
+risk:
+  risk_per_trade_usd: 15
+  maximum_position_usd: 3000
+  maximum_open_positions: 1
+  maximum_entries_per_day: 2
+  daily_loss_limit_usd: 45
+  weekly_loss_limit_usd: 120
+  total_drawdown_halt_usd: 300
+  margin_allowed: false
+  short_selling_allowed: false
+  averaging_down_allowed: false
+
+execution:
+  entry_order_type: limit
+  protective_stop_order_type: stop_market
+  regular_hours_only: true
+  maximum_entry_slippage_bps: 10
+  require_broker_stop_confirmation: true
+  fail_closed: true

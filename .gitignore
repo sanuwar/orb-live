@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OAuth credentials and secrets
+data/.rh_tokens.json
+.env
+*.env
+credentials.json
+tokens.json
+cookies.json
+
+# Local trading data
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+logs/
+*.log
+
+# Editors and OS
+.vscode/
+.DS_Store
+Thumbs.db
