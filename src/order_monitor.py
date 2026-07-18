@@ -24,8 +24,11 @@ try:
     from .protective_stop_lifecycle import (
         ProtectiveStopAction,
         ProtectiveStopLifecycleCoordinator,
+        protective_stop_observation_key,
     )
     from .trade_state import (
+        StopRecoveryAction,
+        StopRecoveryStep,
         TradeRecord,
         TradeStateStore,
         TradeStatus,
@@ -48,8 +51,11 @@ except ImportError:
     from protective_stop_lifecycle import (
         ProtectiveStopAction,
         ProtectiveStopLifecycleCoordinator,
+        protective_stop_observation_key,
     )
     from trade_state import (
+        StopRecoveryAction,
+        StopRecoveryStep,
         TradeRecord,
         TradeStateStore,
         TradeStatus,
@@ -197,9 +203,17 @@ class ReadOnlyOrderMonitor:
         observed: ObservedEquityOrder,
     ) -> bool:
         order = observed.order
-        observation_key = entry_observation_key(
-            order,
-            observed.average_price,
+        observation_key = (
+            protective_stop_observation_key(
+                order,
+                observed.average_price,
+            )
+            if role
+            == MonitoredOrderRole.PROTECTIVE_STOP
+            else entry_observation_key(
+                order,
+                observed.average_price,
+            )
         )
 
         return self.trade_store.record_order_event(
@@ -282,6 +296,58 @@ class ReadOnlyOrderMonitor:
                     )
                 )
 
+            elif (
+                role
+                == MonitoredOrderRole.PROTECTIVE_STOP
+            ):
+                failure_key = hashlib.sha256(
+                    (
+                        f"{trade.trade_id}:"
+                        f"{trade.protective_stop_order_id}:"
+                        f"{type(error).__name__}:"
+                        f"{error}"
+                    ).encode("utf-8")
+                ).hexdigest()
+
+                failed_trade, _ = (
+                    self.trade_store
+                    .persist_stop_recovery_observation(
+                        trade.trade_id,
+                        observation_key=failure_key,
+                        broker_order_id=(
+                            trade.protective_stop_order_id
+                        ),
+                        broker_state="observation_failed",
+                        requested_quantity=(
+                            trade.stop_requested_quantity
+                            or trade.filled_quantity
+                        ),
+                        executed_quantity=(
+                            trade.stop_executed_quantity
+                        ),
+                        remaining_order_quantity=None,
+                        average_fill_price=(
+                            trade.average_stop_fill_price
+                        ),
+                        required_action=(
+                            StopRecoveryAction
+                            .RECONCILE_BROKER_STATE
+                        ),
+                        last_completed_step=(
+                            StopRecoveryStep
+                            .INCONSISTENT_STATE_RECORDED
+                        ),
+                        failure_reason=(
+                            "Fresh broker stop status "
+                            f"could not be retrieved: {error}"
+                        ),
+                        operator_ack_required=True,
+                        observed_at=datetime.now(
+                            timezone.utc
+                        ),
+                    )
+                )
+
             return (
                 None,
                 fail_closed_result(
@@ -311,7 +377,10 @@ class ReadOnlyOrderMonitor:
             observed=observed,
         )
 
-        if not observed.is_agentic_order:
+        if (
+            not observed.is_agentic_order
+            and role != MonitoredOrderRole.PROTECTIVE_STOP
+        ):
             return (
                 observed,
                 fail_closed_result(
@@ -599,7 +668,10 @@ class ReadOnlyOrderMonitor:
 
         if (
             trade.status
-            == TradeStatus.OPEN_PROTECTED
+            in {
+                TradeStatus.OPEN_PROTECTED,
+                TradeStatus.STOP_RECOVERY_REQUIRED,
+            }
         ):
             role = (
                 MonitoredOrderRole
@@ -642,6 +714,17 @@ class ReadOnlyOrderMonitor:
                     average_fill_price=(
                         observed.average_price
                     ),
+                    observation_key=(
+                        protective_stop_observation_key(
+                            observed.order,
+                            observed.average_price,
+                        )
+                    ),
+                    observation_at=(
+                        observed.last_transaction_at
+                        or observed.created_at
+                        or datetime.now(timezone.utc)
+                    ),
                 )
             )
 
@@ -656,19 +739,19 @@ class ReadOnlyOrderMonitor:
             elif (
                 lifecycle.decision.action
                 == ProtectiveStopAction
-                .CLOSE_FULL_STOP_FILL
+                .RECONCILE_FULL_STOP_FILL
             ):
                 action = (
                     OrderMonitorAction
-                    .STOP_FILLED_TRADE_CLOSED
+                    .RECONCILE_IMMEDIATELY
                 )
                 protection = False
-                reconciliation = False
+                reconciliation = True
 
             elif (
                 lifecycle.decision.action
                 == ProtectiveStopAction
-                .MARK_STOP_INACTIVE
+                .RECOVER_INACTIVE_STOP
             ):
                 action = (
                     OrderMonitorAction
@@ -680,7 +763,7 @@ class ReadOnlyOrderMonitor:
             elif (
                 lifecycle.decision.action
                 == ProtectiveStopAction
-                .RECONCILE_PARTIAL_FILL
+                .RECOVER_PARTIAL_FILL
             ):
                 action = (
                     OrderMonitorAction

@@ -179,6 +179,7 @@ class CommissioningEngine:
                     TradeStatus.OPEN_UNPROTECTED,
                     TradeStatus.STOP_LINKED,
                     TradeStatus.OPEN_PROTECTED,
+                    TradeStatus.STOP_RECOVERY_REQUIRED,
                     TradeStatus.EXIT_PENDING,
                 }
             )

@@ -140,14 +140,14 @@ def test_full_stop_fill_requires_average_price(
         .requires_immediate_reconciliation
         is True
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.OPEN_PROTECTED
+        == TradeStatus.STOP_RECOVERY_REQUIRED
     )
 
 
-def test_full_stop_fill_closes_local_trade(
+def test_full_stop_fill_waits_for_flat_proof(
     tmp_path,
 ):
     store = TradeStateStore(
@@ -170,29 +170,28 @@ def test_full_stop_fill_closes_local_trade(
     assert (
         result.decision.action
         == ProtectiveStopAction
-        .CLOSE_FULL_STOP_FILL
+        .RECONCILE_FULL_STOP_FILL
     )
     assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.CLOSED
+        == TradeStatus.STOP_RECOVERY_REQUIRED
     )
     assert (
-        result.trade_after.average_exit_price
+        result.trade_after.average_stop_fill_price
         == Decimal("99")
     )
     assert (
         result.trade_after.realized_pnl
-        == Decimal("-10")
+        == Decimal("0")
     )
     assert (
-        result.trade_after.close_reason
-        == "protective_stop"
+        result.trade_after.close_reason is None
     )
     assert (
         result.trade_after
         .protective_stop_order_id
-        is None
+        == "stop-1"
     )
     assert store.count_trade_events() == 6
 
@@ -218,17 +217,17 @@ def test_cancelled_stop_marks_trade_unprotected(
     assert (
         result.decision.action
         == ProtectiveStopAction
-        .MARK_STOP_INACTIVE
+        .RECOVER_INACTIVE_STOP
     )
     assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.OPEN_UNPROTECTED
+        == TradeStatus.STOP_RECOVERY_REQUIRED
     )
     assert (
         result.trade_after
         .protective_stop_order_id
-        is None
+        == "stop-1"
     )
     assert (
         result.decision.position_may_be_unprotected
@@ -262,12 +261,12 @@ def test_rejected_stop_marks_trade_unprotected(
     assert (
         result.decision.action
         == ProtectiveStopAction
-        .MARK_STOP_INACTIVE
+        .RECOVER_INACTIVE_STOP
     )
     assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.OPEN_UNPROTECTED
+        == TradeStatus.STOP_RECOVERY_REQUIRED
     )
 
 
@@ -288,12 +287,13 @@ def test_partial_stop_fill_requires_reconciliation(
             state="partially_filled",
             cumulative_quantity="4",
         ),
+        average_fill_price="99",
     )
 
     assert (
         result.decision.action
         == ProtectiveStopAction
-        .RECONCILE_PARTIAL_FILL
+        .RECOVER_PARTIAL_FILL
     )
     assert (
         result.decision
@@ -304,10 +304,10 @@ def test_partial_stop_fill_requires_reconciliation(
         result.decision.position_may_be_unprotected
         is True
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.OPEN_PROTECTED
+        == TradeStatus.STOP_RECOVERY_REQUIRED
     )
     assert (
         result.decision.order_status
@@ -451,7 +451,7 @@ def test_stop_quantity_mismatch_fails_closed(
         decision.action
         == ProtectiveStopAction.FAIL_CLOSED
     )
-    assert "quantity" in decision.reason.lower()
+    assert "undersized" in decision.reason.lower()
 
 
 def test_non_protected_local_trade_fails_closed(
@@ -519,8 +519,8 @@ def test_unknown_broker_state_fails_closed(
         result.decision.action
         == ProtectiveStopAction.FAIL_CLOSED
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.OPEN_PROTECTED
+        == TradeStatus.STOP_RECOVERY_REQUIRED
     )

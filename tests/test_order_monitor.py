@@ -455,7 +455,7 @@ async def test_active_protective_stop_waits(
 
 
 @pytest.mark.anyio
-async def test_full_stop_fill_closes_trade(
+async def test_full_stop_fill_requires_flat_snapshot(
     tmp_path,
 ):
     store = TradeStateStore(
@@ -488,16 +488,16 @@ async def test_full_stop_fill_closes_trade(
     assert (
         result.action
         == OrderMonitorAction
-        .STOP_FILLED_TRADE_CLOSED
+        .RECONCILE_IMMEDIATELY
     )
     assert result.ledger_changed is True
     assert result.trade_after.status == (
-        TradeStatus.CLOSED
+        TradeStatus.STOP_RECOVERY_REQUIRED
     )
     assert result.trade_after.realized_pnl == (
-        Decimal("-10")
+        Decimal("0")
     )
-    assert result.requires_reconciliation is False
+    assert result.requires_reconciliation is True
 
 
 @pytest.mark.anyio
@@ -536,7 +536,7 @@ async def test_cancelled_stop_marks_trade_unprotected(
     )
     assert result.ledger_changed is True
     assert result.trade_after.status == (
-        TradeStatus.OPEN_UNPROTECTED
+        TradeStatus.STOP_RECOVERY_REQUIRED
     )
     assert (
         result.requires_immediate_protection
@@ -581,7 +581,10 @@ async def test_partial_stop_fill_requires_reconciliation(
         == OrderMonitorAction
         .RECONCILE_IMMEDIATELY
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
+    assert result.trade_after.status == (
+        TradeStatus.STOP_RECOVERY_REQUIRED
+    )
     assert result.requires_reconciliation is True
     assert (
         result.requires_immediate_protection
