@@ -10,6 +10,21 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    from .broker_snapshot import (
+        DEFAULT_MAXIMUM_SNAPSHOT_AGE,
+        BrokerSnapshot,
+        SnapshotValidation,
+        validate_snapshot,
+    )
+except ImportError:
+    from broker_snapshot import (
+        DEFAULT_MAXIMUM_SNAPSHOT_AGE,
+        BrokerSnapshot,
+        SnapshotValidation,
+        validate_snapshot,
+    )
+
 
 DEFAULT_DB_PATH = Path("data/trade_state.sqlite")
 
@@ -41,6 +56,7 @@ class TradeStatus(str, Enum):
     PROTECTION_PENDING = "protection_pending"
     RECOVERY_REQUIRED = "recovery_required"
     OPEN_UNPROTECTED = "open_unprotected"
+    STOP_LINKED = "stop_linked"
     OPEN_PROTECTED = "open_protected"
     EXIT_PENDING = "exit_pending"
     CLOSED = "closed"
@@ -55,6 +71,7 @@ ACTIVE_STATUSES = {
     TradeStatus.PROTECTION_PENDING,
     TradeStatus.RECOVERY_REQUIRED,
     TradeStatus.OPEN_UNPROTECTED,
+    TradeStatus.STOP_LINKED,
     TradeStatus.OPEN_PROTECTED,
     TradeStatus.EXIT_PENDING,
 }
@@ -77,13 +94,13 @@ ALLOWED_TRANSITIONS = {
         TradeStatus.ENTRY_PARTIALLY_FILLED,
         TradeStatus.PROTECTION_PENDING,
         TradeStatus.RECOVERY_REQUIRED,
-        TradeStatus.OPEN_PROTECTED,
+        TradeStatus.STOP_LINKED,
         TradeStatus.ERROR,
     },
     TradeStatus.PROTECTION_PENDING: {
         TradeStatus.PROTECTION_PENDING,
         TradeStatus.RECOVERY_REQUIRED,
-        TradeStatus.OPEN_PROTECTED,
+        TradeStatus.STOP_LINKED,
         TradeStatus.EXIT_PENDING,
         TradeStatus.CLOSED,
         TradeStatus.ERROR,
@@ -91,16 +108,25 @@ ALLOWED_TRANSITIONS = {
     TradeStatus.RECOVERY_REQUIRED: {
         TradeStatus.RECOVERY_REQUIRED,
         TradeStatus.PROTECTION_PENDING,
-        TradeStatus.OPEN_PROTECTED,
+        TradeStatus.STOP_LINKED,
         TradeStatus.ERROR,
     },
     TradeStatus.OPEN_UNPROTECTED: {
+        TradeStatus.STOP_LINKED,
+        TradeStatus.EXIT_PENDING,
+        TradeStatus.CLOSED,
+        TradeStatus.ERROR,
+    },
+    TradeStatus.STOP_LINKED: {
+        TradeStatus.STOP_LINKED,
         TradeStatus.OPEN_PROTECTED,
+        TradeStatus.OPEN_UNPROTECTED,
         TradeStatus.EXIT_PENDING,
         TradeStatus.CLOSED,
         TradeStatus.ERROR,
     },
     TradeStatus.OPEN_PROTECTED: {
+        TradeStatus.STOP_LINKED,
         TradeStatus.OPEN_UNPROTECTED,
         TradeStatus.EXIT_PENDING,
         TradeStatus.CLOSED,
@@ -142,6 +168,9 @@ class EntryRecoveryStep(str, Enum):
         "ambiguous_state_recorded"
     )
     FLAT_CONFIRMED = "flat_confirmed"
+    PROTECTIVE_STOP_LINKED = (
+        "protective_stop_linked"
+    )
     PROTECTION_CONFIRMED = (
         "protection_confirmed"
     )
@@ -183,6 +212,8 @@ class TradeRecord:
     recovery_failure_reason: str | None
     operator_ack_required: bool
     last_entry_observation_key: str | None
+    last_protection_reconciliation_id: str | None
+    protection_confirmed_at: datetime | None
     created_at: datetime
     updated_at: datetime
     opened_at: datetime | None
@@ -322,6 +353,8 @@ class TradeStateStore:
                     operator_ack_required INTEGER NOT NULL
                         DEFAULT 0,
                     last_entry_observation_key TEXT,
+                    last_protection_reconciliation_id TEXT,
+                    protection_confirmed_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     opened_at TEXT,
@@ -413,6 +446,87 @@ class TradeStateStore:
                     idx_entry_halts_strategy_active
                 ON entry_halts(strategy, active);
 
+                CREATE TABLE IF NOT EXISTS
+                    broker_reconciliation_runs (
+                        reconciliation_id TEXT PRIMARY KEY,
+                        strategy TEXT NOT NULL,
+                        account_fingerprint TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        positions_read_at TEXT NOT NULL,
+                        orders_read_at TEXT NOT NULL,
+                        completed_at TEXT NOT NULL,
+                        positions_complete INTEGER NOT NULL,
+                        orders_complete INTEGER NOT NULL,
+                        snapshot_age_seconds TEXT,
+                        maximum_age_seconds TEXT NOT NULL,
+                        snapshot_digest TEXT NOT NULL,
+                        snapshot_valid INTEGER NOT NULL,
+                        safety_confirmed INTEGER NOT NULL,
+                        result_code TEXT NOT NULL,
+                        failure_reason TEXT,
+                        occurred_at TEXT NOT NULL
+                    );
+
+                CREATE TABLE IF NOT EXISTS
+                    protection_reconciliation_events (
+                        event_id INTEGER PRIMARY KEY
+                            AUTOINCREMENT,
+                        reconciliation_id TEXT NOT NULL,
+                        trade_id TEXT NOT NULL,
+                        linked_stop_order_id TEXT,
+                        position_quantity TEXT,
+                        stop_quantity TEXT,
+                        old_status TEXT NOT NULL,
+                        new_status TEXT NOT NULL,
+                        confirmed INTEGER NOT NULL,
+                        result_code TEXT NOT NULL,
+                        failure_reason TEXT,
+                        occurred_at TEXT NOT NULL,
+                        UNIQUE(reconciliation_id, trade_id),
+                        FOREIGN KEY(trade_id)
+                            REFERENCES trades(trade_id)
+                    );
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_broker_reconciliation_run_update
+                BEFORE UPDATE ON broker_reconciliation_runs
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'broker_reconciliation_runs are append-only'
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_broker_reconciliation_run_delete
+                BEFORE DELETE ON broker_reconciliation_runs
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'broker_reconciliation_runs are append-only'
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_protection_reconciliation_event_update
+                BEFORE UPDATE ON protection_reconciliation_events
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'protection_reconciliation_events are append-only'
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_protection_reconciliation_event_delete
+                BEFORE DELETE ON protection_reconciliation_events
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'protection_reconciliation_events are append-only'
+                    );
+                END;
+
                 CREATE TRIGGER IF NOT EXISTS
                     prevent_entry_recovery_event_update
                 BEFORE UPDATE ON entry_recovery_events
@@ -499,6 +613,9 @@ class TradeStateStore:
                     "INTEGER NOT NULL DEFAULT 0",
                 "last_entry_observation_key":
                     "TEXT",
+                "last_protection_reconciliation_id":
+                    "TEXT",
+                "protection_confirmed_at": "TEXT",
             }
 
             for column, definition in (
@@ -615,6 +732,12 @@ class TradeStateStore:
             ),
             last_entry_observation_key=(
                 row["last_entry_observation_key"]
+            ),
+            last_protection_reconciliation_id=(
+                row["last_protection_reconciliation_id"]
+            ),
+            protection_confirmed_at=parse_datetime(
+                row["protection_confirmed_at"]
             ),
             created_at=datetime.fromisoformat(
                 row["created_at"]
@@ -856,6 +979,63 @@ class TradeStateStore:
                 operator_ack_required=False,
                 occurred_at=timestamp,
             )
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM trades
+                WHERE strategy = ?
+                  AND status IN (?, ?)
+                ORDER BY created_at, trade_id
+                """,
+                (
+                    strategy,
+                    TradeStatus.STOP_LINKED.value,
+                    TradeStatus.OPEN_PROTECTED.value,
+                ),
+            ).fetchall()
+
+        for row in rows:
+            trade = self._row_to_trade(row)
+
+            with self._connect() as connection:
+                self._activate_entry_halt(
+                    connection,
+                    halt_key=f"trade:{trade.trade_id}",
+                    strategy=strategy,
+                    trade_id=trade.trade_id,
+                    reason=(
+                        "Fresh complete broker proof is "
+                        "required for the linked protective "
+                        "stop after startup."
+                    ),
+                    operator_ack_required=False,
+                    occurred_at=timestamp,
+                )
+
+            if trade.status == TradeStatus.OPEN_PROTECTED:
+                self._transition(
+                    trade.trade_id,
+                    new_status=TradeStatus.STOP_LINKED,
+                    event_type=(
+                        "protection_proof_expired_at_startup"
+                    ),
+                    updates={
+                        "protected_quantity": 0,
+                        "required_recovery_action":
+                            EntryRecoveryAction
+                            .RECONCILE_BROKER_STATE.value,
+                        "last_protection_reconciliation_id":
+                            None,
+                        "protection_confirmed_at": None,
+                    },
+                    details={
+                        "reason": (
+                            "Fresh broker proof is required "
+                            "for every startup cycle."
+                        )
+                    },
+                    occurred_at=timestamp,
+                )
 
         return self.get_entry_halt(strategy)
 
@@ -1519,6 +1699,8 @@ class TradeStateStore:
                 "recovery_failure_reason",
                 "operator_ack_required",
                 "last_entry_observation_key",
+                "last_protection_reconciliation_id",
+                "protection_confirmed_at",
             }
 
             unknown_columns = (
@@ -1681,7 +1863,9 @@ class TradeStateStore:
         broker_order_id: str,
         occurred_at: datetime | None = None,
     ) -> TradeRecord:
-        if not broker_order_id.strip():
+        broker_order_id = broker_order_id.strip()
+
+        if not broker_order_id:
             raise TradeStateError(
                 "Protective stop order ID "
                 "is required."
@@ -1689,61 +1873,84 @@ class TradeStateStore:
 
         current = self.get_trade(trade_id)
 
+        if (
+            current.status
+            == TradeStatus.OPEN_PROTECTED
+            and current.protective_stop_order_id
+            == broker_order_id
+        ):
+            return current
+
+        if (
+            current.status == TradeStatus.STOP_LINKED
+            and current.protective_stop_order_id
+            == broker_order_id
+        ):
+            return current
+
         if current.status not in {
             TradeStatus.ENTRY_PARTIALLY_FILLED,
             TradeStatus.PROTECTION_PENDING,
             TradeStatus.RECOVERY_REQUIRED,
             TradeStatus.OPEN_UNPROTECTED,
-            TradeStatus.OPEN_PROTECTED,
+            TradeStatus.STOP_LINKED,
         }:
             raise InvalidTransitionError(
                 "A protective stop can only be "
-                "attached to an open trade."
+                "linked to an open unprotected trade."
             )
 
         if current.filled_quantity <= 0:
             raise TradeStateError(
-                "A protective stop cannot be attached "
+                "A protective stop cannot be linked "
                 "without a positive confirmed fill."
             )
 
-        if (
-            current.status
-            == TradeStatus.OPEN_PROTECTED
-        ):
-            return current
+        timestamp = occurred_at or utc_now()
 
-        updated = self._transition(
+        with self._connect() as connection:
+            self._activate_entry_halt(
+                connection,
+                halt_key=f"trade:{trade_id}",
+                strategy=current.strategy,
+                trade_id=trade_id,
+                reason=(
+                    "A protective stop is linked locally "
+                    "but has not been confirmed by a fresh "
+                    "complete broker snapshot."
+                ),
+                operator_ack_required=False,
+                occurred_at=timestamp,
+            )
+
+        return self._transition(
             trade_id,
-            new_status=(
-                TradeStatus.OPEN_PROTECTED
-            ),
-            event_type=(
-                "protective_stop_attached"
-            ),
+            new_status=TradeStatus.STOP_LINKED,
+            event_type="protective_stop_linked",
             updates={
                 "protective_stop_order_id":
                     broker_order_id,
-                "protected_quantity":
-                    current.filled_quantity,
+                "protected_quantity": 0,
                 "required_recovery_action":
-                    EntryRecoveryAction.NONE.value,
+                    EntryRecoveryAction
+                    .RECONCILE_BROKER_STATE.value,
                 "last_completed_recovery_step":
                     EntryRecoveryStep
-                    .PROTECTION_CONFIRMED.value,
+                    .PROTECTIVE_STOP_LINKED.value,
                 "recovery_failure_reason": None,
                 "operator_ack_required": 0,
+                "last_protection_reconciliation_id":
+                    None,
+                "protection_confirmed_at": None,
             },
             details={
-                "broker_order_id":
-                    broker_order_id,
-                "protected_quantity":
-                    current.filled_quantity,
+                "proof_state": (
+                    "linked_locally_broker_confirmation_"
+                    "required"
+                ),
             },
-            occurred_at=occurred_at,
+            occurred_at=timestamp,
         )
-
-        return updated
 
     def mark_protective_stop_inactive(
         self,
@@ -1764,6 +1971,9 @@ class TradeStateStore:
                 "protective_stop_order_id":
                     None,
                 "protected_quantity": 0,
+                "last_protection_reconciliation_id":
+                    None,
+                "protection_confirmed_at": None,
             },
             details={"reason": reason},
             occurred_at=occurred_at,
@@ -2165,30 +2375,141 @@ class TradeStateStore:
 
         return tuple(issues)
 
-    def apply_startup_reconciliation(
+    def _existing_reconciliation_run(
+        self,
+        reconciliation_id: str,
+    ) -> sqlite3.Row | None:
+        with self._connect() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM broker_reconciliation_runs
+                WHERE reconciliation_id = ?
+                """,
+                (reconciliation_id,),
+            ).fetchone()
+
+    def _record_reconciliation_run(
         self,
         *,
         strategy: str,
-        account_state: Any,
-        occurred_at: datetime | None = None,
-    ) -> tuple[ReconciliationIssue, ...]:
-        strategy = strategy.strip()
-        timestamp = occurred_at or utc_now()
+        snapshot: BrokerSnapshot,
+        validation: SnapshotValidation,
+        safety_confirmed: bool,
+        result_code: str,
+        failure_reason: str | None,
+        occurred_at: datetime,
+    ) -> None:
+        metadata = snapshot.metadata
 
-        if not strategy:
-            raise TradeStateError(
-                "Strategy name is required."
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO broker_reconciliation_runs (
+                    reconciliation_id,
+                    strategy,
+                    account_fingerprint,
+                    started_at,
+                    positions_read_at,
+                    orders_read_at,
+                    completed_at,
+                    positions_complete,
+                    orders_complete,
+                    snapshot_age_seconds,
+                    maximum_age_seconds,
+                    snapshot_digest,
+                    snapshot_valid,
+                    safety_confirmed,
+                    result_code,
+                    failure_reason,
+                    occurred_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    metadata.reconciliation_id,
+                    strategy,
+                    metadata.account_fingerprint,
+                    metadata.started_at.isoformat(),
+                    metadata.positions_read_at.isoformat(),
+                    metadata.orders_read_at.isoformat(),
+                    metadata.completed_at.isoformat(),
+                    int(metadata.positions_complete),
+                    int(metadata.orders_complete),
+                    (
+                        serialize_decimal(
+                            validation
+                            .snapshot_age_seconds
+                        )
+                    ),
+                    serialize_decimal(
+                        validation
+                        .maximum_age_seconds
+                    ),
+                    validation.snapshot_digest,
+                    int(validation.valid),
+                    int(safety_confirmed),
+                    result_code,
+                    failure_reason,
+                    occurred_at.isoformat(),
+                ),
             )
 
-        recovery_statuses = {
-            TradeStatus.ENTRY_PARTIALLY_FILLED,
-            TradeStatus.PROTECTION_PENDING,
-            TradeStatus.RECOVERY_REQUIRED,
-        }
-        protectable_statuses = recovery_statuses | {
-            TradeStatus.OPEN_UNPROTECTED,
-            TradeStatus.OPEN_PROTECTED,
-        }
+    def _record_protection_reconciliation_event(
+        self,
+        *,
+        reconciliation_id: str,
+        trade: TradeRecord,
+        new_status: TradeStatus,
+        confirmed: bool,
+        result_code: str,
+        failure_reason: str | None,
+        position_quantity: Decimal | None,
+        stop_quantity: Decimal | None,
+        occurred_at: datetime,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO
+                    protection_reconciliation_events (
+                        reconciliation_id,
+                        trade_id,
+                        linked_stop_order_id,
+                        position_quantity,
+                        stop_quantity,
+                        old_status,
+                        new_status,
+                        confirmed,
+                        result_code,
+                        failure_reason,
+                        occurred_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reconciliation_id,
+                    trade.trade_id,
+                    trade.protective_stop_order_id,
+                    serialize_decimal(position_quantity),
+                    serialize_decimal(stop_quantity),
+                    trade.status.value,
+                    new_status.value,
+                    int(confirmed),
+                    result_code,
+                    failure_reason,
+                    occurred_at.isoformat(),
+                ),
+            )
+
+    @staticmethod
+    def _protection_reconciliation_outcome(
+        trade: TradeRecord,
+        account_state: Any,
+    ) -> dict[str, Any]:
         active_entry_states = {
             "new",
             "queued",
@@ -2205,15 +2526,264 @@ class TradeStateStore:
             "unconfirmed",
             "locating",
         }
+        position = next(
+            (
+                item
+                for item in account_state.positions
+                if (
+                    item.symbol == trade.symbol
+                    and item.quantity != 0
+                )
+            ),
+            None,
+        )
+        entry_still_open = any(
+            order.order_id == trade.entry_order_id
+            and order.side.strip().lower() == "buy"
+            and order.state.strip().lower()
+            in active_entry_states
+            for order in account_state.open_orders
+        )
 
-        broker_positions = {
-            position.symbol: position
-            for position in account_state.positions
-            if position.quantity != 0
+        if position is None and not entry_still_open:
+            return {
+                "confirmed": True,
+                "flat": True,
+                "result_code": "flat_confirmed",
+                "failure_reason": None,
+                "position_quantity": None,
+                "stop_quantity": None,
+            }
+
+        def failure(
+            code: str,
+            reason: str,
+            *,
+            stop_quantity: Decimal | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "confirmed": False,
+                "flat": False,
+                "result_code": code,
+                "failure_reason": reason,
+                "position_quantity": (
+                    position.quantity
+                    if position is not None
+                    else None
+                ),
+                "stop_quantity": stop_quantity,
+            }
+
+        if position is None:
+            return failure(
+                "broker_position_missing",
+                "The broker position is missing while the linked entry order remains open.",
+            )
+
+        if entry_still_open:
+            return failure(
+                "entry_order_still_open",
+                "The linked entry order still has an active broker remainder.",
+            )
+
+        if trade.filled_quantity <= 0:
+            return failure(
+                "invalid_local_fill_quantity",
+                "Local filled quantity must be positive before protection can be confirmed.",
+            )
+
+        if position.quantity != Decimal(
+            trade.filled_quantity
+        ):
+            return failure(
+                "position_quantity_mismatch",
+                "Broker position quantity does not match the local filled quantity.",
+            )
+
+        if not trade.protective_stop_order_id:
+            return failure(
+                "missing_linked_stop",
+                "No protective stop order is linked locally.",
+            )
+
+        linked_orders = [
+            order
+            for order in account_state.open_orders
+            if order.order_id
+            == trade.protective_stop_order_id
+        ]
+
+        if len(linked_orders) != 1:
+            return failure(
+                (
+                    "linked_stop_missing"
+                    if not linked_orders
+                    else "duplicate_linked_stop"
+                ),
+                (
+                    "The linked protective stop is not present in the broker snapshot."
+                    if not linked_orders
+                    else "The broker snapshot contains duplicate linked stop evidence."
+                ),
+            )
+
+        stop = linked_orders[0]
+        stop_quantity = stop.quantity
+
+        checks = (
+            (
+                stop.symbol == trade.symbol,
+                "stop_symbol_mismatch",
+                "Linked stop symbol does not match the trade.",
+            ),
+            (
+                stop.side.strip().lower() == "sell",
+                "stop_side_mismatch",
+                "Linked stop is not a sell order.",
+            ),
+            (
+                stop.trigger.strip().lower() == "stop",
+                "stop_trigger_mismatch",
+                "Linked order is not stop-triggered.",
+            ),
+            (
+                stop.order_type.strip().lower()
+                == "stop_market",
+                "stop_type_mismatch",
+                "Linked stop is not a stop-market order.",
+            ),
+            (
+                stop.state.strip().lower()
+                in valid_stop_states,
+                "stop_state_invalid",
+                "Linked stop is not in a valid active broker state.",
+            ),
+            (
+                stop.stop_price is not None
+                and stop.stop_price > 0,
+                "stop_price_invalid",
+                "Linked stop does not have a valid positive stop price.",
+            ),
+            (
+                stop.cumulative_quantity == 0,
+                "stop_partially_filled",
+                "A partially filled protective stop cannot prove full active protection.",
+            ),
+            (
+                stop.quantity == position.quantity,
+                "stop_quantity_mismatch",
+                "Linked stop quantity does not cover the full broker position.",
+            ),
+            (
+                stop.placed_agent.strip().lower()
+                == "agentic",
+                "stop_not_agentic",
+                "Linked stop was not placed by the agentic broker channel.",
+            ),
+        )
+
+        for passed, code, reason in checks:
+            if not passed:
+                return failure(
+                    code,
+                    reason,
+                    stop_quantity=stop_quantity,
+                )
+
+        conflicting_sells = [
+            order
+            for order in account_state.open_orders
+            if (
+                order.order_id != stop.order_id
+                and order.symbol == trade.symbol
+                and order.side.strip().lower()
+                == "sell"
+                and order.state.strip().lower()
+                in active_entry_states
+            )
+        ]
+
+        if conflicting_sells:
+            return failure(
+                "conflicting_sell_order",
+                "Another active sell order conflicts with exact protective-stop proof.",
+                stop_quantity=stop_quantity,
+            )
+
+        return {
+            "confirmed": True,
+            "flat": False,
+            "result_code": "full_protection_confirmed",
+            "failure_reason": None,
+            "position_quantity": position.quantity,
+            "stop_quantity": stop_quantity,
         }
 
-        broker_orders = tuple(
-            account_state.open_orders
+    def apply_startup_reconciliation(
+        self,
+        *,
+        strategy: str,
+        snapshot: BrokerSnapshot,
+        occurred_at: datetime | None = None,
+        maximum_snapshot_age: timedelta = (
+            DEFAULT_MAXIMUM_SNAPSHOT_AGE
+        ),
+    ) -> tuple[ReconciliationIssue, ...]:
+        strategy = strategy.strip()
+        timestamp = occurred_at or utc_now()
+
+        if not strategy:
+            raise TradeStateError(
+                "Strategy name is required."
+            )
+
+        if not isinstance(snapshot, BrokerSnapshot):
+            self.begin_startup_reconciliation(
+                strategy,
+                occurred_at=timestamp,
+            )
+            raise TradeStateError(
+                "A BrokerSnapshot with durable proof "
+                "metadata is required for startup "
+                "reconciliation."
+            )
+
+        validation = validate_snapshot(
+            snapshot,
+            evaluated_at=timestamp,
+            maximum_age=maximum_snapshot_age,
+        )
+        metadata = snapshot.metadata
+        existing = self._existing_reconciliation_run(
+            metadata.reconciliation_id
+        )
+
+        if existing is not None:
+            if (
+                existing["strategy"] != strategy
+                or existing["snapshot_digest"]
+                != validation.snapshot_digest
+                or existing["account_fingerprint"]
+                != metadata.account_fingerprint
+            ):
+                self.begin_startup_reconciliation(
+                    strategy,
+                    occurred_at=timestamp,
+                )
+                raise TradeStateError(
+                    "A reconciliation ID was reused with "
+                    "different broker evidence; trading "
+                    "remains halted."
+                )
+
+            return self.startup_reconciliation_issues(
+                strategy=strategy,
+                account_state=snapshot.account_state,
+            )
+
+        self.begin_startup_reconciliation(
+            strategy,
+            occurred_at=timestamp,
         )
 
         with self._connect() as connection:
@@ -2238,26 +2808,106 @@ class TradeStateStore:
             for row in halted_rows
         )
 
-        for trade in halted_trades:
-            position = broker_positions.get(
-                trade.symbol
+        if not validation.valid:
+            self._record_reconciliation_run(
+                strategy=strategy,
+                snapshot=snapshot,
+                validation=validation,
+                safety_confirmed=False,
+                result_code=validation.result_code,
+                failure_reason=(
+                    validation.failure_reason
+                ),
+                occurred_at=timestamp,
             )
 
-            entry_still_open = any(
-                order.order_id
-                == trade.entry_order_id
-                and order.side == "buy"
-                and order.state.strip().lower()
-                in active_entry_states
-                for order in broker_orders
+            for trade in halted_trades:
+                self._record_protection_reconciliation_event(
+                    reconciliation_id=(
+                        metadata.reconciliation_id
+                    ),
+                    trade=trade,
+                    new_status=trade.status,
+                    confirmed=False,
+                    result_code=validation.result_code,
+                    failure_reason=(
+                        validation.failure_reason
+                    ),
+                    position_quantity=None,
+                    stop_quantity=None,
+                    occurred_at=timestamp,
+                )
+
+            issues = list(
+                self.startup_reconciliation_issues(
+                    strategy=strategy,
+                    account_state=snapshot.account_state,
+                )
             )
+            issues.append(
+                ReconciliationIssue(
+                    severity="critical",
+                    code=validation.result_code,
+                    message=(
+                        validation.failure_reason
+                        or "Broker snapshot is invalid."
+                    ),
+                )
+            )
+            return tuple(issues)
+
+        outcomes = tuple(
+            (
+                trade,
+                self._protection_reconciliation_outcome(
+                    trade,
+                    snapshot.account_state,
+                ),
+            )
+            for trade in halted_trades
+        )
+        safety_confirmed = all(
+            outcome["confirmed"]
+            for _, outcome in outcomes
+        )
+
+        self._record_reconciliation_run(
+            strategy=strategy,
+            snapshot=snapshot,
+            validation=validation,
+            safety_confirmed=safety_confirmed,
+            result_code=(
+                "safety_confirmed"
+                if safety_confirmed
+                else "safety_unresolved"
+            ),
+            failure_reason=(
+                None
+                if safety_confirmed
+                else (
+                    "At least one halted trade was not "
+                    "proved flat or fully protected."
+                )
+            ),
+            occurred_at=timestamp,
+        )
+
+        for trade, outcome in outcomes:
+            new_status = trade.status
 
             if (
-                position is None
-                and not entry_still_open
+                outcome["confirmed"]
+                and outcome["flat"]
             ):
-                if trade.status in recovery_statuses:
-                    self._transition(
+                if trade.status in {
+                    TradeStatus.ENTRY_PARTIALLY_FILLED,
+                    TradeStatus.PROTECTION_PENDING,
+                    TradeStatus.RECOVERY_REQUIRED,
+                    TradeStatus.OPEN_UNPROTECTED,
+                    TradeStatus.STOP_LINKED,
+                    TradeStatus.OPEN_PROTECTED,
+                }:
+                    updated = self._transition(
                         trade.trade_id,
                         new_status=TradeStatus.ERROR,
                         event_type=(
@@ -2272,15 +2922,22 @@ class TradeStateStore:
                                 EntryRecoveryStep
                                 .FLAT_CONFIRMED.value,
                             "operator_ack_required": 0,
+                            "last_protection_reconciliation_id":
+                                metadata.reconciliation_id,
+                            "protection_confirmed_at":
+                                timestamp,
                         },
                         details={
+                            "reconciliation_id":
+                                metadata.reconciliation_id,
                             "proof": (
                                 "No broker position and no "
                                 "open linked entry order."
-                            )
+                            ),
                         },
                         occurred_at=timestamp,
                     )
+                    new_status = updated.status
 
                 with self._connect() as connection:
                     self._clear_entry_halt(
@@ -2291,70 +2948,37 @@ class TradeStateStore:
                         occurred_at=timestamp,
                     )
 
-                continue
+            elif outcome["confirmed"]:
+                linked = trade
 
-            if (
-                position is None
-                or entry_still_open
-                or position.quantity
-                != Decimal(trade.filled_quantity)
-                or trade.filled_quantity <= 0
-                or trade.status
-                not in protectable_statuses
-                or not trade.protective_stop_order_id
-            ):
-                continue
+                if trade.status != TradeStatus.STOP_LINKED:
+                    linked = self._transition(
+                        trade.trade_id,
+                        new_status=TradeStatus.STOP_LINKED,
+                        event_type=(
+                            "protective_stop_linked_for_"
+                            "reconciliation"
+                        ),
+                        updates={
+                            "protected_quantity": 0,
+                        },
+                        details={
+                            "reconciliation_id":
+                                metadata.reconciliation_id,
+                        },
+                        occurred_at=timestamp,
+                    )
 
-            matching_stops = [
-                order
-                for order in broker_orders
-                if (
-                    order.order_id
-                    == trade.protective_stop_order_id
-                    and order.symbol == trade.symbol
-                    and order.side == "sell"
-                    and order.trigger == "stop"
-                    and order.order_type
-                    == "stop_market"
-                    and order.state.strip().lower()
-                    in valid_stop_states
-                    and order.cumulative_quantity == 0
-                    and order.quantity
-                    == position.quantity
-                    and order.placed_agent
-                    == "agentic"
-                )
-            ]
-
-            if len(matching_stops) != 1:
-                continue
-
-            if (
-                trade.status
-                == TradeStatus.OPEN_PROTECTED
-            ):
-                if (
-                    trade.protected_quantity
-                    != trade.filled_quantity
-                ):
-                    continue
-            else:
-                stop_order = matching_stops[0]
-
-                self._transition(
-                    trade.trade_id,
-                    new_status=(
-                        TradeStatus.OPEN_PROTECTED
-                    ),
+                updated = self._transition(
+                    linked.trade_id,
+                    new_status=TradeStatus.OPEN_PROTECTED,
                     event_type=(
-                        "entry_recovery_protection_"
+                        "broker_snapshot_protection_"
                         "confirmed"
                     ),
                     updates={
-                        "protective_stop_order_id":
-                            stop_order.order_id,
                         "protected_quantity":
-                            trade.filled_quantity,
+                            linked.filled_quantity,
                         "required_recovery_action":
                             EntryRecoveryAction
                             .NONE.value,
@@ -2363,25 +2987,53 @@ class TradeStateStore:
                             .PROTECTION_CONFIRMED.value,
                         "recovery_failure_reason": None,
                         "operator_ack_required": 0,
+                        "last_protection_reconciliation_id":
+                            metadata.reconciliation_id,
+                        "protection_confirmed_at":
+                            timestamp,
                     },
                     details={
+                        "reconciliation_id":
+                            metadata.reconciliation_id,
                         "protected_quantity":
-                            trade.filled_quantity,
+                            linked.filled_quantity,
                     },
                     occurred_at=timestamp,
                 )
+                new_status = updated.status
 
-            with self._connect() as connection:
-                self._clear_entry_halt(
-                    connection,
-                    halt_key=(
-                        f"trade:{trade.trade_id}"
-                    ),
-                    occurred_at=timestamp,
-                )
+                with self._connect() as connection:
+                    self._clear_entry_halt(
+                        connection,
+                        halt_key=(
+                            f"trade:{trade.trade_id}"
+                        ),
+                        occurred_at=timestamp,
+                    )
+
+            self._record_protection_reconciliation_event(
+                reconciliation_id=(
+                    metadata.reconciliation_id
+                ),
+                trade=trade,
+                new_status=new_status,
+                confirmed=outcome["confirmed"],
+                result_code=outcome["result_code"],
+                failure_reason=(
+                    outcome["failure_reason"]
+                ),
+                position_quantity=(
+                    outcome["position_quantity"]
+                ),
+                stop_quantity=(
+                    outcome["stop_quantity"]
+                ),
+                occurred_at=timestamp,
+            )
+
         issues = self.startup_reconciliation_issues(
             strategy=strategy,
-            account_state=account_state,
+            account_state=snapshot.account_state,
         )
 
         with self._connect() as connection:
@@ -2398,7 +3050,6 @@ class TradeStateStore:
                     (strategy,),
                 ).fetchone()
             )
-
             critical_issue = any(
                 issue.severity == "critical"
                 for issue in issues
@@ -2424,14 +3075,11 @@ class TradeStateStore:
                         "prove all positions flat or "
                         "fully protected."
                     ),
-                    operator_ack_required=(
-                        critical_issue
-                    ),
+                    operator_ack_required=critical_issue,
                     occurred_at=timestamp,
                 )
 
         return issues
-
     def reconcile(
         self,
         account_state: Any,
@@ -2462,6 +3110,7 @@ class TradeStateStore:
                     .PROTECTION_PENDING,
                     TradeStatus.RECOVERY_REQUIRED,
                     TradeStatus.OPEN_UNPROTECTED,
+                    TradeStatus.STOP_LINKED,
                     TradeStatus.OPEN_PROTECTED,
                     TradeStatus.EXIT_PENDING,
                 }
@@ -2479,6 +3128,7 @@ class TradeStateStore:
                 TradeStatus.ENTRY_PARTIALLY_FILLED,
                 TradeStatus.PROTECTION_PENDING,
                 TradeStatus.RECOVERY_REQUIRED,
+                TradeStatus.STOP_LINKED,
             }:
                 issues.append(
                     ReconciliationIssue(
@@ -2494,17 +3144,23 @@ class TradeStateStore:
                     )
                 )
 
-            if (
-                trade.status
-                == TradeStatus.OPEN_UNPROTECTED
-            ):
+            if trade.status in {
+                TradeStatus.OPEN_UNPROTECTED,
+                TradeStatus.STOP_LINKED,
+            }:
                 issues.append(
                     ReconciliationIssue(
                         severity="critical",
-                        code="open_unprotected",
+                        code=(
+                            "linked_stop_unconfirmed"
+                            if trade.status
+                            == TradeStatus.STOP_LINKED
+                            else "open_unprotected"
+                        ),
                         message=(
                             "Local trade is open without "
-                            "a confirmed protective stop."
+                            "fresh complete broker proof "
+                            "of a protective stop."
                         ),
                         symbol=trade.symbol,
                         trade_id=trade.trade_id,
@@ -2518,6 +3174,26 @@ class TradeStateStore:
                 stop_id = (
                     trade.protective_stop_order_id
                 )
+
+                if (
+                    not trade
+                    .last_protection_reconciliation_id
+                    or trade.protection_confirmed_at
+                    is None
+                ):
+                    issues.append(
+                        ReconciliationIssue(
+                            severity="critical",
+                            code="protection_proof_missing",
+                            message=(
+                                "Protected local trade has "
+                                "no durable broker snapshot "
+                                "proof."
+                            ),
+                            symbol=trade.symbol,
+                            trade_id=trade.trade_id,
+                        )
+                    )
 
                 if not stop_id:
                     issues.append(
@@ -2641,6 +3317,7 @@ class TradeStateStore:
                     .PROTECTION_PENDING,
                     TradeStatus.RECOVERY_REQUIRED,
                     TradeStatus.OPEN_UNPROTECTED,
+                    TradeStatus.STOP_LINKED,
                     TradeStatus.OPEN_PROTECTED,
                     TradeStatus.EXIT_PENDING,
                 }

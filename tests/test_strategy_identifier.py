@@ -7,6 +7,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.snapshot_helpers import (
+    apply_broker_snapshot,
+    make_broker_snapshot,
+)
+
 from src.account_state import (
     AccountInfo,
     AccountState,
@@ -41,6 +46,17 @@ class FakeAccountReader:
     ) -> AccountState:
         self.calls += 1
         return self.state
+
+    async def read_snapshot(
+        self,
+        *,
+        account_number: str | None = None,
+    ):
+        return make_broker_snapshot(
+            await self.read(
+                account_number=account_number
+            )
+        )
 
 
 class ForbiddenOrderMonitor:
@@ -168,18 +184,10 @@ def close_trade(
             seconds=3
         ),
     )
-    store.begin_startup_reconciliation(
-        strategy,
-        occurred_at=occurred_at + timedelta(
-            seconds=4
-        ),
-    )
-    store.apply_startup_reconciliation(
+    apply_broker_snapshot(
+        store,
         strategy=strategy,
         account_state=make_account_state(),
-        occurred_at=occurred_at + timedelta(
-            seconds=5
-        ),
     )
 
 

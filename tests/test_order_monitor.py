@@ -5,6 +5,8 @@ from decimal import Decimal
 
 import pytest
 
+from tests.snapshot_helpers import confirm_linked_stop
+
 from src.account_state import EquityOrder
 from src.order_monitor import (
     MonitoredOrderRole,
@@ -154,10 +156,11 @@ def make_open_protected_trade(
 ):
     trade = make_open_unprotected_trade(store)
 
-    return store.attach_protective_stop(
+    trade = store.attach_protective_stop(
         trade.trade_id,
         broker_order_id="stop-1",
     )
+    return confirm_linked_stop(store, trade)
 
 
 def make_exit_pending_trade(

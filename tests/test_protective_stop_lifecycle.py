@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from tests.snapshot_helpers import confirm_linked_stop
+
 from src.account_state import EquityOrder
 from src.protective_stop_lifecycle import (
     ProtectiveStopAction,
@@ -42,10 +44,11 @@ def make_protected_trade(
         average_entry_price=Decimal("100"),
     )
 
-    return store.attach_protective_stop(
+    trade = store.attach_protective_stop(
         trade.trade_id,
         broker_order_id="stop-1",
     )
+    return confirm_linked_stop(store, trade)
 
 
 def make_stop_order(
@@ -106,7 +109,7 @@ def test_active_stop_waits_without_ledger_change(
         result.decision.position_may_be_unprotected
         is False
     )
-    assert store.count_trade_events() == 4
+    assert store.count_trade_events() == 5
 
 
 def test_full_stop_fill_requires_average_price(
@@ -191,7 +194,7 @@ def test_full_stop_fill_closes_local_trade(
         .protective_stop_order_id
         is None
     )
-    assert store.count_trade_events() == 5
+    assert store.count_trade_events() == 6
 
 
 def test_cancelled_stop_marks_trade_unprotected(

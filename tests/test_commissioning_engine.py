@@ -4,6 +4,8 @@ from decimal import Decimal
 
 import pytest
 
+from tests.snapshot_helpers import make_broker_snapshot
+
 from src.account_state import (
     AccountInfo,
     AccountState,
@@ -35,6 +37,17 @@ class FakeAccountReader:
             account_number
         )
         return self.state
+
+    async def read_snapshot(
+        self,
+        *,
+        account_number: str | None = None,
+    ):
+        return make_broker_snapshot(
+            await self.read(
+                account_number=account_number
+            )
+        )
 
 
 def make_account_state(

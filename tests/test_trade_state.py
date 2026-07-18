@@ -6,6 +6,11 @@ from decimal import Decimal
 
 import pytest
 
+from tests.snapshot_helpers import (
+    apply_broker_snapshot,
+    make_broker_snapshot,
+)
+
 from src.account_state import (
     AccountInfo,
     AccountState,
@@ -290,6 +295,25 @@ def test_complete_trade_lifecycle_and_pnl(
         occurred_at=TIMESTAMP,
     )
 
+    assert trade.status == TradeStatus.STOP_LINKED
+    assert trade.protected_quantity == 0
+    assert store.is_entry_halted("orb_v0")
+
+    apply_broker_snapshot(
+        store,
+        strategy="orb_v0",
+        account_state=make_account_state(
+            positions=(make_position("AAPL"),),
+            orders=(
+                make_stop_order(
+                    order_id="stop-1",
+                    symbol="AAPL",
+                ),
+            ),
+        ),
+    )
+    trade = store.get_trade(trade.trade_id)
+
     assert (
         trade.status
         == TradeStatus.OPEN_PROTECTED
@@ -334,7 +358,7 @@ def test_complete_trade_lifecycle_and_pnl(
     )
 
     assert store.list_active_trades() == ()
-    assert store.count_trade_events() == 6
+    assert store.count_trade_events() == 7
 
 
 def test_partial_entry_fill_fails_closed(
@@ -512,7 +536,7 @@ def close_test_trade(
     )
     store.apply_startup_reconciliation(
         strategy="orb_v0",
-        account_state=make_account_state(),
+        snapshot=make_broker_snapshot(make_account_state()),
     )
     return closed
 
@@ -590,6 +614,12 @@ def test_reconciliation_accepts_matching_protected_trade(
         ),
     )
 
+    apply_broker_snapshot(
+        store,
+        strategy="orb_v0",
+        account_state=account_state,
+    )
+
     assert store.reconcile(
         account_state
     ) == ()
@@ -631,7 +661,7 @@ def test_reconciliation_detects_mismatches(
         for issue in issues
     }
 
-    assert "stop_not_open_at_broker" in codes
+    assert "linked_stop_unconfirmed" in codes
     assert "local_position_missing" in codes
     assert "untracked_position" in codes
     assert "untracked_entry_order" in codes
@@ -642,7 +672,7 @@ def test_reconciliation_detects_mismatches(
         if issue.severity == "critical"
     }
 
-    assert "stop_not_open_at_broker" in (
+    assert "linked_stop_unconfirmed" in (
         critical_codes
     )
     assert "local_position_missing" in (
