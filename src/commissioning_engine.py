@@ -74,6 +74,7 @@ class CommissioningReport:
     ]
     warnings: tuple[str, ...]
     live_order_capable: bool = False
+    durable_entry_halt: bool = False
 
     @property
     def has_critical_reconciliation_issue(
@@ -91,6 +92,7 @@ class CommissioningReport:
             and self.account_state.account.state
             == "active"
             and not self.live_order_capable
+            and not self.durable_entry_halt
             and not (
                 self.has_critical_reconciliation_issue
             )
@@ -165,12 +167,20 @@ class CommissioningEngine:
         return sum(
             1
             for trade in active_trades
-            if trade.status
-            in {
-                TradeStatus.OPEN_UNPROTECTED,
-                TradeStatus.OPEN_PROTECTED,
-                TradeStatus.EXIT_PENDING,
-            }
+            if (
+                trade.filled_quantity > 0
+                and trade.status
+                in {
+                    TradeStatus
+                    .ENTRY_PARTIALLY_FILLED,
+                    TradeStatus
+                    .PROTECTION_PENDING,
+                    TradeStatus.RECOVERY_REQUIRED,
+                    TradeStatus.OPEN_UNPROTECTED,
+                    TradeStatus.OPEN_PROTECTED,
+                    TradeStatus.EXIT_PENDING,
+                }
+            )
         )
 
     async def run(
@@ -178,12 +188,31 @@ class CommissioningEngine:
         *,
         account_number: str | None = None,
     ) -> CommissioningReport:
+        self.trade_store.begin_startup_reconciliation(
+            self.strategy_name
+        )
+
         account_state = await self.account_reader.read(
             account_number=account_number
         )
 
         started_at = datetime.now(EASTERN)
         session_date = started_at.date()
+
+        reconciliation_issues = (
+            self.trade_store
+            .apply_startup_reconciliation(
+                strategy=self.strategy_name,
+                account_state=account_state,
+                occurred_at=started_at,
+            )
+        )
+
+        durable_entry_halt = (
+            self.trade_store.is_entry_halted(
+                self.strategy_name
+            )
+        )
 
         active_trades = (
             self.trade_store.list_active_trades()
@@ -208,12 +237,6 @@ class CommissioningEngine:
         strategy_drawdown = (
             self.trade_store.current_drawdown(
                 strategy=self.strategy_name
-            )
-        )
-
-        reconciliation_issues = (
-            self.trade_store.reconcile(
-                account_state
             )
         )
 
@@ -271,7 +294,10 @@ class CommissioningEngine:
             for issue in reconciliation_issues
         )
 
-        if critical_reconciliation:
+        if (
+            critical_reconciliation
+            or durable_entry_halt
+        ):
             dry_run_plan = DryRunPlan(
                 symbol="",
                 approved=False,
@@ -344,6 +370,9 @@ class CommissioningEngine:
             strategy_drawdown=strategy_drawdown,
             trading_enabled=False,
             manual_kill_switch=False,
+            durable_entry_halt=(
+                durable_entry_halt
+            ),
         )
 
         watchdog_decision = self.watchdog.evaluate(
@@ -370,6 +399,9 @@ class CommissioningEngine:
             ),
             warnings=tuple(warnings),
             live_order_capable=False,
+            durable_entry_halt=(
+                durable_entry_halt
+            ),
         )
 
 

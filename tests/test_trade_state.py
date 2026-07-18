@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime, timezone
@@ -95,7 +95,7 @@ def make_account_state(
     return AccountState(
         account=AccountInfo(
             account_number="TEST12345678",
-            masked_account_number="••••5678",
+            masked_account_number="â€¢â€¢â€¢â€¢5678",
             brokerage_account_type="individual",
             trading_type="cash",
             nickname="Test",
@@ -281,7 +281,7 @@ def test_complete_trade_lifecycle_and_pnl(
 
     assert (
         trade.status
-        == TradeStatus.OPEN_UNPROTECTED
+        == TradeStatus.PROTECTION_PENDING
     )
 
     trade = store.attach_protective_stop(

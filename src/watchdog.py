@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
@@ -42,6 +42,7 @@ class SystemSnapshot:
 
     trading_enabled: bool
     manual_kill_switch: bool = False
+    durable_entry_halt: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,20 @@ class Watchdog:
                 close_positions=True,
             )
 
+        if snapshot.durable_entry_halt:
+            return WatchdogDecision(
+                healthy=False,
+                action=(
+                    WatchdogAction.BLOCK_NEW_ENTRIES
+                ),
+                reason=(
+                    "A durable entry recovery or "
+                    "startup halt is active."
+                ),
+                block_new_entries=True,
+                cancel_entry_orders=True,
+                close_positions=False,
+            )
         if not snapshot.trading_enabled:
             return WatchdogDecision(
                 healthy=False,

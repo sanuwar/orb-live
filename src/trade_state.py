@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sqlite3
@@ -30,9 +30,16 @@ class InvalidTransitionError(TradeStateError):
     pass
 
 
+class EntryHaltedError(TradeStateError):
+    pass
+
+
 class TradeStatus(str, Enum):
     RESERVED = "reserved"
     ENTRY_PENDING = "entry_pending"
+    ENTRY_PARTIALLY_FILLED = "entry_partially_filled"
+    PROTECTION_PENDING = "protection_pending"
+    RECOVERY_REQUIRED = "recovery_required"
     OPEN_UNPROTECTED = "open_unprotected"
     OPEN_PROTECTED = "open_protected"
     EXIT_PENDING = "exit_pending"
@@ -44,6 +51,9 @@ class TradeStatus(str, Enum):
 ACTIVE_STATUSES = {
     TradeStatus.RESERVED,
     TradeStatus.ENTRY_PENDING,
+    TradeStatus.ENTRY_PARTIALLY_FILLED,
+    TradeStatus.PROTECTION_PENDING,
+    TradeStatus.RECOVERY_REQUIRED,
     TradeStatus.OPEN_UNPROTECTED,
     TradeStatus.OPEN_PROTECTED,
     TradeStatus.EXIT_PENDING,
@@ -57,8 +67,31 @@ ALLOWED_TRANSITIONS = {
         TradeStatus.ERROR,
     },
     TradeStatus.ENTRY_PENDING: {
-        TradeStatus.OPEN_UNPROTECTED,
+        TradeStatus.ENTRY_PARTIALLY_FILLED,
+        TradeStatus.PROTECTION_PENDING,
+        TradeStatus.RECOVERY_REQUIRED,
         TradeStatus.CANCELLED,
+        TradeStatus.ERROR,
+    },
+    TradeStatus.ENTRY_PARTIALLY_FILLED: {
+        TradeStatus.ENTRY_PARTIALLY_FILLED,
+        TradeStatus.PROTECTION_PENDING,
+        TradeStatus.RECOVERY_REQUIRED,
+        TradeStatus.OPEN_PROTECTED,
+        TradeStatus.ERROR,
+    },
+    TradeStatus.PROTECTION_PENDING: {
+        TradeStatus.PROTECTION_PENDING,
+        TradeStatus.RECOVERY_REQUIRED,
+        TradeStatus.OPEN_PROTECTED,
+        TradeStatus.EXIT_PENDING,
+        TradeStatus.CLOSED,
+        TradeStatus.ERROR,
+    },
+    TradeStatus.RECOVERY_REQUIRED: {
+        TradeStatus.RECOVERY_REQUIRED,
+        TradeStatus.PROTECTION_PENDING,
+        TradeStatus.OPEN_PROTECTED,
         TradeStatus.ERROR,
     },
     TradeStatus.OPEN_UNPROTECTED: {
@@ -85,6 +118,43 @@ ALLOWED_TRANSITIONS = {
 }
 
 
+class EntryRecoveryAction(str, Enum):
+    NONE = "none"
+    WAIT = "wait"
+    CANCEL_REMAINDER_THEN_PROTECT = (
+        "cancel_remainder_then_protect"
+    )
+    PROTECT_FILLED_QUANTITY = (
+        "protect_filled_quantity"
+    )
+    RECONCILE_BROKER_STATE = (
+        "reconcile_broker_state"
+    )
+
+
+class EntryRecoveryStep(str, Enum):
+    OBSERVATION_RECORDED = "observation_recorded"
+    PARTIAL_FILL_CLASSIFIED = (
+        "partial_fill_classified"
+    )
+    FULL_FILL_CLASSIFIED = "full_fill_classified"
+    AMBIGUOUS_STATE_RECORDED = (
+        "ambiguous_state_recorded"
+    )
+    FLAT_CONFIRMED = "flat_confirmed"
+    PROTECTION_CONFIRMED = (
+        "protection_confirmed"
+    )
+
+
+@dataclass(frozen=True)
+class EntryHaltState:
+    strategy: str
+    active: bool
+    reasons: tuple[str, ...]
+    operator_ack_required: bool
+
+
 @dataclass(frozen=True)
 class TradeRecord:
     trade_id: str
@@ -104,11 +174,35 @@ class TradeRecord:
     protective_stop_order_id: str | None
     exit_order_id: str | None
     close_reason: str | None
+    protected_quantity: int
+    last_broker_observation_at: datetime | None
+    required_recovery_action: EntryRecoveryAction
+    last_completed_recovery_step: str | None
+    recovery_ref_id: str | None
+    recovery_attempt_count: int
+    recovery_failure_reason: str | None
+    operator_ack_required: bool
+    last_entry_observation_key: str | None
     created_at: datetime
     updated_at: datetime
     opened_at: datetime | None
     closed_at: datetime | None
     version: int
+
+    @property
+    def remaining_entry_quantity(self) -> int:
+        return max(
+            0,
+            self.quantity - self.filled_quantity,
+        )
+
+    @property
+    def unprotected_quantity(self) -> int:
+        return max(
+            0,
+            self.filled_quantity
+            - self.protected_quantity,
+        )
 
 
 @dataclass(frozen=True)
@@ -215,6 +309,19 @@ class TradeStateStore:
                     protective_stop_order_id TEXT,
                     exit_order_id TEXT,
                     close_reason TEXT,
+                    protected_quantity INTEGER NOT NULL
+                        DEFAULT 0,
+                    last_broker_observation_at TEXT,
+                    required_recovery_action TEXT NOT NULL
+                        DEFAULT 'none',
+                    last_completed_recovery_step TEXT,
+                    recovery_ref_id TEXT,
+                    recovery_attempt_count INTEGER NOT NULL
+                        DEFAULT 0,
+                    recovery_failure_reason TEXT,
+                    operator_ack_required INTEGER NOT NULL
+                        DEFAULT 0,
+                    last_entry_observation_key TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     opened_at TEXT,
@@ -263,11 +370,68 @@ class TradeStateStore:
                         filled_quantity TEXT,
                         limit_price TEXT,
                         stop_price TEXT,
+                        observation_key TEXT,
                         occurred_at TEXT NOT NULL,
                         details_json TEXT NOT NULL,
                         FOREIGN KEY(trade_id)
                             REFERENCES trades(trade_id)
                     );
+
+                CREATE TABLE IF NOT EXISTS
+                    entry_recovery_events (
+                        event_id INTEGER PRIMARY KEY
+                            AUTOINCREMENT,
+                        trade_id TEXT NOT NULL,
+                        observation_key TEXT NOT NULL,
+                        old_status TEXT NOT NULL,
+                        new_status TEXT NOT NULL,
+                        required_action TEXT NOT NULL,
+                        occurred_at TEXT NOT NULL,
+                        details_json TEXT NOT NULL,
+                        UNIQUE(trade_id, observation_key),
+                        FOREIGN KEY(trade_id)
+                            REFERENCES trades(trade_id)
+                    );
+
+                CREATE TABLE IF NOT EXISTS
+                    entry_halts (
+                        halt_key TEXT PRIMARY KEY,
+                        strategy TEXT NOT NULL,
+                        trade_id TEXT,
+                        active INTEGER NOT NULL,
+                        reason TEXT NOT NULL,
+                        operator_ack_required INTEGER
+                            NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        cleared_at TEXT,
+                        FOREIGN KEY(trade_id)
+                            REFERENCES trades(trade_id)
+                    );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_entry_halts_strategy_active
+                ON entry_halts(strategy, active);
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_entry_recovery_event_update
+                BEFORE UPDATE ON entry_recovery_events
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'entry_recovery_events are append-only'
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_entry_recovery_event_delete
+                BEFORE DELETE ON entry_recovery_events
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'entry_recovery_events are append-only'
+                    );
+                END;
 
                 CREATE TRIGGER IF NOT EXISTS
                     prevent_trade_event_update
@@ -308,6 +472,68 @@ class TradeStateStore:
                         'order_events are append-only'
                     );
                 END;
+                """
+            )
+
+            trade_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(trades)"
+                )
+            }
+
+            migrations = {
+                "protected_quantity":
+                    "INTEGER NOT NULL DEFAULT 0",
+                "last_broker_observation_at":
+                    "TEXT",
+                "required_recovery_action":
+                    "TEXT NOT NULL DEFAULT 'none'",
+                "last_completed_recovery_step":
+                    "TEXT",
+                "recovery_ref_id": "TEXT",
+                "recovery_attempt_count":
+                    "INTEGER NOT NULL DEFAULT 0",
+                "recovery_failure_reason": "TEXT",
+                "operator_ack_required":
+                    "INTEGER NOT NULL DEFAULT 0",
+                "last_entry_observation_key":
+                    "TEXT",
+            }
+
+            for column, definition in (
+                migrations.items()
+            ):
+                if column not in trade_columns:
+                    connection.execute(
+                        "ALTER TABLE trades "
+                        f"ADD COLUMN {column} "
+                        f"{definition}"
+                    )
+
+            order_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(order_events)"
+                )
+            }
+
+            if "observation_key" not in order_columns:
+                connection.execute(
+                    "ALTER TABLE order_events "
+                    "ADD COLUMN observation_key TEXT"
+                )
+
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_order_events_observation_key
+                ON order_events(
+                    trade_id,
+                    role,
+                    observation_key
+                )
+                WHERE observation_key IS NOT NULL
                 """
             )
 
@@ -355,6 +581,41 @@ class TradeStateStore:
             ),
             exit_order_id=row["exit_order_id"],
             close_reason=row["close_reason"],
+            protected_quantity=int(
+                row["protected_quantity"]
+            ),
+            last_broker_observation_at=(
+                parse_datetime(
+                    row[
+                        "last_broker_observation_at"
+                    ]
+                )
+            ),
+            required_recovery_action=(
+                EntryRecoveryAction(
+                    row[
+                        "required_recovery_action"
+                    ]
+                )
+            ),
+            last_completed_recovery_step=(
+                row[
+                    "last_completed_recovery_step"
+                ]
+            ),
+            recovery_ref_id=row["recovery_ref_id"],
+            recovery_attempt_count=int(
+                row["recovery_attempt_count"]
+            ),
+            recovery_failure_reason=(
+                row["recovery_failure_reason"]
+            ),
+            operator_ack_required=bool(
+                row["operator_ack_required"]
+            ),
+            last_entry_observation_key=(
+                row["last_entry_observation_key"]
+            ),
             created_at=datetime.fromisoformat(
                 row["created_at"]
             ),
@@ -455,6 +716,524 @@ class TradeStateStore:
             ),
         )
 
+
+    def _activate_entry_halt(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        halt_key: str,
+        strategy: str,
+        trade_id: str | None,
+        reason: str,
+        operator_ack_required: bool,
+        occurred_at: datetime,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO entry_halts (
+                halt_key,
+                strategy,
+                trade_id,
+                active,
+                reason,
+                operator_ack_required,
+                created_at,
+                updated_at,
+                cleared_at
+            )
+            VALUES (?, ?, ?, 1, ?, ?, ?, ?, NULL)
+            ON CONFLICT(halt_key) DO UPDATE SET
+                active = 1,
+                reason = excluded.reason,
+                operator_ack_required = (
+                    entry_halts.operator_ack_required
+                    OR excluded.operator_ack_required
+                ),
+                updated_at = excluded.updated_at,
+                cleared_at = NULL
+            """,
+            (
+                halt_key,
+                strategy,
+                trade_id,
+                reason,
+                int(operator_ack_required),
+                occurred_at.isoformat(),
+                occurred_at.isoformat(),
+            ),
+        )
+
+    def _clear_entry_halt(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        halt_key: str,
+        occurred_at: datetime,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE entry_halts
+            SET active = 0,
+                updated_at = ?,
+                cleared_at = ?
+            WHERE halt_key = ?
+              AND active = 1
+            """,
+            (
+                occurred_at.isoformat(),
+                occurred_at.isoformat(),
+                halt_key,
+            ),
+        )
+
+    def get_entry_halt(
+        self,
+        strategy: str,
+    ) -> EntryHaltState:
+        strategy = strategy.strip()
+
+        if not strategy:
+            raise TradeStateError(
+                "Strategy name is required."
+            )
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT reason, operator_ack_required
+                FROM entry_halts
+                WHERE strategy = ?
+                  AND active = 1
+                ORDER BY created_at, halt_key
+                """,
+                (strategy,),
+            ).fetchall()
+
+        return EntryHaltState(
+            strategy=strategy,
+            active=bool(rows),
+            reasons=tuple(
+                row["reason"]
+                for row in rows
+            ),
+            operator_ack_required=any(
+                bool(row["operator_ack_required"])
+                for row in rows
+            ),
+        )
+
+    def is_entry_halted(
+        self,
+        strategy: str,
+    ) -> bool:
+        return self.get_entry_halt(
+            strategy
+        ).active
+
+    def begin_startup_reconciliation(
+        self,
+        strategy: str,
+        *,
+        occurred_at: datetime | None = None,
+    ) -> EntryHaltState:
+        strategy = strategy.strip()
+        timestamp = occurred_at or utc_now()
+
+        if not strategy:
+            raise TradeStateError(
+                "Strategy name is required."
+            )
+
+        with self._connect() as connection:
+            self._activate_entry_halt(
+                connection,
+                halt_key=f"startup:{strategy}",
+                strategy=strategy,
+                trade_id=None,
+                reason=(
+                    "Startup reconciliation is incomplete."
+                ),
+                operator_ack_required=False,
+                occurred_at=timestamp,
+            )
+
+        return self.get_entry_halt(strategy)
+
+    def persist_entry_observation(
+        self,
+        trade_id: str,
+        *,
+        status: TradeStatus,
+        filled_quantity: int,
+        average_entry_price: Decimal | None,
+        required_action: EntryRecoveryAction,
+        last_completed_step: EntryRecoveryStep,
+        observation_key: str,
+        observed_at: datetime,
+        failure_reason: str | None = None,
+        operator_ack_required: bool = False,
+        recovery_ref_id: str | None = None,
+    ) -> tuple[TradeRecord, bool]:
+        if observed_at.tzinfo is None:
+            raise TradeStateError(
+                "Broker observation timestamp must "
+                "include a timezone."
+            )
+
+        if not observation_key.strip():
+            raise TradeStateError(
+                "Entry observation key is required."
+            )
+
+        recovery_statuses = {
+            TradeStatus.ENTRY_PENDING,
+            TradeStatus.ENTRY_PARTIALLY_FILLED,
+            TradeStatus.PROTECTION_PENDING,
+            TradeStatus.RECOVERY_REQUIRED,
+        }
+
+        if status not in recovery_statuses:
+            raise TradeStateError(
+                "Unsupported entry recovery status."
+            )
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM trades
+                WHERE trade_id = ?
+                """,
+                (trade_id,),
+            ).fetchone()
+
+            if row is None:
+                raise TradeNotFoundError(
+                    f"Trade not found: {trade_id}"
+                )
+
+            current = self._row_to_trade(row)
+
+            if (
+                current.last_entry_observation_key
+                == observation_key
+            ):
+                return current, False
+
+            if current.status not in recovery_statuses:
+                raise InvalidTransitionError(
+                    "Entry recovery observations can "
+                    "only update an entry lifecycle "
+                    "trade."
+                )
+
+            effective_status = status
+            effective_filled = filled_quantity
+            effective_average = average_entry_price
+            effective_action = required_action
+            effective_step = last_completed_step
+            effective_failure = failure_reason
+            effective_operator_ack = (
+                operator_ack_required
+            )
+
+            if (
+                filled_quantity < 0
+                or filled_quantity > current.quantity
+                or filled_quantity
+                < current.filled_quantity
+            ):
+                effective_status = (
+                    TradeStatus.RECOVERY_REQUIRED
+                )
+                effective_filled = (
+                    current.filled_quantity
+                )
+                effective_average = (
+                    current.average_entry_price
+                )
+                effective_action = (
+                    EntryRecoveryAction
+                    .RECONCILE_BROKER_STATE
+                )
+                effective_step = (
+                    EntryRecoveryStep
+                    .AMBIGUOUS_STATE_RECORDED
+                )
+                effective_failure = (
+                    "Broker cumulative quantity is "
+                    "inconsistent with local entry "
+                    "state."
+                )
+                effective_operator_ack = True
+
+            elif (
+                filled_quantity > 0
+                and (
+                    average_entry_price is None
+                    or average_entry_price <= 0
+                )
+            ):
+                effective_status = (
+                    TradeStatus.RECOVERY_REQUIRED
+                )
+                effective_action = (
+                    EntryRecoveryAction
+                    .RECONCILE_BROKER_STATE
+                )
+                effective_step = (
+                    EntryRecoveryStep
+                    .AMBIGUOUS_STATE_RECORDED
+                )
+                effective_failure = (
+                    "Broker reports a filled entry "
+                    "quantity without a valid average "
+                    "fill price."
+                )
+                effective_operator_ack = True
+
+            if (
+                current.last_broker_observation_at
+                is not None
+                and observed_at
+                < current.last_broker_observation_at
+            ):
+                effective_status = (
+                    TradeStatus.RECOVERY_REQUIRED
+                )
+                effective_filled = max(
+                    current.filled_quantity,
+                    effective_filled,
+                )
+                effective_average = (
+                    current.average_entry_price
+                    or effective_average
+                )
+                effective_action = (
+                    EntryRecoveryAction
+                    .RECONCILE_BROKER_STATE
+                )
+                effective_step = (
+                    EntryRecoveryStep
+                    .AMBIGUOUS_STATE_RECORDED
+                )
+                effective_failure = (
+                    "A stale broker entry observation "
+                    "was received."
+                )
+                effective_operator_ack = True
+
+            if (
+                effective_status != current.status
+                and effective_status
+                not in ALLOWED_TRANSITIONS[
+                    current.status
+                ]
+            ):
+                raise InvalidTransitionError(
+                    f"Cannot transition "
+                    f"{current.status.value} to "
+                    f"{effective_status.value}."
+                )
+
+            reference = (
+                recovery_ref_id
+                or (
+                    "entry-recovery-"
+                    f"{observation_key[:24]}"
+                )
+            )
+            timestamp = utc_now()
+            opened_at = current.opened_at
+
+            if (
+                effective_filled > 0
+                and opened_at is None
+            ):
+                opened_at = observed_at
+
+            cursor = connection.execute(
+                """
+                UPDATE trades
+                SET status = ?,
+                    filled_quantity = ?,
+                    average_entry_price = ?,
+                    last_broker_observation_at = ?,
+                    required_recovery_action = ?,
+                    last_completed_recovery_step = ?,
+                    recovery_ref_id = ?,
+                    recovery_failure_reason = ?,
+                    operator_ack_required = ?,
+                    last_entry_observation_key = ?,
+                    opened_at = ?,
+                    updated_at = ?,
+                    version = version + 1
+                WHERE trade_id = ?
+                  AND version = ?
+                """,
+                (
+                    effective_status.value,
+                    effective_filled,
+                    serialize_decimal(
+                        effective_average
+                    ),
+                    observed_at.isoformat(),
+                    effective_action.value,
+                    effective_step.value,
+                    reference,
+                    effective_failure,
+                    int(effective_operator_ack),
+                    observation_key,
+                    (
+                        opened_at.isoformat()
+                        if opened_at
+                        else None
+                    ),
+                    timestamp.isoformat(),
+                    trade_id,
+                    current.version,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                raise TradeStateError(
+                    "Trade state changed concurrently; "
+                    "entry recovery failed closed."
+                )
+
+            self._insert_trade_event(
+                connection,
+                trade_id=trade_id,
+                event_type="entry_recovery_observed",
+                old_status=current.status,
+                new_status=effective_status,
+                occurred_at=timestamp,
+                details={
+                    "filled_quantity":
+                        effective_filled,
+                    "required_action":
+                        effective_action.value,
+                    "recovery_ref_id": reference,
+                },
+            )
+            connection.execute(
+                """
+                INSERT INTO entry_recovery_events (
+                    trade_id,
+                    observation_key,
+                    old_status,
+                    new_status,
+                    required_action,
+                    occurred_at,
+                    details_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trade_id,
+                    observation_key,
+                    current.status.value,
+                    effective_status.value,
+                    effective_action.value,
+                    timestamp.isoformat(),
+                    json.dumps(
+                        {
+                            "filled_quantity":
+                                effective_filled,
+                            "requested_quantity":
+                                current.quantity,
+                            "protected_quantity":
+                                current.protected_quantity,
+                            "average_entry_price":
+                                effective_average,
+                            "intended_stop_price":
+                                current.initial_stop,
+                            "failure_reason":
+                                effective_failure,
+                            "operator_ack_required":
+                                effective_operator_ack,
+                            "recovery_ref_id":
+                                reference,
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ),
+                ),
+            )
+
+            halt_required = (
+                effective_filled
+                > current.protected_quantity
+                or effective_status
+                in {
+                    TradeStatus
+                    .ENTRY_PARTIALLY_FILLED,
+                    TradeStatus.PROTECTION_PENDING,
+                    TradeStatus.RECOVERY_REQUIRED,
+                }
+                or effective_action
+                not in {
+                    EntryRecoveryAction.NONE,
+                    EntryRecoveryAction.WAIT,
+                }
+            )
+
+            if halt_required:
+                self._activate_entry_halt(
+                    connection,
+                    halt_key=f"trade:{trade_id}",
+                    strategy=current.strategy,
+                    trade_id=trade_id,
+                    reason=(
+                        effective_failure
+                        or (
+                            "Entry recovery or broker-"
+                            "held protection is pending."
+                        )
+                    ),
+                    operator_ack_required=(
+                        effective_operator_ack
+                    ),
+                    occurred_at=timestamp,
+                )
+
+        return self.get_trade(trade_id), True
+
+    def halt_entry_recovery(
+        self,
+        trade_id: str,
+        *,
+        reason: str,
+        observation_key: str,
+        observed_at: datetime | None = None,
+    ) -> tuple[TradeRecord, bool]:
+        current = self.get_trade(trade_id)
+
+        return self.persist_entry_observation(
+            trade_id,
+            status=TradeStatus.RECOVERY_REQUIRED,
+            filled_quantity=(
+                current.filled_quantity
+            ),
+            average_entry_price=(
+                current.average_entry_price
+            ),
+            required_action=(
+                EntryRecoveryAction
+                .RECONCILE_BROKER_STATE
+            ),
+            last_completed_step=(
+                EntryRecoveryStep
+                .AMBIGUOUS_STATE_RECORDED
+            ),
+            observation_key=observation_key,
+            observed_at=(
+                observed_at or utc_now()
+            ),
+            failure_reason=reason,
+            operator_ack_required=True,
+        )
+
     def reserve_entry(
         self,
         *,
@@ -495,6 +1274,23 @@ class TradeStateStore:
 
         try:
             with self._connect() as connection:
+                active_halt = connection.execute(
+                    """
+                    SELECT 1
+                    FROM entry_halts
+                    WHERE strategy = ?
+                      AND active = 1
+                    LIMIT 1
+                    """,
+                    (strategy,),
+                ).fetchone()
+
+                if active_halt is not None:
+                    raise EntryHaltedError(
+                        "New entries are blocked by a "
+                        "durable strategy recovery halt."
+                    )
+
                 connection.execute(
                     """
                     INSERT INTO trades (
@@ -699,6 +1495,15 @@ class TradeStateStore:
                 "close_reason",
                 "opened_at",
                 "closed_at",
+                "protected_quantity",
+                "last_broker_observation_at",
+                "required_recovery_action",
+                "last_completed_recovery_step",
+                "recovery_ref_id",
+                "recovery_attempt_count",
+                "recovery_failure_reason",
+                "operator_ack_required",
+                "last_entry_observation_key",
             }
 
             unknown_columns = (
@@ -816,10 +1621,8 @@ class TradeStateStore:
 
         if filled_quantity != current.quantity:
             raise TradeStateError(
-                "Partial entry fills are not accepted "
-                "by this state transition. Reconcile "
-                "and protect the actual filled quantity "
-                "before continuing."
+                "Partial entry fills must use the "
+                "durable recovery observation path."
             )
 
         if average_entry_price <= 0:
@@ -828,28 +1631,33 @@ class TradeStateStore:
             )
 
         timestamp = occurred_at or utc_now()
-
-        return self._transition(
-            trade_id,
-            new_status=(
-                TradeStatus.OPEN_UNPROTECTED
-            ),
-            event_type="entry_filled",
-            updates={
-                "filled_quantity":
-                    filled_quantity,
-                "average_entry_price":
-                    average_entry_price,
-                "opened_at": timestamp,
-            },
-            details={
-                "filled_quantity":
-                    filled_quantity,
-                "average_entry_price":
-                    average_entry_price,
-            },
-            occurred_at=timestamp,
+        observation_key = (
+            "confirmed-full-fill:"
+            f"{trade_id}:"
+            f"{filled_quantity}:"
+            f"{average_entry_price}"
         )
+
+        trade, _ = self.persist_entry_observation(
+            trade_id,
+            status=TradeStatus.PROTECTION_PENDING,
+            filled_quantity=filled_quantity,
+            average_entry_price=(
+                average_entry_price
+            ),
+            required_action=(
+                EntryRecoveryAction
+                .PROTECT_FILLED_QUANTITY
+            ),
+            last_completed_step=(
+                EntryRecoveryStep
+                .FULL_FILL_CLASSIFIED
+            ),
+            observation_key=observation_key,
+            observed_at=timestamp,
+        )
+
+        return trade
 
     def attach_protective_stop(
         self,
@@ -867,6 +1675,7 @@ class TradeStateStore:
         current = self.get_trade(trade_id)
 
         if current.status not in {
+            TradeStatus.PROTECTION_PENDING,
             TradeStatus.OPEN_UNPROTECTED,
             TradeStatus.OPEN_PROTECTED,
         }:
@@ -881,7 +1690,7 @@ class TradeStateStore:
         ):
             return current
 
-        return self._transition(
+        updated = self._transition(
             trade_id,
             new_status=(
                 TradeStatus.OPEN_PROTECTED
@@ -892,13 +1701,35 @@ class TradeStateStore:
             updates={
                 "protective_stop_order_id":
                     broker_order_id,
+                "protected_quantity":
+                    current.filled_quantity,
+                "required_recovery_action":
+                    EntryRecoveryAction.NONE.value,
+                "last_completed_recovery_step":
+                    EntryRecoveryStep
+                    .PROTECTION_CONFIRMED.value,
+                "recovery_failure_reason": None,
+                "operator_ack_required": 0,
             },
             details={
                 "broker_order_id":
                     broker_order_id,
+                "protected_quantity":
+                    current.filled_quantity,
             },
             occurred_at=occurred_at,
         )
+
+        timestamp = occurred_at or utc_now()
+
+        with self._connect() as connection:
+            self._clear_entry_halt(
+                connection,
+                halt_key=f"trade:{trade_id}",
+                occurred_at=timestamp,
+            )
+
+        return self.get_trade(updated.trade_id)
 
     def mark_protective_stop_inactive(
         self,
@@ -907,7 +1738,7 @@ class TradeStateStore:
         reason: str,
         occurred_at: datetime | None = None,
     ) -> TradeRecord:
-        return self._transition(
+        updated = self._transition(
             trade_id,
             new_status=(
                 TradeStatus.OPEN_UNPROTECTED
@@ -918,10 +1749,30 @@ class TradeStateStore:
             updates={
                 "protective_stop_order_id":
                     None,
+                "protected_quantity": 0,
             },
             details={"reason": reason},
             occurred_at=occurred_at,
         )
+
+        timestamp = occurred_at or utc_now()
+
+        with self._connect() as connection:
+            self._activate_entry_halt(
+                connection,
+                halt_key=f"trade:{trade_id}",
+                strategy=updated.strategy,
+                trade_id=trade_id,
+                reason=(
+                    "A filled position may be "
+                    "unprotected because its broker "
+                    "stop became inactive."
+                ),
+                operator_ack_required=True,
+                occurred_at=timestamp,
+            )
+
+        return self.get_trade(trade_id)
 
     def begin_exit(
         self,
@@ -984,7 +1835,7 @@ class TradeStateStore:
 
         timestamp = occurred_at or utc_now()
 
-        return self._transition(
+        closed = self._transition(
             trade_id,
             new_status=TradeStatus.CLOSED,
             event_type="trade_closed",
@@ -1007,6 +1858,15 @@ class TradeStateStore:
             },
             occurred_at=timestamp,
         )
+
+        with self._connect() as connection:
+            self._clear_entry_halt(
+                connection,
+                halt_key=f"trade:{trade_id}",
+                occurred_at=timestamp,
+            )
+
+        return self.get_trade(closed.trade_id)
 
     def cancel_unfilled_trade(
         self,
@@ -1049,16 +1909,17 @@ class TradeStateStore:
         limit_price: Decimal | None = None,
         stop_price: Decimal | None = None,
         details: dict[str, Any] | None = None,
+        observation_key: str | None = None,
         occurred_at: datetime | None = None,
-    ) -> None:
+    ) -> bool:
         self.get_trade(trade_id)
 
         timestamp = occurred_at or utc_now()
 
         with self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
-                INSERT INTO order_events (
+                INSERT OR IGNORE INTO order_events (
                     trade_id,
                     broker_order_id,
                     role,
@@ -1068,10 +1929,14 @@ class TradeStateStore:
                     filled_quantity,
                     limit_price,
                     stop_price,
+                    observation_key,
                     occurred_at,
                     details_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     trade_id,
@@ -1085,6 +1950,7 @@ class TradeStateStore:
                     ),
                     serialize_decimal(limit_price),
                     serialize_decimal(stop_price),
+                    observation_key,
                     timestamp.isoformat(),
                     json.dumps(
                         details or {},
@@ -1093,6 +1959,21 @@ class TradeStateStore:
                     ),
                 ),
             )
+
+        return cursor.rowcount == 1
+
+    def count_entry_recovery_events(
+        self,
+    ) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count_value
+                FROM entry_recovery_events
+                """
+            ).fetchone()
+
+        return int(row["count_value"])
 
     def realized_pnl_between(
         self,
@@ -1218,6 +2099,278 @@ class TradeStateStore:
             peak - cumulative,
         )
 
+
+    def startup_reconciliation_issues(
+        self,
+        *,
+        strategy: str,
+        account_state: Any,
+    ) -> tuple[ReconciliationIssue, ...]:
+        strategy = strategy.strip()
+
+        if not strategy:
+            raise TradeStateError(
+                "Strategy name is required."
+            )
+
+        strategy_trade_ids = {
+            trade.trade_id
+            for trade in self.list_active_trades()
+            if trade.strategy == strategy
+        }
+
+        issues = [
+            issue
+            for issue in self.reconcile(
+                account_state
+            )
+            if (
+                not issue.trade_id
+                or issue.trade_id
+                in strategy_trade_ids
+            )
+        ]
+
+        with self._connect() as connection:
+            unresolved = connection.execute(
+                """
+                SELECT trade_id, reason
+                FROM entry_halts
+                WHERE strategy = ?
+                  AND active = 1
+                  AND halt_key LIKE 'trade:%'
+                ORDER BY created_at
+                """,
+                (strategy,),
+            ).fetchall()
+
+        for row in unresolved:
+            issues.append(
+                ReconciliationIssue(
+                    severity="critical",
+                    code="entry_recovery_unresolved",
+                    message=row["reason"],
+                    trade_id=(
+                        row["trade_id"] or ""
+                    ),
+                )
+            )
+
+        return tuple(issues)
+
+    def apply_startup_reconciliation(
+        self,
+        *,
+        strategy: str,
+        account_state: Any,
+        occurred_at: datetime | None = None,
+    ) -> tuple[ReconciliationIssue, ...]:
+        strategy = strategy.strip()
+        timestamp = occurred_at or utc_now()
+
+        if not strategy:
+            raise TradeStateError(
+                "Strategy name is required."
+            )
+
+        recovery_statuses = {
+            TradeStatus.ENTRY_PARTIALLY_FILLED,
+            TradeStatus.PROTECTION_PENDING,
+            TradeStatus.RECOVERY_REQUIRED,
+        }
+
+        broker_positions = {
+            position.symbol: position
+            for position in account_state.positions
+            if position.quantity != 0
+        }
+
+        broker_orders = tuple(
+            account_state.open_orders
+        )
+
+        active_trades = tuple(
+            trade
+            for trade in self.list_active_trades()
+            if trade.strategy == strategy
+            and trade.status in recovery_statuses
+        )
+
+        for trade in active_trades:
+            position = broker_positions.get(
+                trade.symbol
+            )
+
+            entry_still_open = any(
+                order.order_id
+                == trade.entry_order_id
+                and order.side == "buy"
+                for order in broker_orders
+            )
+
+            if (
+                position is None
+                and not entry_still_open
+            ):
+                self._transition(
+                    trade.trade_id,
+                    new_status=TradeStatus.ERROR,
+                    event_type=(
+                        "entry_recovery_flat_confirmed"
+                    ),
+                    updates={
+                        "protected_quantity": 0,
+                        "required_recovery_action":
+                            EntryRecoveryAction
+                            .NONE.value,
+                        "last_completed_recovery_step":
+                            EntryRecoveryStep
+                            .FLAT_CONFIRMED.value,
+                        "operator_ack_required": 0,
+                    },
+                    details={
+                        "proof": (
+                            "No broker position and no "
+                            "open linked entry order."
+                        )
+                    },
+                    occurred_at=timestamp,
+                )
+
+                with self._connect() as connection:
+                    self._clear_entry_halt(
+                        connection,
+                        halt_key=(
+                            f"trade:{trade.trade_id}"
+                        ),
+                        occurred_at=timestamp,
+                    )
+
+                continue
+
+            if position is None:
+                continue
+
+            if (
+                position.quantity
+                != Decimal(trade.filled_quantity)
+            ):
+                continue
+
+            matching_stops = [
+                order
+                for order in broker_orders
+                if (
+                    order.symbol == trade.symbol
+                    and order.side == "sell"
+                    and order.trigger == "stop"
+                    and order.order_type
+                    == "stop_market"
+                    and order.cumulative_quantity == 0
+                    and order.quantity
+                    == position.quantity
+                    and order.placed_agent
+                    == "agentic"
+                )
+            ]
+
+            if len(matching_stops) != 1:
+                continue
+
+            stop_order = matching_stops[0]
+
+            self._transition(
+                trade.trade_id,
+                new_status=(
+                    TradeStatus.OPEN_PROTECTED
+                ),
+                event_type=(
+                    "entry_recovery_protection_"
+                    "confirmed"
+                ),
+                updates={
+                    "protective_stop_order_id":
+                        stop_order.order_id,
+                    "protected_quantity":
+                        trade.filled_quantity,
+                    "required_recovery_action":
+                        EntryRecoveryAction
+                        .NONE.value,
+                    "last_completed_recovery_step":
+                        EntryRecoveryStep
+                        .PROTECTION_CONFIRMED.value,
+                    "recovery_failure_reason": None,
+                    "operator_ack_required": 0,
+                },
+                details={
+                    "protected_quantity":
+                        trade.filled_quantity,
+                },
+                occurred_at=timestamp,
+            )
+
+            with self._connect() as connection:
+                self._clear_entry_halt(
+                    connection,
+                    halt_key=(
+                        f"trade:{trade.trade_id}"
+                    ),
+                    occurred_at=timestamp,
+                )
+
+        issues = self.startup_reconciliation_issues(
+            strategy=strategy,
+            account_state=account_state,
+        )
+
+        with self._connect() as connection:
+            unresolved_trade_halt = (
+                connection.execute(
+                    """
+                    SELECT 1
+                    FROM entry_halts
+                    WHERE strategy = ?
+                      AND active = 1
+                      AND halt_key LIKE 'trade:%'
+                    LIMIT 1
+                    """,
+                    (strategy,),
+                ).fetchone()
+            )
+
+            critical_issue = any(
+                issue.severity == "critical"
+                for issue in issues
+            )
+
+            if (
+                unresolved_trade_halt is None
+                and not critical_issue
+            ):
+                self._clear_entry_halt(
+                    connection,
+                    halt_key=f"startup:{strategy}",
+                    occurred_at=timestamp,
+                )
+            else:
+                self._activate_entry_halt(
+                    connection,
+                    halt_key=f"startup:{strategy}",
+                    strategy=strategy,
+                    trade_id=None,
+                    reason=(
+                        "Startup reconciliation did not "
+                        "prove all positions flat or "
+                        "fully protected."
+                    ),
+                    operator_ack_required=(
+                        critical_issue
+                    ),
+                    occurred_at=timestamp,
+                )
+
+        return issues
+
     def reconcile(
         self,
         account_state: Any,
@@ -1239,11 +2392,19 @@ class TradeStateStore:
         local_symbols_with_positions = {
             trade.symbol
             for trade in active_trades
-            if trade.status in {
-                TradeStatus.OPEN_UNPROTECTED,
-                TradeStatus.OPEN_PROTECTED,
-                TradeStatus.EXIT_PENDING,
-            }
+            if (
+                trade.filled_quantity > 0
+                and trade.status in {
+                    TradeStatus
+                    .ENTRY_PARTIALLY_FILLED,
+                    TradeStatus
+                    .PROTECTION_PENDING,
+                    TradeStatus.RECOVERY_REQUIRED,
+                    TradeStatus.OPEN_UNPROTECTED,
+                    TradeStatus.OPEN_PROTECTED,
+                    TradeStatus.EXIT_PENDING,
+                }
+            )
         }
 
         linked_entry_order_ids = {
@@ -1253,6 +2414,25 @@ class TradeStateStore:
         }
 
         for trade in active_trades:
+            if trade.status in {
+                TradeStatus.ENTRY_PARTIALLY_FILLED,
+                TradeStatus.PROTECTION_PENDING,
+                TradeStatus.RECOVERY_REQUIRED,
+            }:
+                issues.append(
+                    ReconciliationIssue(
+                        severity="critical",
+                        code="entry_recovery_pending",
+                        message=(
+                            "Entry fill recovery or "
+                            "broker-held protection "
+                            "remains unresolved."
+                        ),
+                        symbol=trade.symbol,
+                        trade_id=trade.trade_id,
+                    )
+                )
+
             if (
                 trade.status
                 == TradeStatus.OPEN_UNPROTECTED
@@ -1310,11 +2490,98 @@ class TradeStateStore:
                         )
                     )
 
+            position = broker_positions.get(
+                trade.symbol
+            )
+
+            if (
+                trade.filled_quantity > 0
+                and position is not None
+                and position.quantity
+                != Decimal(trade.filled_quantity)
+            ):
+                issues.append(
+                    ReconciliationIssue(
+                        severity="critical",
+                        code="position_quantity_mismatch",
+                        message=(
+                            "Broker position quantity "
+                            "does not match the locally "
+                            "observed filled quantity."
+                        ),
+                        symbol=trade.symbol,
+                        trade_id=trade.trade_id,
+                    )
+                )
+
             if (
                 trade.status
+                == TradeStatus.OPEN_PROTECTED
+                and trade.protected_quantity
+                != trade.filled_quantity
+            ):
+                issues.append(
+                    ReconciliationIssue(
+                        severity="critical",
+                        code=(
+                            "protected_quantity_mismatch"
+                        ),
+                        message=(
+                            "Locally confirmed protected "
+                            "quantity does not equal the "
+                            "open filled quantity."
+                        ),
+                        symbol=trade.symbol,
+                        trade_id=trade.trade_id,
+                    )
+                )
+
+            if (
+                trade.status
+                == TradeStatus.OPEN_PROTECTED
+                and trade.protective_stop_order_id
+                in broker_orders
+            ):
+                broker_stop = broker_orders[
+                    trade.protective_stop_order_id
+                ]
+
+                if (
+                    broker_stop.quantity
+                    != Decimal(
+                        trade.protected_quantity
+                    )
+                ):
+                    issues.append(
+                        ReconciliationIssue(
+                            severity="critical",
+                            code=(
+                                "broker_stop_quantity_"
+                                "mismatch"
+                            ),
+                            message=(
+                                "Broker protective-stop "
+                                "quantity does not equal "
+                                "the locally protected "
+                                "quantity."
+                            ),
+                            symbol=trade.symbol,
+                            trade_id=trade.trade_id,
+                        )
+                    )
+
+            if (
+                trade.filled_quantity > 0
+                and trade.status
                 in {
+                    TradeStatus
+                    .ENTRY_PARTIALLY_FILLED,
+                    TradeStatus
+                    .PROTECTION_PENDING,
+                    TradeStatus.RECOVERY_REQUIRED,
                     TradeStatus.OPEN_UNPROTECTED,
                     TradeStatus.OPEN_PROTECTED,
+                    TradeStatus.EXIT_PENDING,
                 }
                 and trade.symbol
                 not in broker_positions
@@ -1344,7 +2611,7 @@ class TradeStateStore:
             ):
                 issues.append(
                     ReconciliationIssue(
-                        severity="warning",
+                        severity="critical",
                         code=(
                             "entry_order_not_open"
                         ),
@@ -1384,7 +2651,7 @@ class TradeStateStore:
             ):
                 issues.append(
                     ReconciliationIssue(
-                        severity="warning",
+                        severity="critical",
                         code=(
                             "untracked_entry_order"
                         ),

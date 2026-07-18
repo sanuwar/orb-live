@@ -1,6 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
 from enum import Enum
 from typing import Any
 
@@ -8,6 +10,7 @@ try:
     from .entry_lifecycle import (
         EntryLifecycleAction,
         EntryLifecycleCoordinator,
+        entry_observation_key,
     )
     from .exit_order_lifecycle import (
         ExitOrderAction,
@@ -31,6 +34,7 @@ except ImportError:
     from entry_lifecycle import (
         EntryLifecycleAction,
         EntryLifecycleCoordinator,
+        entry_observation_key,
     )
     from exit_order_lifecycle import (
         ExitOrderAction,
@@ -191,10 +195,14 @@ class ReadOnlyOrderMonitor:
         trade_id: str,
         role: MonitoredOrderRole,
         observed: ObservedEquityOrder,
-    ) -> None:
+    ) -> bool:
         order = observed.order
+        observation_key = entry_observation_key(
+            order,
+            observed.average_price,
+        )
 
-        self.trade_store.record_order_event(
+        return self.trade_store.record_order_event(
             trade_id=trade_id,
             broker_order_id=order.order_id,
             role=role.value,
@@ -206,6 +214,7 @@ class ReadOnlyOrderMonitor:
             ),
             limit_price=order.limit_price,
             stop_price=order.stop_price,
+            observation_key=observation_key,
             details={
                 "average_price":
                     observed.average_price,
@@ -246,11 +255,38 @@ class ReadOnlyOrderMonitor:
                 order_id=order_id,
             )
         except OrderObservationError as error:
+            failed_trade = trade
+
+            if role == MonitoredOrderRole.ENTRY:
+                failure_key = hashlib.sha256(
+                    (
+                        f"{trade.trade_id}:"
+                        f"{type(error).__name__}:"
+                        f"{error}"
+                    ).encode("utf-8")
+                ).hexdigest()
+
+                failed_trade, _ = (
+                    self.trade_store
+                    .halt_entry_recovery(
+                        trade.trade_id,
+                        reason=(
+                            "Fresh broker order status "
+                            f"could not be retrieved: "
+                            f"{error}"
+                        ),
+                        observation_key=failure_key,
+                        observed_at=datetime.now(
+                            timezone.utc
+                        ),
+                    )
+                )
+
             return (
                 None,
                 fail_closed_result(
                     role=role,
-                    trade=trade,
+                    trade=failed_trade,
                     reason=(
                         "Fresh broker order status "
                         f"could not be retrieved: {error}"
@@ -344,10 +380,10 @@ class ReadOnlyOrderMonitor:
                 ),
             )
 
-        if (
-            trade.status
-            == TradeStatus.OPEN_UNPROTECTED
-        ):
+        if trade.status in {
+            TradeStatus.PROTECTION_PENDING,
+            TradeStatus.OPEN_UNPROTECTED,
+        }:
             return OrderMonitorResult(
                 role=MonitoredOrderRole.NONE,
                 action=(
@@ -403,10 +439,11 @@ class ReadOnlyOrderMonitor:
                 ),
             )
 
-        if (
-            trade.status
-            == TradeStatus.ENTRY_PENDING
-        ):
+        if trade.status in {
+            TradeStatus.ENTRY_PENDING,
+            TradeStatus.ENTRY_PARTIALLY_FILLED,
+            TradeStatus.RECOVERY_REQUIRED,
+        }:
             role = MonitoredOrderRole.ENTRY
             order_id = trade.entry_order_id
 
@@ -440,6 +477,20 @@ class ReadOnlyOrderMonitor:
                     order=observed.order,
                     average_fill_price=(
                         observed.average_price
+                    ),
+                    observation_at=(
+                        observed
+                        .last_transaction_at
+                        or observed.created_at
+                        or datetime.now(
+                            timezone.utc
+                        )
+                    ),
+                    observation_key=(
+                        entry_observation_key(
+                            observed.order,
+                            observed.average_price,
+                        )
                     ),
                 )
             )

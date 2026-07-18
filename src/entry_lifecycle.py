@@ -1,6 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import json
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
@@ -14,6 +17,8 @@ try:
         interpret_equity_order,
     )
     from .trade_state import (
+        EntryRecoveryAction,
+        EntryRecoveryStep,
         TradeRecord,
         TradeStateStore,
         TradeStatus,
@@ -27,6 +32,8 @@ except ImportError:
         interpret_equity_order,
     )
     from trade_state import (
+        EntryRecoveryAction,
+        EntryRecoveryStep,
         TradeRecord,
         TradeStateStore,
         TradeStatus,
@@ -47,6 +54,7 @@ class EntryLifecycleDecision:
     order_status: OrderStatusDecision
     local_transition_allowed: bool
     requires_immediate_protection: bool
+    required_recovery_action: EntryRecoveryAction
     reason: str
 
     @property
@@ -97,6 +105,10 @@ def fail_closed_decision(
         requires_immediate_protection=(
             order_status.has_any_fill
         ),
+        required_recovery_action=(
+            EntryRecoveryAction
+            .RECONCILE_BROKER_STATE
+        ),
         reason=reason,
     )
 
@@ -117,7 +129,12 @@ def decide_entry_lifecycle(
 
     order_status = interpret_equity_order(order)
 
-    if trade.status != TradeStatus.ENTRY_PENDING:
+    if trade.status not in {
+        TradeStatus.ENTRY_PENDING,
+        TradeStatus.ENTRY_PARTIALLY_FILLED,
+        TradeStatus.PROTECTION_PENDING,
+        TradeStatus.RECOVERY_REQUIRED,
+    }:
         return fail_closed_decision(
             order_status,
             (
@@ -196,6 +213,9 @@ def decide_entry_lifecycle(
             order_status=order_status,
             local_transition_allowed=False,
             requires_immediate_protection=False,
+            required_recovery_action=(
+                EntryRecoveryAction.WAIT
+            ),
             reason=(
                 "The entry order remains pending "
                 "without a fill."
@@ -212,8 +232,19 @@ def decide_entry_lifecycle(
                 .PROTECT_PARTIAL_FILL
             ),
             order_status=order_status,
-            local_transition_allowed=False,
+            local_transition_allowed=True,
             requires_immediate_protection=True,
+            required_recovery_action=(
+                EntryRecoveryAction
+                .PROTECT_FILLED_QUANTITY
+                if order_status.normalized_state
+                in {
+                    "cancelled",
+                    "rejected",
+                }
+                else EntryRecoveryAction
+                .CANCEL_REMAINDER_THEN_PROTECT
+            ),
             reason=(
                 "A partial entry fill exists. The "
                 "actual broker position must be "
@@ -259,6 +290,10 @@ def decide_entry_lifecycle(
             order_status=order_status,
             local_transition_allowed=True,
             requires_immediate_protection=True,
+            required_recovery_action=(
+                EntryRecoveryAction
+                .PROTECT_FILLED_QUANTITY
+            ),
             reason=(
                 "The full entry quantity and average "
                 "fill price are confirmed. The local "
@@ -290,6 +325,9 @@ def decide_entry_lifecycle(
             order_status=order_status,
             local_transition_allowed=True,
             requires_immediate_protection=False,
+            required_recovery_action=(
+                EntryRecoveryAction.NONE
+            ),
             reason=(
                 "The entry order reached a terminal "
                 "state without a fill. The local "
@@ -305,6 +343,34 @@ def decide_entry_lifecycle(
         ),
     )
 
+
+def entry_observation_key(
+    order: EquityOrder,
+    average_fill_price: Any = None,
+) -> str:
+    payload = {
+        "order_id": order.order_id,
+        "symbol": order.symbol,
+        "state": order.state,
+        "side": order.side,
+        "order_type": order.order_type,
+        "trigger": order.trigger,
+        "quantity": str(order.quantity),
+        "cumulative_quantity": str(
+            order.cumulative_quantity
+        ),
+        "average_fill_price": str(
+            average_fill_price
+        ),
+    }
+
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    return hashlib.sha256(encoded).hexdigest()
 
 class EntryLifecycleCoordinator:
     """
@@ -327,6 +393,8 @@ class EntryLifecycleCoordinator:
         trade_id: str,
         order: EquityOrder,
         average_fill_price: Any = None,
+        observation_at: datetime | None = None,
+        observation_key: str | None = None,
     ) -> EntryLifecycleResult:
         before = self.trade_store.get_trade(
             trade_id
@@ -342,32 +410,148 @@ class EntryLifecycleCoordinator:
 
         after = before
         changed = False
+        timestamp = (
+            observation_at
+            or datetime.now(timezone.utc)
+        )
+        stable_key = (
+            observation_key
+            or entry_observation_key(
+                order,
+                average_fill_price,
+            )
+        )
+
+        filled_decimal = (
+            decision.order_status
+            .filled_quantity
+        )
+
+        if (
+            filled_decimal
+            == filled_decimal.to_integral_value()
+        ):
+            observed_filled = int(
+                filled_decimal
+            )
+        else:
+            observed_filled = (
+                before.filled_quantity
+            )
+
+        parsed_average_price = decimal_price(
+            average_fill_price
+        )
 
         if (
             decision.action
             == EntryLifecycleAction.MARK_FULL_FILL
         ):
-            parsed_average_price = decimal_price(
-                average_fill_price
-            )
-
-            if parsed_average_price is None:
-                raise RuntimeError(
-                    "Lifecycle decision allowed a full "
-                    "fill without a valid average price."
-                )
-
-            after = (
-                self.trade_store.mark_entry_filled(
+            after, changed = (
+                self.trade_store
+                .persist_entry_observation(
                     trade_id,
-                    filled_quantity=before.quantity,
+                    status=(
+                        TradeStatus
+                        .PROTECTION_PENDING
+                    ),
+                    filled_quantity=(
+                        observed_filled
+                    ),
                     average_entry_price=(
                         parsed_average_price
                     ),
+                    required_action=(
+                        decision
+                        .required_recovery_action
+                    ),
+                    last_completed_step=(
+                        EntryRecoveryStep
+                        .FULL_FILL_CLASSIFIED
+                    ),
+                    observation_key=stable_key,
+                    observed_at=timestamp,
                 )
             )
 
-            changed = True
+        elif (
+            decision.action
+            == EntryLifecycleAction
+            .PROTECT_PARTIAL_FILL
+        ):
+            terminal_partial = (
+                decision.order_status
+                .normalized_state
+                in {
+                    "cancelled",
+                    "rejected",
+                }
+            )
+
+            after, changed = (
+                self.trade_store
+                .persist_entry_observation(
+                    trade_id,
+                    status=(
+                        TradeStatus
+                        .RECOVERY_REQUIRED
+                        if terminal_partial
+                        else TradeStatus
+                        .ENTRY_PARTIALLY_FILLED
+                    ),
+                    filled_quantity=(
+                        observed_filled
+                    ),
+                    average_entry_price=(
+                        parsed_average_price
+                    ),
+                    required_action=(
+                        decision
+                        .required_recovery_action
+                    ),
+                    last_completed_step=(
+                        EntryRecoveryStep
+                        .PARTIAL_FILL_CLASSIFIED
+                    ),
+                    observation_key=stable_key,
+                    observed_at=timestamp,
+                )
+            )
+
+        elif (
+            decision.action
+            == EntryLifecycleAction.FAIL_CLOSED
+        ):
+            after, changed = (
+                self.trade_store
+                .persist_entry_observation(
+                    trade_id,
+                    status=(
+                        TradeStatus
+                        .RECOVERY_REQUIRED
+                    ),
+                    filled_quantity=(
+                        observed_filled
+                    ),
+                    average_entry_price=(
+                        parsed_average_price
+                    ),
+                    required_action=(
+                        EntryRecoveryAction
+                        .RECONCILE_BROKER_STATE
+                    ),
+                    last_completed_step=(
+                        EntryRecoveryStep
+                        .AMBIGUOUS_STATE_RECORDED
+                    ),
+                    observation_key=stable_key,
+                    observed_at=timestamp,
+                    failure_reason=(
+                        decision.reason
+                    ),
+                    operator_ack_required=True,
+                )
+            )
 
         elif (
             decision.action
@@ -382,6 +566,7 @@ class EntryLifecycleCoordinator:
                         "broker_entry_"
                         f"{decision.order_status.phase.value}"
                     ),
+                    occurred_at=timestamp,
                 )
             )
 

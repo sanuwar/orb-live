@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
@@ -123,10 +123,15 @@ def test_full_fill_requires_average_fill_price(
         .requires_immediate_protection
         is True
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.ENTRY_PENDING
+        == TradeStatus.RECOVERY_REQUIRED
+    )
+    assert result.trade_after.filled_quantity == 10
+    assert (
+        result.trade_after.operator_ack_required
+        is True
     )
 
 
@@ -162,7 +167,7 @@ def test_full_fill_updates_local_trade(
     assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.OPEN_UNPROTECTED
+        == TradeStatus.PROTECTION_PENDING
     )
     assert (
         result.trade_after.filled_quantity
@@ -273,10 +278,14 @@ def test_partial_fill_requires_protection_without_transition(
         .requires_immediate_protection
         is True
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.ENTRY_PENDING
+        == TradeStatus.RECOVERY_REQUIRED
+    )
+    assert (
+        result.trade_after.filled_quantity
+        == 4
     )
     assert (
         result.decision.order_status
@@ -454,8 +463,8 @@ def test_unknown_broker_state_fails_closed(
         result.decision.action
         == EntryLifecycleAction.FAIL_CLOSED
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert (
         result.trade_after.status
-        == TradeStatus.ENTRY_PENDING
+        == TradeStatus.RECOVERY_REQUIRED
     )

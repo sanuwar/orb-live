@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -377,10 +377,10 @@ class BrokerActionPlanner:
     ) -> BrokerActionPlan:
         blockers: list[PlanBlocker] = []
 
-        if (
-            trade.status
-            != TradeStatus.OPEN_UNPROTECTED
-        ):
+        if trade.status not in {
+            TradeStatus.PROTECTION_PENDING,
+            TradeStatus.OPEN_UNPROTECTED,
+        }:
             blockers.append(
                 PlanBlocker(
                     code="trade_not_unprotected",
@@ -696,6 +696,7 @@ class BrokerActionPlanner:
         blockers: list[PlanBlocker] = []
 
         if trade.status not in {
+            TradeStatus.PROTECTION_PENDING,
             TradeStatus.OPEN_UNPROTECTED,
             TradeStatus.OPEN_PROTECTED,
         }:

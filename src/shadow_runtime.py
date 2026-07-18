@@ -95,6 +95,7 @@ class ShadowRuntimeReport:
     open_unprotected_trades: int
     warnings: tuple[str, ...]
     live_order_capable: bool = False
+    durable_entry_halt: bool = False
 
     @property
     def has_critical_issue(self) -> bool:
@@ -145,6 +146,7 @@ class ShadowRuntimeReport:
             account.agentic_allowed
             and account.state == "active"
             and not self.live_order_capable
+            and not self.durable_entry_halt
             and not self.has_critical_issue
             and not (
                 self.requires_immediate_protection
@@ -158,12 +160,19 @@ def expected_position_count(
     return sum(
         1
         for trade in trades
-        if trade.status
-        in {
-            TradeStatus.OPEN_UNPROTECTED,
-            TradeStatus.OPEN_PROTECTED,
-            TradeStatus.EXIT_PENDING,
-        }
+        if (
+            trade.filled_quantity > 0
+            and trade.status
+            in {
+                TradeStatus
+                .ENTRY_PARTIALLY_FILLED,
+                TradeStatus.PROTECTION_PENDING,
+                TradeStatus.RECOVERY_REQUIRED,
+                TradeStatus.OPEN_UNPROTECTED,
+                TradeStatus.OPEN_PROTECTED,
+                TradeStatus.EXIT_PENDING,
+            }
+        )
     )
 
 
@@ -173,8 +182,14 @@ def unprotected_trade_count(
     return sum(
         1
         for trade in trades
-        if trade.status
-        == TradeStatus.OPEN_UNPROTECTED
+        if trade.unprotected_quantity > 0
+        and trade.status
+        in {
+            TradeStatus.ENTRY_PARTIALLY_FILLED,
+            TradeStatus.PROTECTION_PENDING,
+            TradeStatus.RECOVERY_REQUIRED,
+            TradeStatus.OPEN_UNPROTECTED,
+        }
     )
 
 
@@ -270,6 +285,10 @@ class ShadowRuntime:
             exit_close_reasons or {}
         )
 
+        self.trade_store.begin_startup_reconciliation(
+            self.strategy_name
+        )
+
         initial_account_state = (
             await self.account_reader.read(
                 account_number=account_number
@@ -343,18 +362,30 @@ class ShadowRuntime:
             )
         )
 
+        timestamp = datetime.now(EASTERN)
+
+        reconciliation_issues = (
+            self.trade_store
+            .apply_startup_reconciliation(
+                strategy=self.strategy_name,
+                account_state=(
+                    refreshed_account_state
+                ),
+                occurred_at=timestamp,
+            )
+        )
+
+        durable_entry_halt = (
+            self.trade_store.is_entry_halted(
+                self.strategy_name
+            )
+        )
+
         active_trades = (
             self.trade_store
             .list_active_trades()
         )
 
-        reconciliation_issues = (
-            self.trade_store.reconcile(
-                refreshed_account_state
-            )
-        )
-
-        timestamp = datetime.now(EASTERN)
         session_date = timestamp.date()
 
         daily_pnl = (
@@ -416,6 +447,9 @@ class ShadowRuntime:
             ),
             trading_enabled=False,
             manual_kill_switch=False,
+            durable_entry_halt=(
+                durable_entry_halt
+            ),
         )
 
         watchdog_decision = (
@@ -514,6 +548,9 @@ class ShadowRuntime:
             ),
             warnings=tuple(warnings),
             live_order_capable=False,
+            durable_entry_halt=(
+                durable_entry_halt
+            ),
         )
 
 

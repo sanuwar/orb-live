@@ -1,4 +1,5 @@
-from copy import deepcopy
+﻿from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -227,3 +228,21 @@ def test_open_position_at_time_exit_must_close():
     assert decision.action == WatchdogAction.CLOSE_POSITION
     assert decision.close_positions is True
     assert "time-exit" in decision.reason.lower()
+
+def test_durable_entry_halt_blocks_entries():
+    watchdog = Watchdog(enabled_config())
+    snapshot = replace(
+        healthy_snapshot(),
+        durable_entry_halt=True,
+    )
+
+    decision = watchdog.evaluate(snapshot)
+
+    assert decision.healthy is False
+    assert decision.action == (
+        WatchdogAction.BLOCK_NEW_ENTRIES
+    )
+    assert decision.block_new_entries is True
+    assert decision.cancel_entry_orders is True
+    assert decision.close_positions is False
+    assert "durable" in decision.reason.lower()

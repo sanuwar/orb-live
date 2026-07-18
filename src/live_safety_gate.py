@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
@@ -379,6 +379,16 @@ class LiveSafetyGate:
                 )
             )
 
+        if report.durable_entry_halt:
+            failures.append(
+                GateFailure(
+                    code="durable_entry_halt",
+                    message=(
+                        "A durable entry recovery or "
+                        "startup halt is active."
+                    ),
+                )
+            )
         if (
             self.strategy.get("enabled")
             is not True

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
@@ -229,7 +229,7 @@ async def test_open_unprotected_trade_requires_protection(
     )
     assert result.requires_reconciliation is True
     assert result.trade_after.status == (
-        TradeStatus.OPEN_UNPROTECTED
+        TradeStatus.PROTECTION_PENDING
     )
     assert observer.calls == []
 
@@ -315,7 +315,7 @@ async def test_full_entry_fill_updates_ledger_and_requires_stop(
     )
     assert result.requires_reconciliation is False
     assert result.trade_after.status == (
-        TradeStatus.OPEN_UNPROTECTED
+        TradeStatus.PROTECTION_PENDING
     )
     assert result.trade_after.average_entry_price == (
         Decimal("100.25")
@@ -398,15 +398,16 @@ async def test_partial_entry_fill_requires_reconciliation(
         == OrderMonitorAction
         .RECONCILE_IMMEDIATELY
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert (
         result.requires_immediate_protection
         is True
     )
     assert result.requires_reconciliation is True
     assert result.trade_after.status == (
-        TradeStatus.ENTRY_PENDING
+        TradeStatus.ENTRY_PARTIALLY_FILLED
     )
+    assert result.trade_after.filled_quantity == 4
 
 
 @pytest.mark.anyio

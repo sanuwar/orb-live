@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
@@ -94,7 +94,7 @@ def make_account_state(
     return AccountState(
         account=AccountInfo(
             account_number="TEST12345678",
-            masked_account_number="••••5678",
+            masked_account_number="â€¢â€¢â€¢â€¢5678",
             brokerage_account_type="individual",
             trading_type="cash",
             nickname="Test",
@@ -446,4 +446,22 @@ def test_missing_risk_configuration_fails_closed():
     )
     assert decision.has_failure(
         "missing_config_max_entries_per_day"
+    )
+
+def test_durable_entry_halt_fails_live_gate():
+    report = replace(
+        make_report(),
+        durable_entry_halt=True,
+    )
+
+    decision = LiveSafetyGate(
+        enabled_config()
+    ).evaluate(
+        report,
+        valid_context(),
+    )
+
+    assert decision.allowed is False
+    assert decision.has_failure(
+        "durable_entry_halt"
     )
