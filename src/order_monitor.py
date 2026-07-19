@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 from enum import Enum
 from typing import Any
@@ -15,6 +16,7 @@ try:
     from .exit_order_lifecycle import (
         ExitOrderAction,
         ExitOrderLifecycleCoordinator,
+        exit_observation_key,
     )
     from .order_observer import (
         EquityOrderObserver,
@@ -27,6 +29,8 @@ try:
         protective_stop_observation_key,
     )
     from .trade_state import (
+        ExitRecoveryAction,
+        ExitRecoveryStep,
         StopRecoveryAction,
         StopRecoveryStep,
         TradeRecord,
@@ -42,6 +46,7 @@ except ImportError:
     from exit_order_lifecycle import (
         ExitOrderAction,
         ExitOrderLifecycleCoordinator,
+        exit_observation_key,
     )
     from order_observer import (
         EquityOrderObserver,
@@ -54,6 +59,8 @@ except ImportError:
         protective_stop_observation_key,
     )
     from trade_state import (
+        ExitRecoveryAction,
+        ExitRecoveryStep,
         StopRecoveryAction,
         StopRecoveryStep,
         TradeRecord,
@@ -203,18 +210,24 @@ class ReadOnlyOrderMonitor:
         observed: ObservedEquityOrder,
     ) -> bool:
         order = observed.order
-        observation_key = (
-            protective_stop_observation_key(
+        if role == MonitoredOrderRole.PROTECTIVE_STOP:
+            observation_key = protective_stop_observation_key(
                 order,
                 observed.average_price,
             )
-            if role
-            == MonitoredOrderRole.PROTECTIVE_STOP
-            else entry_observation_key(
+        elif role == MonitoredOrderRole.EXIT:
+            trade = self.trade_store.get_trade(trade_id)
+            observation_key = exit_observation_key(
+                order,
+                observed.average_price,
+                observed.fees,
+                trade.exit_recovery_ref_id,
+            )
+        else:
+            observation_key = entry_observation_key(
                 order,
                 observed.average_price,
             )
-        )
 
         return self.trade_store.record_order_event(
             trade_id=trade_id,
@@ -348,6 +361,62 @@ class ReadOnlyOrderMonitor:
                     )
                 )
 
+            elif role == MonitoredOrderRole.EXIT:
+                failure_key = hashlib.sha256(
+                    (
+                        f"{trade.trade_id}:"
+                        f"{trade.exit_order_id}:"
+                        f"{type(error).__name__}:"
+                        f"{error}"
+                    ).encode("utf-8")
+                ).hexdigest()
+
+                failed_trade, _ = (
+                    self.trade_store.persist_exit_observation(
+                        trade.trade_id,
+                        observation_key=failure_key,
+                        broker_order_id=trade.exit_order_id,
+                        broker_state="observation_failed",
+                        requested_quantity=(
+                            trade.exit_requested_quantity
+                        ),
+                        executed_quantity=(
+                            trade.exit_executed_quantity
+                        ),
+                        average_fill_price=(
+                            None
+                            if trade.exit_executed_quantity == 0
+                            else (
+                                (
+                                    trade.cumulative_exit_proceeds
+                                    - trade.exit_attempt_base_proceeds
+                                )
+                                / Decimal(
+                                    trade.exit_executed_quantity
+                                )
+                            )
+                        ),
+                        order_fees=trade.exit_order_fees,
+                        new_status=(
+                            TradeStatus.EXIT_RECOVERY_REQUIRED
+                        ),
+                        required_action=(
+                            ExitRecoveryAction
+                            .RECONCILE_BROKER_STATE
+                        ),
+                        last_completed_step=(
+                            ExitRecoveryStep
+                            .INCONSISTENT_STATE_RECORDED
+                        ),
+                        failure_code="exit_observation_failed",
+                        failure_reason=(
+                            "Fresh broker exit status could not be "
+                            f"retrieved: {error}"
+                        ),
+                        operator_ack_required=True,
+                        observed_at=datetime.now(timezone.utc),
+                    )
+                )
             return (
                 None,
                 fail_closed_result(
@@ -366,6 +435,10 @@ class ReadOnlyOrderMonitor:
                             .OPEN_PROTECTED,
                             TradeStatus
                             .EXIT_PENDING,
+                            TradeStatus
+                            .EXIT_PARTIALLY_FILLED,
+                            TradeStatus
+                            .EXIT_RECOVERY_REQUIRED,
                         }
                     ),
                 ),
@@ -379,7 +452,7 @@ class ReadOnlyOrderMonitor:
 
         if (
             not observed.is_agentic_order
-            and role != MonitoredOrderRole.PROTECTIVE_STOP
+            and role == MonitoredOrderRole.ENTRY
         ):
             return (
                 observed,
@@ -807,10 +880,11 @@ class ReadOnlyOrderMonitor:
                 ),
             )
 
-        if (
-            trade.status
-            == TradeStatus.EXIT_PENDING
-        ):
+        if trade.status in {
+            TradeStatus.EXIT_PENDING,
+            TradeStatus.EXIT_PARTIALLY_FILLED,
+            TradeStatus.EXIT_RECOVERY_REQUIRED,
+        }:
             role = MonitoredOrderRole.EXIT
             order_id = trade.exit_order_id
 
@@ -847,6 +921,18 @@ class ReadOnlyOrderMonitor:
                         observed.average_price
                     ),
                     close_reason=close_reason,
+                    fees=observed.fees,
+                    observation_key=exit_observation_key(
+                        observed.order,
+                        observed.average_price,
+                        observed.fees,
+                        trade.exit_recovery_ref_id,
+                    ),
+                    observation_at=(
+                        observed.last_transaction_at
+                        or observed.created_at
+                        or datetime.now(timezone.utc)
+                    ),
                 )
             )
 
@@ -858,36 +944,18 @@ class ReadOnlyOrderMonitor:
                 protection = False
                 reconciliation = False
 
-            elif (
-                lifecycle.decision.action
-                == ExitOrderAction.CLOSE_FULL_EXIT
-            ):
+            elif lifecycle.decision.action in {
+                ExitOrderAction.RECORD_PARTIAL_FILL,
+                ExitOrderAction.RECORD_FULL_FILL,
+                ExitOrderAction.RECORD_TERMINAL,
+            }:
                 action = (
-                    OrderMonitorAction
-                    .EXIT_FILLED_TRADE_CLOSED
-                )
-                protection = False
-                reconciliation = False
-
-            elif (
-                lifecycle.decision.action
-                in {
-                    ExitOrderAction
-                    .RECONCILE_PARTIAL_FILL,
-                    ExitOrderAction
-                    .RECONCILE_UNFILLED_TERMINAL,
-                }
-            ):
-                action = (
-                    OrderMonitorAction
-                    .RECONCILE_IMMEDIATELY
+                    OrderMonitorAction.RECONCILE_IMMEDIATELY
                 )
                 protection = (
-                    lifecycle.decision
-                    .position_may_remain_open
+                    lifecycle.decision.position_may_remain_open
                 )
                 reconciliation = True
-
             else:
                 action = (
                     OrderMonitorAction.FAIL_CLOSED

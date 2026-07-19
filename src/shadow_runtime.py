@@ -175,6 +175,8 @@ def expected_position_count(
                 TradeStatus.OPEN_PROTECTED,
                 TradeStatus.STOP_RECOVERY_REQUIRED,
                 TradeStatus.EXIT_PENDING,
+                TradeStatus.EXIT_PARTIALLY_FILLED,
+                TradeStatus.EXIT_RECOVERY_REQUIRED,
             }
         )
     )
@@ -195,6 +197,9 @@ def unprotected_trade_count(
             TradeStatus.OPEN_UNPROTECTED,
             TradeStatus.STOP_LINKED,
             TradeStatus.STOP_RECOVERY_REQUIRED,
+            TradeStatus.EXIT_PENDING,
+            TradeStatus.EXIT_PARTIALLY_FILLED,
+            TradeStatus.EXIT_RECOVERY_REQUIRED,
         }
     )
 

@@ -20,6 +20,8 @@ from src.account_state import (
 )
 from src.trade_state import (
     DuplicateEntryError,
+    ExitRecoveryAction,
+    ExitRecoveryStep,
     InvalidTransitionError,
     TradeStateError,
     TradeStateStore,
@@ -323,9 +325,19 @@ def test_complete_trade_lifecycle_and_pnl(
         == "stop-1"
     )
 
+    trade = store.mark_protective_stop_inactive(
+        trade.trade_id,
+        reason="Broker confirms stop inactive before separate exit.",
+        occurred_at=TIMESTAMP,
+    )
     trade = store.begin_exit(
         trade.trade_id,
         broker_order_id="exit-1",
+        requested_quantity=10,
+        close_reason="profit_target",
+        intent_type="profit_target",
+        intended_price=Decimal("102"),
+        recovery_ref_id="exit-intent-1",
         occurred_at=TIMESTAMP,
     )
 
@@ -334,14 +346,36 @@ def test_complete_trade_lifecycle_and_pnl(
         == TradeStatus.EXIT_PENDING
     )
 
-    trade = store.close_trade(
+    trade, recorded = store.persist_exit_observation(
         trade.trade_id,
-        average_exit_price=Decimal(
-            "102.10"
+        observation_key="exit-full-1",
+        broker_order_id="exit-1",
+        broker_state="filled",
+        requested_quantity=10,
+        executed_quantity=10,
+        average_fill_price=Decimal("102.10"),
+        order_fees=Decimal("0"),
+        new_status=TradeStatus.EXIT_RECOVERY_REQUIRED,
+        required_action=(
+            ExitRecoveryAction.RECONCILE_BROKER_STATE
         ),
-        reason="profit_target",
-        occurred_at=TIMESTAMP,
+        last_completed_step=(
+            ExitRecoveryStep.FULL_FILL_RECORDED
+        ),
+        failure_code=None,
+        failure_reason=None,
+        operator_ack_required=False,
+        observed_at=TIMESTAMP,
     )
+    assert recorded is True
+    assert trade.status == TradeStatus.EXIT_RECOVERY_REQUIRED
+
+    apply_broker_snapshot(
+        store,
+        strategy="orb_v0",
+        account_state=make_account_state(),
+    )
+    trade = store.get_trade(trade.trade_id)
 
     assert trade.status == TradeStatus.CLOSED
     assert trade.realized_pnl == Decimal(
@@ -358,7 +392,7 @@ def test_complete_trade_lifecycle_and_pnl(
     )
 
     assert store.list_active_trades() == ()
-    assert store.count_trade_events() == 7
+    assert store.count_trade_events() == 10
 
 
 def test_partial_entry_fill_fails_closed(

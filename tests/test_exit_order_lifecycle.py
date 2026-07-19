@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from tests.snapshot_helpers import confirm_linked_stop
 
 from src.account_state import EquityOrder
@@ -12,6 +14,9 @@ from src.exit_order_lifecycle import (
     decide_exit_order_lifecycle,
 )
 from src.trade_state import (
+    ExitRecoveryAction,
+    ExitRecoveryStep,
+    TradeStateError,
     TradeStateStore,
     TradeStatus,
 )
@@ -20,11 +25,7 @@ from src.trade_state import (
 SESSION_DATE = date(2026, 7, 17)
 
 
-def make_exit_pending_trade(
-    store: TradeStateStore,
-    *,
-    with_protective_stop: bool = False,
-):
+def make_open_trade(store: TradeStateStore):
     trade = store.reserve_entry(
         strategy="orb_v0",
         symbol="AAPL",
@@ -34,28 +35,27 @@ def make_exit_pending_trade(
         initial_stop=Decimal("99"),
         target_price=Decimal("102"),
     )
-
     trade = store.attach_entry_order(
         trade.trade_id,
         broker_order_id="entry-1",
     )
-
-    trade = store.mark_entry_filled(
+    return store.mark_entry_filled(
         trade.trade_id,
         filled_quantity=10,
         average_entry_price=Decimal("100"),
     )
 
-    if with_protective_stop:
-        trade = store.attach_protective_stop(
-            trade.trade_id,
-            broker_order_id="stop-1",
-        )
-        trade = confirm_linked_stop(store, trade)
 
+def make_exit_pending_trade(store: TradeStateStore):
+    trade = make_open_trade(store)
     return store.begin_exit(
         trade.trade_id,
         broker_order_id="exit-1",
+        requested_quantity=10,
+        close_reason="profit_target",
+        intent_type="profit_target",
+        intended_price=Decimal("102"),
+        recovery_ref_id="exit-intent-1",
     )
 
 
@@ -69,6 +69,8 @@ def make_exit_order(
     side: str = "sell",
     trigger: str = "immediate",
     order_type: str = "limit",
+    placed_agent: str = "agentic",
+    limit_price: str = "102",
 ) -> EquityOrder:
     return EquityOrder(
         order_id=order_id,
@@ -77,67 +79,41 @@ def make_exit_order(
         order_type=order_type,
         state=state,
         quantity=Decimal(quantity),
-        cumulative_quantity=Decimal(
-            cumulative_quantity
-        ),
-        limit_price=Decimal("102"),
+        cumulative_quantity=Decimal(cumulative_quantity),
+        limit_price=Decimal(limit_price),
         stop_price=None,
         trigger=trigger,
-        placed_agent="agentic",
+        placed_agent=placed_agent,
     )
 
 
-def test_pending_exit_waits_without_ledger_change(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+def test_pending_exit_persists_observation_and_waits(tmp_path):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = make_exit_pending_trade(store)
 
-    result = ExitOrderLifecycleCoordinator(
-        store
-    ).apply(
+    result = ExitOrderLifecycleCoordinator(store).apply(
         trade_id=trade.trade_id,
         order=make_exit_order(),
         close_reason="profit_target",
     )
 
+    assert result.decision.action == ExitOrderAction.WAIT
+    assert result.ledger_changed is True
+    assert result.recovery_event_recorded is True
+    assert result.trade_after.status == TradeStatus.EXIT_PENDING
     assert (
-        result.decision.action
-        == ExitOrderAction.WAIT
+        result.trade_after.last_completed_exit_recovery_step
+        == ExitRecoveryStep.OBSERVATION_RECORDED.value
     )
-    assert result.ledger_changed is False
-    assert result.trade_before == result.trade_after
-    assert (
-        result.trade_after.status
-        == TradeStatus.EXIT_PENDING
-    )
-    assert (
-        result.decision.position_may_remain_open
-        is True
-    )
-    assert (
-        result.decision
-        .requires_immediate_reconciliation
-        is False
-    )
-    assert store.count_trade_events() == 4
+    assert result.decision.requires_immediate_reconciliation is False
+    assert store.count_exit_recovery_events() == 1
 
 
-def test_full_exit_requires_average_fill_price(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+def test_full_exit_without_average_price_fails_closed_durably(tmp_path):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = make_exit_pending_trade(store)
 
-    result = ExitOrderLifecycleCoordinator(
-        store
-    ).apply(
+    result = ExitOrderLifecycleCoordinator(store).apply(
         trade_id=trade.trade_id,
         order=make_exit_order(
             state="filled",
@@ -146,38 +122,19 @@ def test_full_exit_requires_average_fill_price(
         close_reason="profit_target",
     )
 
-    assert (
-        result.decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert (
-        result.decision.position_may_remain_open
-        is False
-    )
-    assert (
-        result.decision
-        .requires_immediate_reconciliation
-        is True
-    )
-    assert result.ledger_changed is False
-    assert (
-        result.trade_after.status
-        == TradeStatus.EXIT_PENDING
-    )
+    assert result.decision.action == ExitOrderAction.FAIL_CLOSED
+    assert result.ledger_changed is True
+    assert result.trade_after.status == TradeStatus.EXIT_RECOVERY_REQUIRED
+    assert result.trade_after.exit_executed_quantity == 0
+    assert result.trade_after.cumulative_exited_quantity == 0
+    assert result.trade_after.exit_operator_ack_required is True
 
 
-def test_full_exit_requires_close_reason(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+def test_supplied_close_reason_must_match_durable_intent(tmp_path):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = make_exit_pending_trade(store)
 
-    result = ExitOrderLifecycleCoordinator(
-        store
-    ).apply(
+    result = ExitOrderLifecycleCoordinator(store).apply(
         trade_id=trade.trade_id,
         order=make_exit_order(
             state="filled",
@@ -187,28 +144,16 @@ def test_full_exit_requires_close_reason(
         close_reason="",
     )
 
-    assert (
-        result.decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert "close reason" in (
-        result.decision.reason.lower()
-    )
-    assert result.ledger_changed is False
+    assert result.decision.action == ExitOrderAction.FAIL_CLOSED
+    assert "durable intent" in result.decision.reason
+    assert result.trade_after.status == TradeStatus.EXIT_RECOVERY_REQUIRED
 
 
-def test_full_exit_closes_local_trade(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+def test_full_exit_fill_waits_for_flat_snapshot(tmp_path):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = make_exit_pending_trade(store)
 
-    result = ExitOrderLifecycleCoordinator(
-        store
-    ).apply(
+    result = ExitOrderLifecycleCoordinator(store).apply(
         trade_id=trade.trade_id,
         order=make_exit_order(
             state="filled",
@@ -216,331 +161,115 @@ def test_full_exit_closes_local_trade(
         ),
         average_fill_price="102",
         close_reason="profit_target",
+        fees="1.25",
     )
 
+    assert result.decision.action == ExitOrderAction.RECORD_FULL_FILL
+    assert result.trade_after.status == TradeStatus.EXIT_RECOVERY_REQUIRED
+    assert result.trade_after.exit_executed_quantity == 10
+    assert result.trade_after.cumulative_exited_quantity == 10
+    assert result.trade_after.exit_remaining_position_quantity == 0
+    assert result.trade_after.cumulative_average_exit_price == Decimal("102")
+    assert result.trade_after.cumulative_realized_pnl == Decimal("20")
+    assert result.trade_after.cumulative_exit_fees == Decimal("1.25")
+    assert result.trade_after.close_reason is None
+    assert result.trade_after.closed_at is None
     assert (
-        result.decision.action
-        == ExitOrderAction.CLOSE_FULL_EXIT
+        result.trade_after.required_exit_recovery_action
+        == ExitRecoveryAction.RECONCILE_BROKER_STATE
     )
-    assert result.ledger_changed is True
-    assert (
-        result.trade_after.status
-        == TradeStatus.CLOSED
-    )
-    assert (
-        result.trade_after.average_exit_price
-        == Decimal("102")
-    )
-    assert (
-        result.trade_after.realized_pnl
-        == Decimal("20")
-    )
-    assert (
-        result.trade_after.close_reason
-        == "profit_target"
-    )
-    assert (
-        result.decision.position_may_remain_open
-        is False
-    )
-    assert store.count_trade_events() == 5
 
 
-def test_partial_exit_requires_reconciliation(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+def test_partial_exit_persists_quantity_pnl_and_recovery(tmp_path):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = make_exit_pending_trade(store)
 
-    result = ExitOrderLifecycleCoordinator(
-        store
-    ).apply(
+    result = ExitOrderLifecycleCoordinator(store).apply(
         trade_id=trade.trade_id,
         order=make_exit_order(
             state="partially_filled",
             cumulative_quantity="4",
         ),
-        close_reason="time_exit",
+        average_fill_price="101",
+        close_reason="profit_target",
+        fees="0.50",
     )
 
-    assert (
-        result.decision.action
-        == ExitOrderAction
-        .RECONCILE_PARTIAL_FILL
-    )
-    assert (
-        result.decision
-        .requires_immediate_reconciliation
-        is True
-    )
-    assert (
-        result.decision.position_may_remain_open
-        is True
-    )
-    assert result.ledger_changed is False
-    assert (
-        result.trade_after.status
-        == TradeStatus.EXIT_PENDING
-    )
-    assert (
-        result.decision.order_status
-        .filled_quantity
-        == Decimal("4")
-    )
+    assert result.decision.action == ExitOrderAction.RECORD_PARTIAL_FILL
+    assert result.trade_after.status == TradeStatus.EXIT_PARTIALLY_FILLED
+    assert result.trade_after.exit_executed_quantity == 4
+    assert result.trade_after.exit_remaining_position_quantity == 6
+    assert result.trade_after.cumulative_realized_pnl == Decimal("4")
+    assert result.trade_after.realized_pnl == Decimal("4")
+    assert result.trade_after.cumulative_exit_fees == Decimal("0.50")
+    assert result.decision.requires_immediate_reconciliation is True
 
 
-def test_cancelled_unfilled_exit_requires_reconciliation(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+@pytest.mark.parametrize("state", ["cancelled", "rejected"])
+def test_unfilled_terminal_exit_requires_durable_recovery(tmp_path, state):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = make_exit_pending_trade(store)
 
-    result = ExitOrderLifecycleCoordinator(
-        store
-    ).apply(
+    result = ExitOrderLifecycleCoordinator(store).apply(
         trade_id=trade.trade_id,
-        order=make_exit_order(
-            state="cancelled",
-        ),
-        close_reason="time_exit",
-    )
-
-    assert (
-        result.decision.action
-        == ExitOrderAction
-        .RECONCILE_UNFILLED_TERMINAL
-    )
-    assert result.ledger_changed is False
-    assert (
-        result.trade_after.status
-        == TradeStatus.EXIT_PENDING
-    )
-    assert (
-        result.decision.position_may_remain_open
-        is True
-    )
-    assert (
-        result.decision
-        .requires_immediate_reconciliation
-        is True
-    )
-
-
-def test_rejected_unfilled_exit_requires_reconciliation(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
-    trade = make_exit_pending_trade(store)
-
-    result = ExitOrderLifecycleCoordinator(
-        store
-    ).apply(
-        trade_id=trade.trade_id,
-        order=make_exit_order(
-            state="rejected",
-        ),
-        close_reason="time_exit",
-    )
-
-    assert (
-        result.decision.action
-        == ExitOrderAction
-        .RECONCILE_UNFILLED_TERMINAL
-    )
-    assert result.ledger_changed is False
-    assert (
-        result.trade_after.status
-        == TradeStatus.EXIT_PENDING
-    )
-
-
-def test_exit_order_id_mismatch_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
-    trade = make_exit_pending_trade(store)
-
-    decision = decide_exit_order_lifecycle(
-        trade=trade,
-        order=make_exit_order(
-            order_id="different-exit"
-        ),
+        order=make_exit_order(state=state),
         close_reason="profit_target",
     )
 
-    assert (
-        decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert "order ID" in decision.reason
+    assert result.decision.action == ExitOrderAction.RECORD_TERMINAL
+    assert result.trade_after.status == TradeStatus.EXIT_RECOVERY_REQUIRED
+    assert result.trade_after.exit_remaining_position_quantity == 10
+    assert result.trade_after.exit_operator_ack_required is True
 
 
-def test_exit_symbol_mismatch_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+@pytest.mark.parametrize(
+    ("override", "reason_text"),
+    [
+        ({"order_id": "different-exit"}, "order id"),
+        ({"symbol": "MSFT"}, "symbol"),
+        ({"side": "buy"}, "sell"),
+        ({"trigger": "stop"}, "trigger"),
+        ({"order_type": "market"}, "limit"),
+        ({"quantity": "9"}, "quantity"),
+        ({"placed_agent": "manual"}, "agentic"),
+        ({"limit_price": "103"}, "price"),
+    ],
+)
+def test_mismatched_exit_evidence_fails_closed(tmp_path, override, reason_text):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = make_exit_pending_trade(store)
 
     decision = decide_exit_order_lifecycle(
         trade=trade,
-        order=make_exit_order(
-            symbol="MSFT"
-        ),
+        order=make_exit_order(**override),
         close_reason="profit_target",
     )
 
-    assert (
-        decision.action
-        == ExitOrderAction.FAIL_CLOSED
+    assert decision.action == ExitOrderAction.FAIL_CLOSED
+    assert reason_text in decision.reason.lower()
+
+
+def test_linked_protective_stop_blocks_separate_exit_intent(tmp_path):
+    store = TradeStateStore(tmp_path / "state.sqlite")
+    trade = make_open_trade(store)
+    trade = store.attach_protective_stop(
+        trade.trade_id,
+        broker_order_id="stop-1",
     )
-    assert "symbol" in decision.reason.lower()
+    trade = confirm_linked_stop(store, trade)
+
+    with pytest.raises(TradeStateError, match="stop remains linked"):
+        store.begin_exit(
+            trade.trade_id,
+            broker_order_id="exit-1",
+            requested_quantity=10,
+            close_reason="profit_target",
+            intent_type="profit_target",
+        )
 
 
-def test_non_sell_exit_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
-    trade = make_exit_pending_trade(store)
-
-    decision = decide_exit_order_lifecycle(
-        trade=trade,
-        order=make_exit_order(
-            side="buy"
-        ),
-        close_reason="profit_target",
-    )
-
-    assert (
-        decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert "sell order" in decision.reason
-
-
-def test_unexpected_exit_trigger_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
-    trade = make_exit_pending_trade(store)
-
-    decision = decide_exit_order_lifecycle(
-        trade=trade,
-        order=make_exit_order(
-            trigger="stop"
-        ),
-        close_reason="profit_target",
-    )
-
-    assert (
-        decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert "trigger" in decision.reason.lower()
-
-
-def test_non_limit_exit_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
-    trade = make_exit_pending_trade(store)
-
-    decision = decide_exit_order_lifecycle(
-        trade=trade,
-        order=make_exit_order(
-            order_type="market"
-        ),
-        close_reason="time_exit",
-    )
-
-    assert (
-        decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert "limit order" in decision.reason
-
-
-def test_exit_quantity_mismatch_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
-    trade = make_exit_pending_trade(store)
-
-    decision = decide_exit_order_lifecycle(
-        trade=trade,
-        order=make_exit_order(
-            quantity="9"
-        ),
-        close_reason="profit_target",
-    )
-
-    assert (
-        decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert "quantity" in decision.reason.lower()
-
-
-def test_linked_protective_stop_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
-    trade = make_exit_pending_trade(
-        store,
-        with_protective_stop=True,
-    )
-
-    decision = decide_exit_order_lifecycle(
-        trade=trade,
-        order=make_exit_order(),
-        close_reason="profit_target",
-    )
-
-    assert (
-        decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert "protective-stop" in (
-        decision.reason.lower()
-    )
-
-
-def test_non_exit_pending_trade_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+def test_non_exit_lifecycle_trade_fails_closed(tmp_path):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = store.reserve_entry(
         strategy="orb_v0",
         symbol="AAPL",
@@ -557,41 +286,21 @@ def test_non_exit_pending_trade_fails_closed(
         close_reason="profit_target",
     )
 
-    assert (
-        decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert (
-        "not in the exit-pending state"
-        in decision.reason
-    )
+    assert decision.action == ExitOrderAction.FAIL_CLOSED
+    assert "durable exit lifecycle" in decision.reason
 
 
-def test_unknown_broker_state_fails_closed(
-    tmp_path,
-):
-    store = TradeStateStore(
-        tmp_path / "state.sqlite"
-    )
-
+def test_unknown_broker_state_is_persisted_fail_closed(tmp_path):
+    store = TradeStateStore(tmp_path / "state.sqlite")
     trade = make_exit_pending_trade(store)
 
-    result = ExitOrderLifecycleCoordinator(
-        store
-    ).apply(
+    result = ExitOrderLifecycleCoordinator(store).apply(
         trade_id=trade.trade_id,
-        order=make_exit_order(
-            state="unexpected_state"
-        ),
+        order=make_exit_order(state="unexpected_state"),
         close_reason="profit_target",
     )
 
-    assert (
-        result.decision.action
-        == ExitOrderAction.FAIL_CLOSED
-    )
-    assert result.ledger_changed is False
-    assert (
-        result.trade_after.status
-        == TradeStatus.EXIT_PENDING
-    )
+    assert result.decision.action == ExitOrderAction.FAIL_CLOSED
+    assert result.ledger_changed is True
+    assert result.trade_after.status == TradeStatus.EXIT_RECOVERY_REQUIRED
+    assert result.trade_after.exit_operator_ack_required is True
