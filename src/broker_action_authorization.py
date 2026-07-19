@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from typing import Any
@@ -17,12 +17,16 @@ try:
     from .broker_snapshot import (
         DEFAULT_MAXIMUM_SNAPSHOT_AGE,
         BrokerSnapshot,
+        account_fingerprint,
         validate_snapshot,
     )
+    from .dry_run_engine import DryRunPlan
+    from .live_safety_gate import SafetyGateDecision
     from .trade_state import (
         BrokerActionAuthorizationRecord,
         TradeStateError,
         TradeStateStore,
+        TradeStatus,
     )
 except ImportError:
     from broker_action_plan import (
@@ -34,16 +38,21 @@ except ImportError:
     from broker_snapshot import (
         DEFAULT_MAXIMUM_SNAPSHOT_AGE,
         BrokerSnapshot,
+        account_fingerprint,
         validate_snapshot,
     )
+    from dry_run_engine import DryRunPlan
+    from live_safety_gate import SafetyGateDecision
     from trade_state import (
         BrokerActionAuthorizationRecord,
         TradeStateError,
         TradeStateStore,
+        TradeStatus,
     )
 
 
 DEFAULT_AUTHORIZATION_TTL = timedelta(seconds=15)
+DEFAULT_MAXIMUM_ENTRY_PLAN_AGE = timedelta(seconds=15)
 
 
 class BrokerActionAuthorizationError(TradeStateError):
@@ -183,6 +192,186 @@ def _validate_payload_accounts(
             )
 
 
+def _decimal_payload_value(
+    payload: dict[str, Any],
+    field_name: str,
+) -> Decimal | None:
+    try:
+        return Decimal(str(payload[field_name]))
+    except (
+        InvalidOperation,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+
+def _payload_account_matches(
+    payload: dict[str, Any],
+    expected_account_fingerprint: str,
+) -> bool:
+    try:
+        return account_fingerprint(
+            str(payload.get("account_number", ""))
+        ) == expected_account_fingerprint
+    except ValueError:
+        return False
+
+
+def _validate_entry_binding(
+    *,
+    trade: Any,
+    entry_plan: DryRunPlan | None,
+    safety_decision: SafetyGateDecision | None,
+    snapshot: BrokerSnapshot,
+    expected_account_fingerprint: str,
+    evaluated_at: datetime,
+    maximum_entry_plan_age: timedelta,
+) -> BrokerActionPlan:
+    if (
+        entry_plan is None
+        or safety_decision is None
+        or not safety_decision.allowed
+        or safety_decision.failures
+    ):
+        raise BrokerActionAuthorizationError(
+            "Entry authorization requires an allowed, failure-free safety decision and its dry-run plan."
+        )
+
+    generated_at = entry_plan.generated_at
+    if (
+        maximum_entry_plan_age <= timedelta(0)
+        or generated_at is None
+        or generated_at.tzinfo is None
+        or generated_at > evaluated_at
+        or evaluated_at - generated_at
+        > maximum_entry_plan_age
+    ):
+        raise BrokerActionAuthorizationError(
+            "Entry authorization requires a fresh, timezone-aware dry-run plan."
+        )
+
+    if (
+        trade.status != TradeStatus.RESERVED
+        or trade.filled_quantity != 0
+        or trade.entry_order_id is not None
+    ):
+        raise BrokerActionAuthorizationError(
+            "Entry authorization requires an untouched durable entry reservation."
+        )
+
+    state = snapshot.account_state
+    account = state.account
+    if state.open_position_count != 0 or state.open_orders:
+        raise BrokerActionAuthorizationError(
+            "Entry authorization requires fresh broker evidence of a flat account with no open orders."
+        )
+    if (
+        not account.agentic_allowed
+        or account.state != "active"
+        or account.trading_type != "cash"
+    ):
+        raise BrokerActionAuthorizationError(
+            "Entry authorization requires an active agentic cash account."
+        )
+
+    review = entry_plan.entry_review_payload
+    placement = entry_plan.entry_placement_payload
+    stop = entry_plan.protective_stop_payload
+    if not all(
+        isinstance(value, dict)
+        for value in (review, placement, stop)
+    ):
+        raise BrokerActionAuthorizationError(
+            "Entry authorization requires complete entry and protective-stop payloads."
+        )
+
+    review = dict(review)
+    placement = dict(placement)
+    stop = dict(stop)
+    placement_for_review = dict(placement)
+    entry_ref_id = str(
+        placement_for_review.pop("ref_id", "")
+    ).strip()
+    if not entry_ref_id or review != placement_for_review:
+        raise BrokerActionAuthorizationError(
+            "Entry review and placement payloads must describe one identical pre-identified order."
+        )
+
+    for payload, label in (
+        (placement, "entry"),
+        (stop, "protective stop"),
+    ):
+        if (
+            payload.get("time_in_force") != "gfd"
+            or payload.get("market_hours")
+            != "regular_hours"
+            or not str(
+                payload.get("ref_id", "")
+            ).strip()
+        ):
+            raise BrokerActionAuthorizationError(
+                f"The {label} payload must be GFD, regular-hours only, and pre-identified."
+            )
+        if not _payload_account_matches(
+            payload,
+            expected_account_fingerprint,
+        ):
+            raise BrokerActionAuthorizationError(
+                f"The {label} payload account does not match the expected account fingerprint."
+            )
+
+    entry_price = _decimal_payload_value(
+        placement,
+        "limit_price",
+    )
+    stop_price = _decimal_payload_value(
+        stop,
+        "stop_price",
+    )
+    if (
+        entry_plan.symbol.strip().upper()
+        != trade.symbol
+        or entry_plan.shares != trade.quantity
+        or str(
+            placement.get("symbol", "")
+        ).strip().upper() != trade.symbol
+        or str(
+            stop.get("symbol", "")
+        ).strip().upper() != trade.symbol
+        or placement.get("side") != "buy"
+        or placement.get("type") != "limit"
+        or stop.get("side") != "sell"
+        or stop.get("type") != "stop_market"
+        or _decimal_payload_value(
+            placement,
+            "quantity",
+        ) != Decimal(trade.quantity)
+        or _decimal_payload_value(
+            stop,
+            "quantity",
+        ) != Decimal(trade.quantity)
+        or entry_price != trade.planned_entry
+        or stop_price != trade.initial_stop
+        or entry_plan.position_value
+        != trade.planned_entry * trade.quantity
+        or entry_plan.planned_risk
+        != (
+            trade.planned_entry
+            - trade.initial_stop
+        ) * trade.quantity
+    ):
+        raise BrokerActionAuthorizationError(
+            "Entry plan does not match the durable reservation and protective-stop commitment."
+        )
+
+    return BrokerActionPlanner.plan_entry(
+        plan=entry_plan,
+        safety_decision=safety_decision,
+    )
+
+
 def _rebuild_plan(
     plan: BrokerActionPlan,
     *,
@@ -253,6 +442,11 @@ class BrokerActionAuthorizer:
         authorization_ttl: timedelta = (
             DEFAULT_AUTHORIZATION_TTL
         ),
+        entry_plan: DryRunPlan | None = None,
+        safety_decision: SafetyGateDecision | None = None,
+        maximum_entry_plan_age: timedelta = (
+            DEFAULT_MAXIMUM_ENTRY_PLAN_AGE
+        ),
     ) -> BrokerActionAuthorizationResult:
         timestamp = occurred_at or datetime.now(timezone.utc)
         _validate_action_structure(plan)
@@ -290,11 +484,35 @@ class BrokerActionAuthorizer:
                 "Trade strategy does not match the requested authorization strategy."
             )
 
-        rebuilt = _rebuild_plan(
-            plan,
-            trade=trade,
-            open_orders=snapshot.account_state.open_orders,
-        )
+        if plan.purpose == BrokerPlanPurpose.ENTRY:
+            rebuilt = _validate_entry_binding(
+                trade=trade,
+                entry_plan=entry_plan,
+                safety_decision=safety_decision,
+                snapshot=snapshot,
+                expected_account_fingerprint=(
+                    expected_account_fingerprint
+                ),
+                evaluated_at=timestamp,
+                maximum_entry_plan_age=(
+                    maximum_entry_plan_age
+                ),
+            )
+        else:
+            if (
+                entry_plan is not None
+                or safety_decision is not None
+            ):
+                raise BrokerActionAuthorizationError(
+                    "Entry-only evidence cannot be supplied for a non-entry authorization."
+                )
+            rebuilt = _rebuild_plan(
+                plan,
+                trade=trade,
+                open_orders=(
+                    snapshot.account_state.open_orders
+                ),
+            )
         supplied_digest = broker_action_plan_digest(plan)
         rebuilt_digest = broker_action_plan_digest(rebuilt)
         if not rebuilt.allowed or supplied_digest != rebuilt_digest:
@@ -306,7 +524,16 @@ class BrokerActionAuthorizer:
             metadata.completed_at + maximum_snapshot_age
         )
         requested_expiry = timestamp + authorization_ttl
-        expires_at = min(snapshot_expiry, requested_expiry)
+        evidence_expiries = [
+            snapshot_expiry,
+            requested_expiry,
+        ]
+        if plan.purpose == BrokerPlanPurpose.ENTRY:
+            evidence_expiries.append(
+                entry_plan.generated_at
+                + maximum_entry_plan_age
+            )
+        expires_at = min(evidence_expiries)
         if expires_at <= timestamp:
             raise BrokerActionAuthorizationError(
                 "Broker action evidence expires before authorization can be created."

@@ -24,6 +24,11 @@ from src.broker_action_plan import (
     BrokerPlanPurpose,
 )
 from src.broker_snapshot import account_fingerprint
+from src.dry_run_engine import DryRunPlan
+from src.live_safety_gate import (
+    GateFailure,
+    SafetyGateDecision,
+)
 from src.trade_state import (
     BrokerActionAuthorizationStatus,
     TradeStateError,
@@ -65,6 +70,66 @@ def make_store_and_trade(tmp_path):
         occurred_at=NOW - timedelta(minutes=1),
     )
     return store, trade
+
+
+def make_reserved_trade(tmp_path):
+    store = TradeStateStore(tmp_path / "entry-state.sqlite")
+    trade = store.reserve_entry(
+        strategy=STRATEGY,
+        symbol="AAPL",
+        session_date=date(2026, 7, 18),
+        quantity=10,
+        planned_entry=Decimal("100"),
+        initial_stop=Decimal("99"),
+        target_price=Decimal("102"),
+        occurred_at=NOW - timedelta(seconds=2),
+    )
+    return store, trade
+
+
+def entry_dry_run_plan():
+    placement = {
+        "account_number": ACCOUNT_NUMBER,
+        "symbol": "AAPL",
+        "side": "buy",
+        "type": "limit",
+        "quantity": "10",
+        "limit_price": "100",
+        "time_in_force": "gfd",
+        "market_hours": "regular_hours",
+        "ref_id": "fake-entry-ref",
+    }
+    review = dict(placement)
+    review.pop("ref_id")
+    return DryRunPlan(
+        symbol="AAPL",
+        approved=True,
+        reason="Approved for isolated test.",
+        shares=10,
+        planned_risk=Decimal("10"),
+        position_value=Decimal("1000"),
+        entry_review_payload=review,
+        entry_placement_payload=placement,
+        protective_stop_payload={
+            "account_number": ACCOUNT_NUMBER,
+            "symbol": "AAPL",
+            "side": "sell",
+            "type": "stop_market",
+            "quantity": "10",
+            "stop_price": "99",
+            "time_in_force": "gfd",
+            "market_hours": "regular_hours",
+            "ref_id": "fake-stop-ref",
+        },
+        generated_at=NOW - timedelta(seconds=1),
+    )
+
+
+def allowed_safety_decision():
+    return SafetyGateDecision(
+        allowed=True,
+        failures=(),
+    )
 
 
 def account_state(*, open_orders=(), account_number=ACCOUNT_NUMBER):
@@ -173,6 +238,336 @@ def authorize(store, trade, *, plan=None, snapshot=None):
         expected_account_fingerprint=account_fingerprint(ACCOUNT_NUMBER),
         occurred_at=NOW,
     )
+
+
+def entry_action_plan(dry_run_plan):
+    return BrokerActionPlanner.plan_entry(
+        plan=dry_run_plan,
+        safety_decision=allowed_safety_decision(),
+    )
+
+
+def flat_account_state():
+    return replace(
+        account_state(),
+        positions=(),
+    )
+
+
+def authorize_entry(
+    store,
+    trade,
+    *,
+    dry_run_plan=None,
+    safety_decision=None,
+    state=None,
+    action_plan=None,
+):
+    dry_run_plan = dry_run_plan or entry_dry_run_plan()
+    safety_decision = (
+        safety_decision
+        or allowed_safety_decision()
+    )
+    return BrokerActionAuthorizer(store).authorize(
+        plan=(
+            action_plan
+            or BrokerActionPlanner.plan_entry(
+                plan=dry_run_plan,
+                safety_decision=safety_decision,
+            )
+        ),
+        strategy=STRATEGY,
+        trade_id=trade.trade_id,
+        snapshot=make_snapshot(
+            state=state or flat_account_state()
+        ),
+        expected_account_fingerprint=(
+            account_fingerprint(ACCOUNT_NUMBER)
+        ),
+        occurred_at=NOW,
+        entry_plan=dry_run_plan,
+        safety_decision=safety_decision,
+    )
+
+
+def changed_entry_payload_plan(
+    plan,
+    *,
+    entry_changes=None,
+    stop_changes=None,
+    **plan_changes,
+):
+    placement = {
+        **plan.entry_placement_payload,
+        **(entry_changes or {}),
+    }
+    review = dict(placement)
+    review.pop("ref_id", None)
+    stop = {
+        **plan.protective_stop_payload,
+        **(stop_changes or {}),
+    }
+    return replace(
+        plan,
+        entry_review_payload=review,
+        entry_placement_payload=placement,
+        protective_stop_payload=stop,
+        **plan_changes,
+    )
+
+
+def test_entry_authorization_binds_reserved_trade_and_flat_snapshot(
+    tmp_path,
+):
+    store, trade = make_reserved_trade(tmp_path)
+
+    result = authorize_entry(store, trade)
+
+    assert result.created is True
+    assert result.authorization.purpose == "entry"
+    assert result.authorization.trade_id == trade.trade_id
+    assert (
+        result.authorization.source_trade_version
+        == trade.version
+    )
+    assert result.authorization.status == (
+        BrokerActionAuthorizationStatus.AUTHORIZED
+    )
+    assert result.authorization.expires_at == (
+        NOW + timedelta(seconds=14)
+    )
+    assert ACCOUNT_NUMBER.encode() not in (
+        tmp_path / "entry-state.sqlite"
+    ).read_bytes()
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("symbol", "quantity", "entry_price", "stop_price"),
+)
+def test_entry_plan_must_match_durable_reservation(
+    tmp_path,
+    case,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    plan = entry_dry_run_plan()
+    if case == "symbol":
+        plan = changed_entry_payload_plan(
+            plan,
+            entry_changes={"symbol": "MSFT"},
+            stop_changes={"symbol": "MSFT"},
+            symbol="MSFT",
+        )
+    elif case == "quantity":
+        plan = changed_entry_payload_plan(
+            plan,
+            entry_changes={"quantity": "9"},
+            stop_changes={"quantity": "9"},
+            shares=9,
+            planned_risk=Decimal("9"),
+            position_value=Decimal("900"),
+        )
+    elif case == "entry_price":
+        plan = changed_entry_payload_plan(
+            plan,
+            entry_changes={"limit_price": "101"},
+            planned_risk=Decimal("20"),
+            position_value=Decimal("1010"),
+        )
+    else:
+        plan = changed_entry_payload_plan(
+            plan,
+            stop_changes={"stop_price": "98"},
+            planned_risk=Decimal("20"),
+        )
+
+    with pytest.raises(
+        BrokerActionAuthorizationError,
+        match="durable reservation",
+    ):
+        authorize_entry(
+            store,
+            trade,
+            dry_run_plan=plan,
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "review_mismatch",
+        "missing_entry_ref",
+        "extended_hours",
+        "wrong_stop_account",
+        "missing_stop_ref",
+    ),
+)
+def test_entry_payload_integrity_fails_closed(
+    tmp_path,
+    case,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    plan = entry_dry_run_plan()
+    if case == "review_mismatch":
+        plan = replace(
+            plan,
+            entry_review_payload={
+                **plan.entry_review_payload,
+                "limit_price": "100.01",
+            },
+        )
+    elif case == "missing_entry_ref":
+        placement = dict(plan.entry_placement_payload)
+        placement.pop("ref_id")
+        plan = replace(
+            plan,
+            entry_placement_payload=placement,
+        )
+    elif case == "extended_hours":
+        plan = changed_entry_payload_plan(
+            plan,
+            entry_changes={"market_hours": "extended_hours"},
+        )
+    elif case == "wrong_stop_account":
+        plan = changed_entry_payload_plan(
+            plan,
+            stop_changes={"account_number": "OTHER-ACCOUNT"},
+        )
+    else:
+        stop = dict(plan.protective_stop_payload)
+        stop.pop("ref_id")
+        plan = replace(
+            plan,
+            protective_stop_payload=stop,
+        )
+
+    with pytest.raises(BrokerActionAuthorizationError):
+        authorize_entry(
+            store,
+            trade,
+            dry_run_plan=plan,
+        )
+
+
+def test_entry_authorization_requires_flat_eligible_account(
+    tmp_path,
+):
+    store, trade = make_reserved_trade(tmp_path)
+
+    with pytest.raises(
+        BrokerActionAuthorizationError,
+        match="flat account",
+    ):
+        authorize_entry(
+            store,
+            trade,
+            state=account_state(),
+        )
+
+    open_order_state = replace(
+        flat_account_state(),
+        open_orders=(open_stop_order(),),
+    )
+    with pytest.raises(
+        BrokerActionAuthorizationError,
+        match="no open orders",
+    ):
+        authorize_entry(
+            store,
+            trade,
+            state=open_order_state,
+        )
+
+    ineligible = replace(
+        flat_account_state(),
+        account=replace(
+            flat_account_state().account,
+            agentic_allowed=False,
+        ),
+    )
+    with pytest.raises(
+        BrokerActionAuthorizationError,
+        match="agentic cash",
+    ):
+        authorize_entry(
+            store,
+            trade,
+            state=ineligible,
+        )
+
+
+def test_entry_authorization_requires_live_safety_approval(
+    tmp_path,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    blocked = SafetyGateDecision(
+        allowed=False,
+        failures=(
+            GateFailure(
+                code="strategy_disabled",
+                message="Strategy remains disabled.",
+            ),
+        ),
+    )
+    dry_run_plan = entry_dry_run_plan()
+    plan = entry_action_plan(dry_run_plan)
+
+    with pytest.raises(
+        BrokerActionAuthorizationError,
+        match="allowed, failure-free",
+    ):
+        authorize_entry(
+            store,
+            trade,
+            safety_decision=blocked,
+            action_plan=plan,
+            dry_run_plan=dry_run_plan,
+        )
+
+
+@pytest.mark.parametrize(
+    "generated_at",
+    (
+        None,
+        NOW - timedelta(minutes=1),
+        NOW + timedelta(seconds=1),
+    ),
+)
+def test_entry_authorization_requires_fresh_plan_timestamp(
+    tmp_path,
+    generated_at,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    plan = replace(
+        entry_dry_run_plan(),
+        generated_at=generated_at,
+    )
+
+    with pytest.raises(
+        BrokerActionAuthorizationError,
+        match="fresh, timezone-aware",
+    ):
+        authorize_entry(
+            store,
+            trade,
+            dry_run_plan=plan,
+        )
+
+
+def test_entry_authorization_rejects_advanced_reservation(    tmp_path,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    trade = store.attach_entry_order(
+        trade.trade_id,
+        broker_order_id="fake-existing-entry",
+        occurred_at=NOW - timedelta(seconds=1),
+    )
+
+    with pytest.raises(
+        BrokerActionAuthorizationError,
+        match="untouched durable entry reservation",
+    ):
+        authorize_entry(store, trade)
 
 
 def test_authorization_binds_plan_to_fresh_durable_evidence(tmp_path):
@@ -384,7 +779,7 @@ def test_malformed_blocked_and_entry_plans_fail_closed(tmp_path):
     with pytest.raises(BrokerActionAuthorizationError, match="blocker-free"):
         authorize(store, trade, plan=blocked)
 
-    with pytest.raises(BrokerActionAuthorizationError, match="reservation binding"):
+    with pytest.raises(BrokerActionAuthorizationError, match="dry-run plan"):
         authorize(store, trade, plan=replace(valid, purpose=BrokerPlanPurpose.ENTRY))
 
 
