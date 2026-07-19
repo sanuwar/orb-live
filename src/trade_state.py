@@ -2413,6 +2413,21 @@ class TradeStateStore:
                 raise TradeStateError(
                     "Trade changed before broker action authorization could be persisted."
                 )
+            if purpose == "entry":
+                active_halt = connection.execute(
+                    """
+                    SELECT 1
+                    FROM entry_halts
+                    WHERE strategy = ?
+                      AND active = 1
+                    LIMIT 1
+                    """,
+                    (strategy,),
+                ).fetchone()
+                if active_halt is not None:
+                    raise EntryHaltedError(
+                        "Entry authorization is blocked by a durable strategy halt."
+                    )
 
             existing = connection.execute(
                 """
@@ -2584,6 +2599,35 @@ class TradeStateStore:
 
             if (
                 current.status
+                == BrokerActionAuthorizationStatus.INVALIDATED
+            ):
+                raise TradeStateError(
+                    "Broker action authorization is invalidated."
+                )
+
+            active_entry_halt = None
+            if current.purpose == "entry":
+                active_entry_halt = connection.execute(
+                    """
+                    SELECT 1
+                    FROM entry_halts
+                    WHERE strategy = ?
+                      AND active = 1
+                    LIMIT 1
+                    """,
+                    (current.strategy,),
+                ).fetchone()
+                if (
+                    active_entry_halt is not None
+                    and current.status
+                    == BrokerActionAuthorizationStatus.CLAIMED
+                ):
+                    raise EntryHaltedError(
+                        "Claim replay is blocked by a durable strategy halt."
+                    )
+
+            if (
+                current.status
                 == BrokerActionAuthorizationStatus.CLAIMED
             ):
                 if (
@@ -2594,12 +2638,9 @@ class TradeStateStore:
                 raise TradeStateError(
                     "Broker action authorization was already claimed with different evidence or by a different attempt."
                 )
-            if (
-                current.status
-                == BrokerActionAuthorizationStatus.INVALIDATED
-            ):
-                raise TradeStateError(
-                    "Broker action authorization is invalidated."
+            if active_entry_halt is not None:
+                invalidation_reason = (
+                    "Entry claim is blocked by a durable strategy halt."
                 )
 
             trade_row = connection.execute(

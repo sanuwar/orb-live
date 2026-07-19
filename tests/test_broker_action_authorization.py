@@ -31,6 +31,7 @@ from src.live_safety_gate import (
 )
 from src.trade_state import (
     BrokerActionAuthorizationStatus,
+    EntryHaltedError,
     TradeStateError,
     TradeStateStore,
 )
@@ -568,6 +569,92 @@ def test_entry_authorization_rejects_advanced_reservation(    tmp_path,
         match="untouched durable entry reservation",
     ):
         authorize_entry(store, trade)
+
+
+def test_durable_halt_blocks_entry_authorization_at_persistence(
+    tmp_path,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    store.begin_startup_reconciliation(
+        STRATEGY,
+        occurred_at=NOW - timedelta(seconds=1),
+    )
+
+    with pytest.raises(EntryHaltedError, match="durable"):
+        authorize_entry(store, trade)
+
+    assert store.count_broker_action_authorizations() == 0
+
+
+def test_durable_halt_invalidates_unclaimed_entry_authorization(
+    tmp_path,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    result = authorize_entry(store, trade)
+    store.begin_startup_reconciliation(
+        STRATEGY,
+        occurred_at=NOW + timedelta(milliseconds=100),
+    )
+
+    with pytest.raises(
+        TradeStateError,
+        match="durable strategy halt",
+    ):
+        store.claim_broker_action_authorization(
+            result.authorization.authorization_id,
+            plan_digest=result.plan_digest,
+            claim_id="fake-entry-attempt",
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+
+    persisted = store.get_broker_action_authorization(
+        result.authorization.authorization_id
+    )
+    assert persisted.status == (
+        BrokerActionAuthorizationStatus.INVALIDATED
+    )
+    assert store.count_broker_action_authorization_events() == 2
+
+
+def test_durable_halt_blocks_idempotent_entry_claim_replay(
+    tmp_path,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    result = authorize_entry(store, trade)
+    store.claim_broker_action_authorization(
+        result.authorization.authorization_id,
+        plan_digest=result.plan_digest,
+        claim_id="fake-entry-attempt",
+        occurred_at=NOW + timedelta(seconds=1),
+    )
+    store.begin_startup_reconciliation(
+        STRATEGY,
+        occurred_at=NOW + timedelta(seconds=2),
+    )
+
+    with pytest.raises(EntryHaltedError, match="replay"):
+        store.claim_broker_action_authorization(
+            result.authorization.authorization_id,
+            plan_digest=result.plan_digest,
+            claim_id="fake-entry-attempt",
+            occurred_at=NOW + timedelta(seconds=3),
+        )
+
+
+def test_other_strategy_halt_does_not_block_entry_authorization(
+    tmp_path,
+):
+    store, trade = make_reserved_trade(tmp_path)
+    store.begin_startup_reconciliation(
+        "another_strategy",
+        occurred_at=NOW - timedelta(seconds=1),
+    )
+
+    result = authorize_entry(store, trade)
+
+    assert result.authorization.status == (
+        BrokerActionAuthorizationStatus.AUTHORIZED
+    )
 
 
 def test_authorization_binds_plan_to_fresh_durable_evidence(tmp_path):
