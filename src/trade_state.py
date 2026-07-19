@@ -283,6 +283,33 @@ class ExitRecoveryStep(str, Enum):
     PROTECTION_CONFIRMED = "protection_confirmed"
 
 
+class BrokerActionAuthorizationStatus(str, Enum):
+    AUTHORIZED = "authorized"
+    CLAIMED = "claimed"
+    INVALIDATED = "invalidated"
+
+
+@dataclass(frozen=True)
+class BrokerActionAuthorizationRecord:
+    authorization_id: str
+    strategy: str
+    trade_id: str
+    purpose: str
+    plan_digest: str
+    source_trade_version: int
+    reconciliation_id: str
+    snapshot_digest: str
+    account_fingerprint: str
+    status: BrokerActionAuthorizationStatus
+    authorized_at: datetime
+    expires_at: datetime
+    claim_id: str | None
+    claimed_at: datetime | None
+    invalidated_at: datetime | None
+    invalidation_reason: str | None
+    version: int
+
+
 @dataclass(frozen=True)
 class EntryHaltState:
     strategy: str
@@ -692,6 +719,61 @@ class TradeStateStore:
                     );
 
                 CREATE TABLE IF NOT EXISTS
+                    broker_action_authorizations (
+                        authorization_id TEXT PRIMARY KEY,
+                        strategy TEXT NOT NULL,
+                        trade_id TEXT NOT NULL,
+                        purpose TEXT NOT NULL,
+                        plan_digest TEXT NOT NULL,
+                        source_trade_version INTEGER NOT NULL,
+                        reconciliation_id TEXT NOT NULL,
+                        snapshot_digest TEXT NOT NULL,
+                        account_fingerprint TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        authorized_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        claim_id TEXT,
+                        claimed_at TEXT,
+                        invalidated_at TEXT,
+                        invalidation_reason TEXT,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE (
+                            trade_id,
+                            source_trade_version,
+                            reconciliation_id,
+                            plan_digest
+                        ),
+                        FOREIGN KEY(trade_id)
+                            REFERENCES trades(trade_id)
+                    );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_broker_action_authorizations_trade_status
+                ON broker_action_authorizations(
+                    trade_id, status
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_one_active_broker_action_authorization
+                ON broker_action_authorizations(trade_id)
+                WHERE status IN ('authorized', 'claimed');
+
+                CREATE TABLE IF NOT EXISTS
+                    broker_action_authorization_events (
+                        event_id INTEGER PRIMARY KEY
+                            AUTOINCREMENT,
+                        authorization_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        old_status TEXT,
+                        new_status TEXT NOT NULL,
+                        occurred_at TEXT NOT NULL,
+                        details_json TEXT NOT NULL,
+                        FOREIGN KEY(authorization_id)
+                            REFERENCES broker_action_authorizations(
+                                authorization_id
+                            )
+                    );
+                CREATE TABLE IF NOT EXISTS
                     entry_halts (
                         halt_key TEXT PRIMARY KEY,
                         strategy TEXT NOT NULL,
@@ -852,6 +934,25 @@ class TradeStateStore:
                     );
                 END;
 
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_broker_action_authorization_event_update
+                BEFORE UPDATE ON broker_action_authorization_events
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'broker_action_authorization_events are append-only'
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_broker_action_authorization_event_delete
+                BEFORE DELETE ON broker_action_authorization_events
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'broker_action_authorization_events are append-only'
+                    );
+                END;
                 CREATE TRIGGER IF NOT EXISTS
                     prevent_trade_event_update
                 BEFORE UPDATE ON trade_events
@@ -1070,6 +1171,38 @@ class TradeStateStore:
                 WHERE observation_key IS NOT NULL
                 """
             )
+
+    @staticmethod
+    def _row_to_broker_action_authorization(
+        row: sqlite3.Row,
+    ) -> BrokerActionAuthorizationRecord:
+        return BrokerActionAuthorizationRecord(
+            authorization_id=row["authorization_id"],
+            strategy=row["strategy"],
+            trade_id=row["trade_id"],
+            purpose=row["purpose"],
+            plan_digest=row["plan_digest"],
+            source_trade_version=int(
+                row["source_trade_version"]
+            ),
+            reconciliation_id=row["reconciliation_id"],
+            snapshot_digest=row["snapshot_digest"],
+            account_fingerprint=row["account_fingerprint"],
+            status=BrokerActionAuthorizationStatus(
+                row["status"]
+            ),
+            authorized_at=parse_datetime(
+                row["authorized_at"]
+            ),
+            expires_at=parse_datetime(row["expires_at"]),
+            claim_id=row["claim_id"],
+            claimed_at=parse_datetime(row["claimed_at"]),
+            invalidated_at=parse_datetime(
+                row["invalidated_at"]
+            ),
+            invalidation_reason=row["invalidation_reason"],
+            version=int(row["version"]),
+        )
 
     @staticmethod
     def _row_to_trade(
@@ -2121,6 +2254,460 @@ class TradeStateStore:
             raise
 
         return self.get_trade(trade_id)
+
+    def get_broker_action_authorization(
+        self,
+        authorization_id: str,
+    ) -> BrokerActionAuthorizationRecord:
+        authorization_id = authorization_id.strip()
+        if not authorization_id:
+            raise TradeStateError(
+                "Broker action authorization ID is required."
+            )
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM broker_action_authorizations
+                WHERE authorization_id = ?
+                """,
+                (authorization_id,),
+            ).fetchone()
+
+        if row is None:
+            raise TradeStateError(
+                "Broker action authorization was not found."
+            )
+        return self._row_to_broker_action_authorization(row)
+
+    def count_broker_action_authorizations(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count_value
+                FROM broker_action_authorizations
+                """
+            ).fetchone()
+        return int(row["count_value"])
+
+    def count_broker_action_authorization_events(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count_value
+                FROM broker_action_authorization_events
+                """
+            ).fetchone()
+        return int(row["count_value"])
+
+    @staticmethod
+    def _insert_broker_action_authorization_event(
+        connection: sqlite3.Connection,
+        *,
+        authorization_id: str,
+        event_type: str,
+        old_status: BrokerActionAuthorizationStatus | None,
+        new_status: BrokerActionAuthorizationStatus,
+        occurred_at: datetime,
+        details: dict[str, Any],
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO broker_action_authorization_events (
+                authorization_id, event_type, old_status,
+                new_status, occurred_at, details_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                authorization_id,
+                event_type,
+                old_status.value if old_status else None,
+                new_status.value,
+                occurred_at.isoformat(),
+                json.dumps(
+                    details,
+                    sort_keys=True,
+                    default=str,
+                ),
+            ),
+        )
+
+    def authorize_broker_action_plan(
+        self,
+        *,
+        strategy: str,
+        trade_id: str,
+        purpose: str,
+        plan_digest: str,
+        source_trade_version: int,
+        reconciliation_id: str,
+        snapshot_digest: str,
+        account_fingerprint: str,
+        authorized_at: datetime,
+        expires_at: datetime,
+    ) -> tuple[BrokerActionAuthorizationRecord, bool]:
+        strategy = strategy.strip()
+        trade_id = trade_id.strip()
+        purpose = purpose.strip()
+        plan_digest = plan_digest.strip().lower()
+        reconciliation_id = reconciliation_id.strip()
+        snapshot_digest = snapshot_digest.strip().lower()
+        account_fingerprint = account_fingerprint.strip().lower()
+
+        if not strategy or not trade_id or not reconciliation_id:
+            raise TradeStateError(
+                "Strategy, trade, and reconciliation IDs are required for broker action authorization."
+            )
+        if purpose not in {
+            "protect_filled_entry",
+            "replace_protective_stop",
+            "exit_position",
+        }:
+            raise TradeStateError(
+                "Broker action purpose is unsupported or invalid."
+            )
+        for value, label in (
+            (plan_digest, "plan"),
+            (snapshot_digest, "snapshot"),
+            (account_fingerprint, "account"),
+        ):
+            if (
+                len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise TradeStateError(
+                    f"Broker action {label} digest is invalid."
+                )
+        if source_trade_version < 1:
+            raise TradeStateError(
+                "Source trade version must be positive."
+            )
+        if (
+            authorized_at.tzinfo is None
+            or expires_at.tzinfo is None
+            or expires_at <= authorized_at
+        ):
+            raise TradeStateError(
+                "Broker action authorization timestamps are invalid."
+            )
+
+        authorization_id = str(uuid.uuid4())
+        with self._connect() as connection:
+            trade_row = connection.execute(
+                "SELECT * FROM trades WHERE trade_id = ?",
+                (trade_id,),
+            ).fetchone()
+            if trade_row is None:
+                raise TradeNotFoundError(
+                    f"Trade not found: {trade_id}"
+                )
+            current = self._row_to_trade(trade_row)
+            if current.strategy != strategy:
+                raise TradeStateError(
+                    "Trade strategy does not match broker action authorization."
+                )
+            if current.version != source_trade_version:
+                raise TradeStateError(
+                    "Trade changed before broker action authorization could be persisted."
+                )
+
+            existing = connection.execute(
+                """
+                SELECT *
+                FROM broker_action_authorizations
+                WHERE trade_id = ?
+                  AND source_trade_version = ?
+                  AND reconciliation_id = ?
+                  AND plan_digest = ?
+                """,
+                (
+                    trade_id,
+                    source_trade_version,
+                    reconciliation_id,
+                    plan_digest,
+                ),
+            ).fetchone()
+            if existing is not None:
+                persisted = (
+                    self._row_to_broker_action_authorization(
+                        existing
+                    )
+                )
+                if (
+                    persisted.strategy != strategy
+                    or persisted.purpose != purpose
+                    or persisted.snapshot_digest
+                    != snapshot_digest
+                    or persisted.account_fingerprint
+                    != account_fingerprint
+                ):
+                    raise TradeStateError(
+                        "Broker action authorization retry does not match the persisted evidence."
+                    )
+                return (
+                    persisted,
+                    False,
+                )
+
+            conflicting = connection.execute(
+                """
+                SELECT 1
+                FROM broker_action_authorizations
+                WHERE trade_id = ?
+                  AND status IN (?, ?)
+                LIMIT 1
+                """,
+                (
+                    trade_id,
+                    BrokerActionAuthorizationStatus.AUTHORIZED.value,
+                    BrokerActionAuthorizationStatus.CLAIMED.value,
+                ),
+            ).fetchone()
+            if conflicting is not None:
+                raise TradeStateError(
+                    "A different active broker action authorization already exists for this trade."
+                )
+
+            connection.execute(
+                """
+                INSERT INTO broker_action_authorizations (
+                    authorization_id, strategy, trade_id,
+                    purpose, plan_digest, source_trade_version,
+                    reconciliation_id, snapshot_digest,
+                    account_fingerprint, status,
+                    authorized_at, expires_at,
+                    claim_id, claimed_at,
+                    invalidated_at, invalidation_reason,
+                    version
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    NULL, NULL, NULL, NULL, 1
+                )
+                """,
+                (
+                    authorization_id,
+                    strategy,
+                    trade_id,
+                    purpose,
+                    plan_digest,
+                    source_trade_version,
+                    reconciliation_id,
+                    snapshot_digest,
+                    account_fingerprint,
+                    BrokerActionAuthorizationStatus.AUTHORIZED.value,
+                    authorized_at.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+            self._insert_broker_action_authorization_event(
+                connection,
+                authorization_id=authorization_id,
+                event_type="broker_action_authorized",
+                old_status=None,
+                new_status=(
+                    BrokerActionAuthorizationStatus.AUTHORIZED
+                ),
+                occurred_at=authorized_at,
+                details={
+                    "strategy": strategy,
+                    "trade_id": trade_id,
+                    "purpose": purpose,
+                    "plan_digest": plan_digest,
+                    "source_trade_version": source_trade_version,
+                    "reconciliation_id": reconciliation_id,
+                    "snapshot_digest": snapshot_digest,
+                    "account_fingerprint": account_fingerprint,
+                    "expires_at": expires_at,
+                },
+            )
+
+        return (
+            self.get_broker_action_authorization(
+                authorization_id
+            ),
+            True,
+        )
+
+    def claim_broker_action_authorization(
+        self,
+        authorization_id: str,
+        *,
+        plan_digest: str,
+        claim_id: str,
+        occurred_at: datetime | None = None,
+    ) -> tuple[BrokerActionAuthorizationRecord, bool]:
+        authorization_id = authorization_id.strip()
+        plan_digest = plan_digest.strip().lower()
+        claim_id = claim_id.strip()
+        timestamp = occurred_at or utc_now()
+        if not authorization_id or not claim_id:
+            raise TradeStateError(
+                "Authorization and claim IDs are required."
+            )
+        if (
+            len(plan_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in plan_digest
+            )
+        ):
+            raise TradeStateError(
+                "Claimed broker action plan digest is invalid."
+            )
+        if timestamp.tzinfo is None:
+            raise TradeStateError(
+                "Broker action claim timestamp must be timezone-aware."
+            )
+
+        invalidation_reason: str | None = None
+        claimed = False
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM broker_action_authorizations
+                WHERE authorization_id = ?
+                """,
+                (authorization_id,),
+            ).fetchone()
+            if row is None:
+                raise TradeStateError(
+                    "Broker action authorization was not found."
+                )
+            current = self._row_to_broker_action_authorization(
+                row
+            )
+
+            if (
+                current.status
+                == BrokerActionAuthorizationStatus.CLAIMED
+            ):
+                if (
+                    current.claim_id == claim_id
+                    and current.plan_digest == plan_digest
+                ):
+                    return current, False
+                raise TradeStateError(
+                    "Broker action authorization was already claimed with different evidence or by a different attempt."
+                )
+            if (
+                current.status
+                == BrokerActionAuthorizationStatus.INVALIDATED
+            ):
+                raise TradeStateError(
+                    "Broker action authorization is invalidated."
+                )
+
+            trade_row = connection.execute(
+                "SELECT * FROM trades WHERE trade_id = ?",
+                (current.trade_id,),
+            ).fetchone()
+            if trade_row is None:
+                invalidation_reason = "Authorized trade no longer exists."
+            else:
+                trade = self._row_to_trade(trade_row)
+                if trade.strategy != current.strategy:
+                    invalidation_reason = (
+                        "Authorized trade strategy changed."
+                    )
+                elif trade.version != current.source_trade_version:
+                    invalidation_reason = (
+                        "Authorized trade version is stale."
+                    )
+                elif plan_digest != current.plan_digest:
+                    invalidation_reason = (
+                        "Claimed plan digest does not match authorization."
+                    )
+                elif timestamp < current.authorized_at:
+                    invalidation_reason = (
+                        "Broker action claim predates its authorization."
+                    )
+                elif timestamp >= current.expires_at:
+                    invalidation_reason = (
+                        "Broker action authorization expired."
+                    )
+
+            if invalidation_reason is not None:
+                connection.execute(
+                    """
+                    UPDATE broker_action_authorizations
+                    SET status = ?, invalidated_at = ?,
+                        invalidation_reason = ?,
+                        version = version + 1
+                    WHERE authorization_id = ?
+                      AND version = ?
+                    """,
+                    (
+                        BrokerActionAuthorizationStatus
+                        .INVALIDATED.value,
+                        timestamp.isoformat(),
+                        invalidation_reason,
+                        authorization_id,
+                        current.version,
+                    ),
+                )
+                self._insert_broker_action_authorization_event(
+                    connection,
+                    authorization_id=authorization_id,
+                    event_type=(
+                        "broker_action_authorization_invalidated"
+                    ),
+                    old_status=current.status,
+                    new_status=(
+                        BrokerActionAuthorizationStatus.INVALIDATED
+                    ),
+                    occurred_at=timestamp,
+                    details={
+                        "reason": invalidation_reason,
+                    },
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE broker_action_authorizations
+                    SET status = ?, claim_id = ?,
+                        claimed_at = ?, version = version + 1
+                    WHERE authorization_id = ?
+                      AND status = ?
+                      AND version = ?
+                    """,
+                    (
+                        BrokerActionAuthorizationStatus.CLAIMED.value,
+                        claim_id,
+                        timestamp.isoformat(),
+                        authorization_id,
+                        BrokerActionAuthorizationStatus.AUTHORIZED.value,
+                        current.version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise TradeStateError(
+                        "Broker action authorization changed concurrently."
+                    )
+                self._insert_broker_action_authorization_event(
+                    connection,
+                    authorization_id=authorization_id,
+                    event_type="broker_action_authorization_claimed",
+                    old_status=current.status,
+                    new_status=(
+                        BrokerActionAuthorizationStatus.CLAIMED
+                    ),
+                    occurred_at=timestamp,
+                    details={"claim_id": claim_id},
+                )
+                claimed = True
+
+        if invalidation_reason is not None:
+            raise TradeStateError(invalidation_reason)
+        return (
+            self.get_broker_action_authorization(
+                authorization_id
+            ),
+            claimed,
+        )
 
     def get_trade(
         self,
