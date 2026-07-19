@@ -62,6 +62,12 @@ class TradeStatus(str, Enum):
         "stop_recovery_required"
     )
     EXIT_PENDING = "exit_pending"
+    EXIT_PARTIALLY_FILLED = (
+        "exit_partially_filled"
+    )
+    EXIT_RECOVERY_REQUIRED = (
+        "exit_recovery_required"
+    )
     CLOSED = "closed"
     CANCELLED = "cancelled"
     ERROR = "error"
@@ -78,6 +84,8 @@ ACTIVE_STATUSES = {
     TradeStatus.OPEN_PROTECTED,
     TradeStatus.STOP_RECOVERY_REQUIRED,
     TradeStatus.EXIT_PENDING,
+    TradeStatus.EXIT_PARTIALLY_FILLED,
+    TradeStatus.EXIT_RECOVERY_REQUIRED,
 }
 
 
@@ -126,6 +134,7 @@ ALLOWED_TRANSITIONS = {
         TradeStatus.OPEN_PROTECTED,
         TradeStatus.OPEN_UNPROTECTED,
         TradeStatus.EXIT_PENDING,
+        TradeStatus.EXIT_RECOVERY_REQUIRED,
         TradeStatus.CLOSED,
         TradeStatus.ERROR,
     },
@@ -140,13 +149,30 @@ ALLOWED_TRANSITIONS = {
     TradeStatus.STOP_RECOVERY_REQUIRED: {
         TradeStatus.STOP_RECOVERY_REQUIRED,
         TradeStatus.STOP_LINKED,
+        TradeStatus.OPEN_UNPROTECTED,
+        TradeStatus.EXIT_PENDING,
         TradeStatus.OPEN_PROTECTED,
         TradeStatus.CLOSED,
         TradeStatus.ERROR,
     },
     TradeStatus.EXIT_PENDING: {
-        TradeStatus.OPEN_UNPROTECTED,
-        TradeStatus.OPEN_PROTECTED,
+        TradeStatus.EXIT_PENDING,
+        TradeStatus.EXIT_PARTIALLY_FILLED,
+        TradeStatus.EXIT_RECOVERY_REQUIRED,
+        TradeStatus.CLOSED,
+        TradeStatus.ERROR,
+    },
+    TradeStatus.EXIT_PARTIALLY_FILLED: {
+        TradeStatus.EXIT_PARTIALLY_FILLED,
+        TradeStatus.EXIT_RECOVERY_REQUIRED,
+        TradeStatus.STOP_LINKED,
+        TradeStatus.CLOSED,
+        TradeStatus.ERROR,
+    },
+    TradeStatus.EXIT_RECOVERY_REQUIRED: {
+        TradeStatus.EXIT_RECOVERY_REQUIRED,
+        TradeStatus.EXIT_PENDING,
+        TradeStatus.STOP_LINKED,
         TradeStatus.CLOSED,
         TradeStatus.ERROR,
     },
@@ -223,6 +249,40 @@ class StopRecoveryStep(str, Enum):
     )
 
 
+class ExitIntentType(str, Enum):
+    PROFIT_TARGET = "profit_target"
+    TIME_EXIT = "time_exit"
+    STOP_RECOVERY = "stop_recovery"
+    OPERATOR_EXIT = "operator_exit"
+
+
+class ExitRecoveryAction(str, Enum):
+    NONE = "none"
+    WAIT = "wait"
+    RECONCILE_BROKER_STATE = (
+        "reconcile_broker_state"
+    )
+    PROTECT_REMAINING_POSITION = (
+        "protect_remaining_position"
+    )
+    OPERATOR_INTERVENTION = (
+        "operator_intervention"
+    )
+
+
+class ExitRecoveryStep(str, Enum):
+    INTENT_LINKED = "intent_linked"
+    OBSERVATION_RECORDED = "observation_recorded"
+    PARTIAL_FILL_RECORDED = "partial_fill_recorded"
+    FULL_FILL_RECORDED = "full_fill_recorded"
+    TERMINAL_RECORDED = "terminal_recorded"
+    INCONSISTENT_STATE_RECORDED = (
+        "inconsistent_state_recorded"
+    )
+    FLAT_CONFIRMED = "flat_confirmed"
+    PROTECTION_CONFIRMED = "protection_confirmed"
+
+
 @dataclass(frozen=True)
 class EntryHaltState:
     strategy: str
@@ -275,6 +335,31 @@ class TradeRecord:
     stop_operator_ack_required: bool
     last_stop_observation_key: str | None
     last_stop_reconciliation_id: str | None
+    exit_requested_quantity: int | None
+    exit_close_reason: str | None
+    exit_intent_type: ExitIntentType | None
+    exit_intended_price: Decimal | None
+    exit_recovery_ref_id: str | None
+    exit_linked_at: datetime | None
+    last_exit_observation_at: datetime | None
+    last_exit_reconciliation_id: str | None
+    exit_attempt_base_quantity: int
+    exit_attempt_base_proceeds: Decimal
+    exit_attempt_base_fees: Decimal
+    exit_executed_quantity: int
+    exit_order_fees: Decimal
+    cumulative_exited_quantity: int
+    exit_remaining_position_quantity: int | None
+    cumulative_average_exit_price: Decimal | None
+    cumulative_exit_proceeds: Decimal
+    cumulative_exit_fees: Decimal
+    cumulative_realized_pnl: Decimal
+    required_exit_recovery_action: ExitRecoveryAction
+    last_completed_exit_recovery_step: str | None
+    exit_recovery_attempt_count: int
+    exit_recovery_failure_reason: str | None
+    exit_operator_ack_required: bool
+    last_exit_observation_key: str | None
     created_at: datetime
     updated_at: datetime
     opened_at: datetime | None
@@ -291,10 +376,15 @@ class TradeRecord:
     @property
     def unprotected_quantity(self) -> int:
         current_quantity = (
-            self.remaining_broker_position_quantity
-            if self.remaining_broker_position_quantity
+            self.exit_remaining_position_quantity
+            if self.exit_remaining_position_quantity
             is not None
-            else self.filled_quantity
+            else (
+                self.remaining_broker_position_quantity
+                if self.remaining_broker_position_quantity
+                is not None
+                else self.filled_quantity
+            )
         )
         return max(
             0,
@@ -440,6 +530,43 @@ class TradeStateStore:
                         DEFAULT 0,
                     last_stop_observation_key TEXT,
                     last_stop_reconciliation_id TEXT,
+                    exit_requested_quantity INTEGER,
+                    exit_close_reason TEXT,
+                    exit_intent_type TEXT,
+                    exit_intended_price TEXT,
+                    exit_recovery_ref_id TEXT,
+                    exit_linked_at TEXT,
+                    last_exit_observation_at TEXT,
+                    last_exit_reconciliation_id TEXT,
+                    exit_attempt_base_quantity INTEGER NOT NULL
+                        DEFAULT 0,
+                    exit_attempt_base_proceeds TEXT NOT NULL
+                        DEFAULT '0',
+                    exit_attempt_base_fees TEXT NOT NULL
+                        DEFAULT '0',
+                    exit_executed_quantity INTEGER NOT NULL
+                        DEFAULT 0,
+                    exit_order_fees TEXT NOT NULL
+                        DEFAULT '0',
+                    cumulative_exited_quantity INTEGER NOT NULL
+                        DEFAULT 0,
+                    exit_remaining_position_quantity INTEGER,
+                    cumulative_average_exit_price TEXT,
+                    cumulative_exit_proceeds TEXT NOT NULL
+                        DEFAULT '0',
+                    cumulative_exit_fees TEXT NOT NULL
+                        DEFAULT '0',
+                    cumulative_realized_pnl TEXT NOT NULL
+                        DEFAULT '0',
+                    required_exit_recovery_action TEXT NOT NULL
+                        DEFAULT 'none',
+                    last_completed_exit_recovery_step TEXT,
+                    exit_recovery_attempt_count INTEGER NOT NULL
+                        DEFAULT 0,
+                    exit_recovery_failure_reason TEXT,
+                    exit_operator_ack_required INTEGER NOT NULL
+                        DEFAULT 0,
+                    last_exit_observation_key TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     opened_at TEXT,
@@ -526,6 +653,37 @@ class TradeStateStore:
                         old_status TEXT NOT NULL,
                         new_status TEXT NOT NULL,
                         required_action TEXT NOT NULL,
+                        occurred_at TEXT NOT NULL,
+                        details_json TEXT NOT NULL,
+                        UNIQUE(trade_id, observation_key),
+                        FOREIGN KEY(trade_id)
+                            REFERENCES trades(trade_id)
+                    );
+
+                CREATE TABLE IF NOT EXISTS
+                    exit_recovery_events (
+                        event_id INTEGER PRIMARY KEY
+                            AUTOINCREMENT,
+                        trade_id TEXT NOT NULL,
+                        observation_key TEXT NOT NULL,
+                        event_source TEXT NOT NULL,
+                        broker_order_id TEXT,
+                        broker_state TEXT,
+                        requested_quantity INTEGER,
+                        executed_quantity INTEGER NOT NULL,
+                        executed_delta INTEGER NOT NULL,
+                        remaining_quantity INTEGER,
+                        cumulative_average_price TEXT,
+                        cumulative_proceeds TEXT NOT NULL,
+                        cumulative_fees TEXT NOT NULL,
+                        cumulative_realized_pnl TEXT NOT NULL,
+                        protection_result TEXT,
+                        reconciliation_id TEXT,
+                        old_status TEXT NOT NULL,
+                        new_status TEXT NOT NULL,
+                        required_action TEXT NOT NULL,
+                        failure_code TEXT,
+                        failure_reason TEXT,
                         occurred_at TEXT NOT NULL,
                         details_json TEXT NOT NULL,
                         UNIQUE(trade_id, observation_key),
@@ -631,6 +789,26 @@ class TradeStateStore:
                     SELECT RAISE(
                         ABORT,
                         'protection_reconciliation_events are append-only'
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_exit_recovery_event_update
+                BEFORE UPDATE ON exit_recovery_events
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'exit_recovery_events are append-only'
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS
+                    prevent_exit_recovery_event_delete
+                BEFORE DELETE ON exit_recovery_events
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'exit_recovery_events are append-only'
                     );
                 END;
 
@@ -764,6 +942,45 @@ class TradeStateStore:
                     "INTEGER NOT NULL DEFAULT 0",
                 "last_stop_observation_key": "TEXT",
                 "last_stop_reconciliation_id": "TEXT",
+                "exit_requested_quantity": "INTEGER",
+                "exit_close_reason": "TEXT",
+                "exit_intent_type": "TEXT",
+                "exit_intended_price": "TEXT",
+                "exit_recovery_ref_id": "TEXT",
+                "exit_linked_at": "TEXT",
+                "last_exit_observation_at": "TEXT",
+                "last_exit_reconciliation_id": "TEXT",
+                "exit_attempt_base_quantity":
+                    "INTEGER NOT NULL DEFAULT 0",
+                "exit_attempt_base_proceeds":
+                    "TEXT NOT NULL DEFAULT '0'",
+                "exit_attempt_base_fees":
+                    "TEXT NOT NULL DEFAULT '0'",
+                "exit_executed_quantity":
+                    "INTEGER NOT NULL DEFAULT 0",
+                "exit_order_fees":
+                    "TEXT NOT NULL DEFAULT '0'",
+                "cumulative_exited_quantity":
+                    "INTEGER NOT NULL DEFAULT 0",
+                "exit_remaining_position_quantity":
+                    "INTEGER",
+                "cumulative_average_exit_price": "TEXT",
+                "cumulative_exit_proceeds":
+                    "TEXT NOT NULL DEFAULT '0'",
+                "cumulative_exit_fees":
+                    "TEXT NOT NULL DEFAULT '0'",
+                "cumulative_realized_pnl":
+                    "TEXT NOT NULL DEFAULT '0'",
+                "required_exit_recovery_action":
+                    "TEXT NOT NULL DEFAULT 'none'",
+                "last_completed_exit_recovery_step":
+                    "TEXT",
+                "exit_recovery_attempt_count":
+                    "INTEGER NOT NULL DEFAULT 0",
+                "exit_recovery_failure_reason": "TEXT",
+                "exit_operator_ack_required":
+                    "INTEGER NOT NULL DEFAULT 0",
+                "last_exit_observation_key": "TEXT",
             }
 
             for column, definition in (
@@ -775,6 +992,58 @@ class TradeStateStore:
                         f"ADD COLUMN {column} "
                         f"{definition}"
                     )
+
+            legacy_timestamp = utc_now().isoformat()
+            legacy_exit_rows = connection.execute(
+                """
+                SELECT trade_id, strategy
+                FROM trades
+                WHERE status = ?
+                  AND exit_close_reason IS NULL
+                """,
+                (TradeStatus.EXIT_PENDING.value,),
+            ).fetchall()
+
+            for legacy_row in legacy_exit_rows:
+                connection.execute(
+                    """
+                    UPDATE trades
+                    SET status = ?,
+                        required_exit_recovery_action = ?,
+                        exit_recovery_failure_reason = ?,
+                        exit_operator_ack_required = 1
+                    WHERE trade_id = ?
+                    """,
+                    (
+                        TradeStatus.EXIT_RECOVERY_REQUIRED.value,
+                        ExitRecoveryAction.OPERATOR_INTERVENTION.value,
+                        "Legacy exit intent is incomplete; fresh broker reconciliation and operator intervention are required.",
+                        legacy_row["trade_id"],
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO entry_halts (
+                        halt_key, strategy, trade_id, active,
+                        reason, operator_ack_required,
+                        created_at, updated_at, cleared_at
+                    )
+                    VALUES (?, ?, ?, 1, ?, 1, ?, ?, NULL)
+                    ON CONFLICT(halt_key) DO UPDATE SET
+                        active = 1,
+                        operator_ack_required = 1,
+                        updated_at = excluded.updated_at,
+                        cleared_at = NULL
+                    """,
+                    (
+                        f"trade:{legacy_row['trade_id']}",
+                        legacy_row["strategy"],
+                        legacy_row["trade_id"],
+                        "Legacy EXIT_PENDING state lacks durable exit intent.",
+                        legacy_timestamp,
+                        legacy_timestamp,
+                    ),
+                )
 
             order_columns = {
                 row["name"]
@@ -939,6 +1208,91 @@ class TradeStateStore:
             ),
             last_stop_reconciliation_id=(
                 row["last_stop_reconciliation_id"]
+            ),
+            exit_requested_quantity=(
+                int(row["exit_requested_quantity"])
+                if row["exit_requested_quantity"] is not None
+                else None
+            ),
+            exit_close_reason=row["exit_close_reason"],
+            exit_intent_type=(
+                ExitIntentType(row["exit_intent_type"])
+                if row["exit_intent_type"]
+                else None
+            ),
+            exit_intended_price=(
+                parse_optional_decimal(
+                    row["exit_intended_price"]
+                )
+            ),
+            exit_recovery_ref_id=(
+                row["exit_recovery_ref_id"]
+            ),
+            exit_linked_at=parse_datetime(
+                row["exit_linked_at"]
+            ),
+            last_exit_observation_at=parse_datetime(
+                row["last_exit_observation_at"]
+            ),
+            last_exit_reconciliation_id=(
+                row["last_exit_reconciliation_id"]
+            ),
+            exit_attempt_base_quantity=int(
+                row["exit_attempt_base_quantity"]
+            ),
+            exit_attempt_base_proceeds=parse_decimal(
+                row["exit_attempt_base_proceeds"]
+            ),
+            exit_attempt_base_fees=parse_decimal(
+                row["exit_attempt_base_fees"]
+            ),
+            exit_executed_quantity=int(
+                row["exit_executed_quantity"]
+            ),
+            exit_order_fees=parse_decimal(
+                row["exit_order_fees"]
+            ),
+            cumulative_exited_quantity=int(
+                row["cumulative_exited_quantity"]
+            ),
+            exit_remaining_position_quantity=(
+                int(row["exit_remaining_position_quantity"])
+                if row["exit_remaining_position_quantity"] is not None
+                else None
+            ),
+            cumulative_average_exit_price=(
+                parse_optional_decimal(
+                    row["cumulative_average_exit_price"]
+                )
+            ),
+            cumulative_exit_proceeds=parse_decimal(
+                row["cumulative_exit_proceeds"]
+            ),
+            cumulative_exit_fees=parse_decimal(
+                row["cumulative_exit_fees"]
+            ),
+            cumulative_realized_pnl=parse_decimal(
+                row["cumulative_realized_pnl"]
+            ),
+            required_exit_recovery_action=(
+                ExitRecoveryAction(
+                    row["required_exit_recovery_action"]
+                )
+            ),
+            last_completed_exit_recovery_step=(
+                row["last_completed_exit_recovery_step"]
+            ),
+            exit_recovery_attempt_count=int(
+                row["exit_recovery_attempt_count"]
+            ),
+            exit_recovery_failure_reason=(
+                row["exit_recovery_failure_reason"]
+            ),
+            exit_operator_ack_required=bool(
+                row["exit_operator_ack_required"]
+            ),
+            last_exit_observation_key=(
+                row["last_exit_observation_key"]
             ),
             created_at=datetime.fromisoformat(
                 row["created_at"]
@@ -1185,7 +1539,7 @@ class TradeStateStore:
                 SELECT *
                 FROM trades
                 WHERE strategy = ?
-                  AND status IN (?, ?, ?)
+                  AND status IN (?, ?, ?, ?, ?, ?)
                 ORDER BY created_at, trade_id
                 """,
                 (
@@ -1193,6 +1547,9 @@ class TradeStateStore:
                     TradeStatus.STOP_LINKED.value,
                     TradeStatus.OPEN_PROTECTED.value,
                     TradeStatus.STOP_RECOVERY_REQUIRED.value,
+                    TradeStatus.EXIT_PENDING.value,
+                    TradeStatus.EXIT_PARTIALLY_FILLED.value,
+                    TradeStatus.EXIT_RECOVERY_REQUIRED.value,
                 ),
             ).fetchall()
 
@@ -1917,6 +2274,31 @@ class TradeStateStore:
                 "stop_operator_ack_required",
                 "last_stop_observation_key",
                 "last_stop_reconciliation_id",
+                "exit_requested_quantity",
+                "exit_close_reason",
+                "exit_intent_type",
+                "exit_intended_price",
+                "exit_recovery_ref_id",
+                "exit_linked_at",
+                "last_exit_observation_at",
+                "last_exit_reconciliation_id",
+                "exit_attempt_base_quantity",
+                "exit_attempt_base_proceeds",
+                "exit_attempt_base_fees",
+                "exit_executed_quantity",
+                "exit_order_fees",
+                "cumulative_exited_quantity",
+                "exit_remaining_position_quantity",
+                "cumulative_average_exit_price",
+                "cumulative_exit_proceeds",
+                "cumulative_exit_fees",
+                "cumulative_realized_pnl",
+                "required_exit_recovery_action",
+                "last_completed_exit_recovery_step",
+                "exit_recovery_attempt_count",
+                "exit_recovery_failure_reason",
+                "exit_operator_ack_required",
+                "last_exit_observation_key",
             }
 
             unknown_columns = (
@@ -2111,6 +2493,8 @@ class TradeStateStore:
             TradeStatus.OPEN_UNPROTECTED,
             TradeStatus.STOP_LINKED,
             TradeStatus.STOP_RECOVERY_REQUIRED,
+            TradeStatus.EXIT_PARTIALLY_FILLED,
+            TradeStatus.EXIT_RECOVERY_REQUIRED,
         }:
             raise InvalidTransitionError(
                 "A protective stop can only be "
@@ -2142,12 +2526,32 @@ class TradeStateStore:
 
         return self._transition(
             trade_id,
-            new_status=TradeStatus.STOP_LINKED,
-            event_type="protective_stop_linked",
+            new_status=(
+                current.status
+                if current.status in {
+                    TradeStatus.EXIT_PARTIALLY_FILLED,
+                    TradeStatus.EXIT_RECOVERY_REQUIRED,
+                }
+                else TradeStatus.STOP_LINKED
+            ),
+            event_type=(
+                "exit_remaining_stop_linked"
+                if current.status in {
+                    TradeStatus.EXIT_PARTIALLY_FILLED,
+                    TradeStatus.EXIT_RECOVERY_REQUIRED,
+                }
+                else "protective_stop_linked"
+            ),
             updates={
                 "protective_stop_order_id":
                     broker_order_id,
                 "protected_quantity": 0,
+                "remaining_broker_position_quantity": (
+                    current.exit_remaining_position_quantity
+                    if current.exit_remaining_position_quantity
+                    is not None
+                    else current.remaining_broker_position_quantity
+                ),
                 "required_recovery_action":
                     EntryRecoveryAction
                     .RECONCILE_BROKER_STATE.value,
@@ -2424,27 +2828,685 @@ class TradeStateStore:
         trade_id: str,
         *,
         broker_order_id: str,
+        requested_quantity: int,
+        close_reason: str,
+        intent_type: ExitIntentType | str,
+        intended_price: Decimal | None = None,
+        recovery_ref_id: str | None = None,
         occurred_at: datetime | None = None,
     ) -> TradeRecord:
-        if not broker_order_id.strip():
+        broker_order_id = broker_order_id.strip()
+        close_reason = close_reason.strip()
+        timestamp = occurred_at or utc_now()
+
+        if not broker_order_id:
             raise TradeStateError(
                 "Exit order ID is required."
             )
 
-        return self._transition(
-            trade_id,
-            new_status=TradeStatus.EXIT_PENDING,
-            event_type="exit_order_attached",
-            updates={
-                "exit_order_id":
-                    broker_order_id,
-            },
-            details={
-                "broker_order_id":
-                    broker_order_id,
-            },
-            occurred_at=occurred_at,
+        if not close_reason:
+            raise TradeStateError(
+                "A durable exit close reason is required."
+            )
+
+        try:
+            parsed_intent = (
+                intent_type
+                if isinstance(intent_type, ExitIntentType)
+                else ExitIntentType(str(intent_type).strip())
+            )
+        except ValueError as error:
+            raise TradeStateError(
+                "Exit intent type is missing or invalid."
+            ) from error
+
+        if intended_price is not None and intended_price <= 0:
+            raise TradeStateError(
+                "Intended exit price must be positive."
+            )
+
+        if (
+            recovery_ref_id is not None
+            and not recovery_ref_id.strip()
+        ):
+            raise TradeStateError(
+                "Exit recovery reference cannot be blank."
+            )
+
+        current = self.get_trade(trade_id)
+
+        if current.protective_stop_order_id:
+            raise TradeStateError(
+                "A separate exit cannot be linked while "
+                "a protective stop remains linked."
+            )
+
+        if current.average_entry_price is None:
+            raise TradeStateError(
+                "Trade has no confirmed entry price."
+            )
+
+        base_quantity = current.cumulative_exited_quantity
+        base_proceeds = current.cumulative_exit_proceeds
+        base_fees = current.cumulative_exit_fees
+
+        if (
+            base_quantity == 0
+            and current.stop_executed_quantity > 0
+        ):
+            if current.average_stop_fill_price is None:
+                raise TradeStateError(
+                    "Prior stop execution lacks an "
+                    "average price; exit intent fails closed."
+                )
+
+            base_quantity = current.stop_executed_quantity
+            base_proceeds = (
+                current.average_stop_fill_price
+                * Decimal(base_quantity)
+            )
+            base_fees = Decimal("0")
+
+        remaining = current.filled_quantity - base_quantity
+
+        if remaining <= 0:
+            raise TradeStateError(
+                "No remaining position is available to exit."
+            )
+
+        if requested_quantity != remaining:
+            raise TradeStateError(
+                "Requested exit quantity must equal the "
+                "current remaining position."
+            )
+
+        reference = (
+            recovery_ref_id.strip()
+            if recovery_ref_id
+            else str(uuid.uuid4())
         )
+        validated_version = current.version
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM trades WHERE trade_id = ?",
+                (trade_id,),
+            ).fetchone()
+
+            if row is None:
+                raise TradeNotFoundError(
+                    f"Trade not found: {trade_id}"
+                )
+
+            current = self._row_to_trade(row)
+
+            if current.version != validated_version:
+                raise TradeStateError(
+                    "Trade state changed during exit validation; "
+                    "exit intent failed closed."
+                )
+
+            if (
+                TradeStatus.EXIT_PENDING
+                not in ALLOWED_TRANSITIONS[current.status]
+            ):
+                raise InvalidTransitionError(
+                    f"Cannot begin exit from "
+                    f"{current.status.value}."
+                )
+
+            cursor = connection.execute(
+                """
+                UPDATE trades
+                SET status = ?,
+                    exit_order_id = ?,
+                    exit_requested_quantity = ?,
+                    exit_close_reason = ?,
+                    exit_intent_type = ?,
+                    exit_intended_price = ?,
+                    exit_recovery_ref_id = ?,
+                    exit_linked_at = ?,
+                    last_exit_observation_at = NULL,
+                    last_exit_reconciliation_id = NULL,
+                    exit_attempt_base_quantity = ?,
+                    exit_attempt_base_proceeds = ?,
+                    exit_attempt_base_fees = ?,
+                    exit_executed_quantity = 0,
+                    exit_order_fees = '0',
+                    cumulative_exited_quantity = ?,
+                    exit_remaining_position_quantity = ?,
+                    cumulative_average_exit_price = ?,
+                    cumulative_exit_proceeds = ?,
+                    cumulative_exit_fees = ?,
+                    cumulative_realized_pnl = ?,
+                    realized_pnl = ?,
+                    required_exit_recovery_action = ?,
+                    last_completed_exit_recovery_step = ?,
+                    exit_recovery_attempt_count =
+                        exit_recovery_attempt_count + 1,
+                    exit_recovery_failure_reason = NULL,
+                    exit_operator_ack_required = 0,
+                    last_exit_observation_key = NULL,
+                    protected_quantity = 0,
+                    protection_confirmed_at = NULL,
+                    updated_at = ?,
+                    version = version + 1
+                WHERE trade_id = ?
+                  AND version = ?
+                """,
+                (
+                    TradeStatus.EXIT_PENDING.value,
+                    broker_order_id,
+                    requested_quantity,
+                    close_reason,
+                    parsed_intent.value,
+                    serialize_decimal(intended_price),
+                    reference,
+                    timestamp.isoformat(),
+                    base_quantity,
+                    serialize_decimal(base_proceeds),
+                    serialize_decimal(base_fees),
+                    base_quantity,
+                    remaining,
+                    serialize_decimal(
+                        (
+                            base_proceeds
+                            / Decimal(base_quantity)
+                        )
+                        if base_quantity > 0
+                        else None
+                    ),
+                    serialize_decimal(base_proceeds),
+                    serialize_decimal(base_fees),
+                    serialize_decimal(
+                        base_proceeds
+                        - current.average_entry_price
+                        * Decimal(base_quantity)
+                    ),
+                    serialize_decimal(
+                        base_proceeds
+                        - current.average_entry_price
+                        * Decimal(base_quantity)
+                    ),
+                    ExitRecoveryAction.WAIT.value,
+                    ExitRecoveryStep.INTENT_LINKED.value,
+                    timestamp.isoformat(),
+                    trade_id,
+                    current.version,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                raise TradeStateError(
+                    "Trade state changed concurrently; "
+                    "exit linkage failed closed."
+                )
+
+            self._insert_trade_event(
+                connection,
+                trade_id=trade_id,
+                event_type="exit_intent_linked",
+                old_status=current.status,
+                new_status=TradeStatus.EXIT_PENDING,
+                occurred_at=timestamp,
+                details={
+                    "requested_quantity": requested_quantity,
+                    "close_reason": close_reason,
+                    "intent_type": parsed_intent.value,
+                    "intended_price": intended_price,
+                    "recovery_ref_id": reference,
+                    "accounting_base_quantity":
+                        base_quantity,
+                },
+            )
+            self._activate_entry_halt(
+                connection,
+                halt_key=f"trade:{trade_id}",
+                strategy=current.strategy,
+                trade_id=trade_id,
+                reason=(
+                    "A separate exit order is pending; "
+                    "remaining exposure is not proven "
+                    "protected by a fresh snapshot."
+                ),
+                operator_ack_required=False,
+                occurred_at=timestamp,
+            )
+
+        return self.get_trade(trade_id)
+
+    def persist_exit_observation(
+        self,
+        trade_id: str,
+        *,
+        observation_key: str,
+        broker_order_id: str | None,
+        broker_state: str | None,
+        requested_quantity: int | None,
+        executed_quantity: int,
+        average_fill_price: Decimal | None,
+        order_fees: Decimal,
+        new_status: TradeStatus,
+        required_action: ExitRecoveryAction,
+        last_completed_step: ExitRecoveryStep,
+        failure_code: str | None,
+        failure_reason: str | None,
+        operator_ack_required: bool,
+        observed_at: datetime | None = None,
+    ) -> tuple[TradeRecord, bool]:
+        observation_key = observation_key.strip()
+        timestamp = observed_at or utc_now()
+
+        if not observation_key:
+            raise TradeStateError(
+                "A stable exit observation key is required."
+            )
+
+        if executed_quantity < 0 or order_fees < 0:
+            raise TradeStateError(
+                "Exit quantity and fees cannot be negative."
+            )
+
+        if new_status not in {
+            TradeStatus.EXIT_PENDING,
+            TradeStatus.EXIT_PARTIALLY_FILLED,
+            TradeStatus.EXIT_RECOVERY_REQUIRED,
+        }:
+            raise TradeStateError(
+                "Invalid durable exit observation status."
+            )
+
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT 1
+                FROM exit_recovery_events
+                WHERE trade_id = ?
+                  AND observation_key = ?
+                """,
+                (trade_id, observation_key),
+            ).fetchone()
+
+            if existing is not None:
+                return self.get_trade(trade_id), False
+
+            row = connection.execute(
+                "SELECT * FROM trades WHERE trade_id = ?",
+                (trade_id,),
+            ).fetchone()
+
+            if row is None:
+                raise TradeNotFoundError(
+                    f"Trade not found: {trade_id}"
+                )
+
+            current = self._row_to_trade(row)
+
+            if current.status not in {
+                TradeStatus.EXIT_PENDING,
+                TradeStatus.EXIT_PARTIALLY_FILLED,
+                TradeStatus.EXIT_RECOVERY_REQUIRED,
+            }:
+                raise InvalidTransitionError(
+                    "Exit observations require a durable "
+                    "exit lifecycle state."
+                )
+
+            if current.exit_operator_ack_required:
+                new_status = TradeStatus.EXIT_RECOVERY_REQUIRED
+                required_action = (
+                    ExitRecoveryAction.OPERATOR_INTERVENTION
+                )
+                operator_ack_required = True
+                if failure_reason is None:
+                    failure_reason = (
+                        current.exit_recovery_failure_reason
+                    )
+
+            if not current.exit_close_reason:
+                new_status = TradeStatus.EXIT_RECOVERY_REQUIRED
+                required_action = (
+                    ExitRecoveryAction.OPERATOR_INTERVENTION
+                )
+                last_completed_step = (
+                    ExitRecoveryStep
+                    .INCONSISTENT_STATE_RECORDED
+                )
+                failure_code = "missing_durable_exit_intent"
+                failure_reason = (
+                    "Durable exit close reason is missing."
+                )
+                operator_ack_required = True
+
+            observation_is_accountable = True
+            reported_total_exited = (
+                current.exit_attempt_base_quantity
+                + executed_quantity
+            )
+
+            if executed_quantity < current.exit_executed_quantity:
+                observation_is_accountable = False
+                new_status = TradeStatus.EXIT_RECOVERY_REQUIRED
+                required_action = (
+                    ExitRecoveryAction.OPERATOR_INTERVENTION
+                )
+                last_completed_step = (
+                    ExitRecoveryStep
+                    .INCONSISTENT_STATE_RECORDED
+                )
+                failure_code = "exit_quantity_decreased"
+                failure_reason = (
+                    "Broker cumulative exit quantity "
+                    "decreased between observations."
+                )
+                operator_ack_required = True
+
+            if (
+                requested_quantity is not None
+                and current.exit_requested_quantity
+                is not None
+                and requested_quantity
+                != current.exit_requested_quantity
+            ):
+                observation_is_accountable = False
+                new_status = TradeStatus.EXIT_RECOVERY_REQUIRED
+                required_action = (
+                    ExitRecoveryAction.OPERATOR_INTERVENTION
+                )
+                last_completed_step = (
+                    ExitRecoveryStep
+                    .INCONSISTENT_STATE_RECORDED
+                )
+                failure_code = "exit_requested_quantity_mismatch"
+                failure_reason = (
+                    "Broker requested exit quantity does "
+                    "not match durable exit intent."
+                )
+                operator_ack_required = True
+
+            if (
+                current.exit_requested_quantity is not None
+                and executed_quantity
+                > current.exit_requested_quantity
+            ):
+                observation_is_accountable = False
+                new_status = TradeStatus.EXIT_RECOVERY_REQUIRED
+                required_action = (
+                    ExitRecoveryAction.OPERATOR_INTERVENTION
+                )
+                last_completed_step = (
+                    ExitRecoveryStep
+                    .INCONSISTENT_STATE_RECORDED
+                )
+                failure_code = "exit_execution_exceeds_request"
+                failure_reason = (
+                    "Exit execution exceeds requested "
+                    "quantity; oversell risk exists."
+                )
+                operator_ack_required = True
+
+            if reported_total_exited > current.filled_quantity:
+                observation_is_accountable = False
+                new_status = TradeStatus.EXIT_RECOVERY_REQUIRED
+                required_action = (
+                    ExitRecoveryAction.OPERATOR_INTERVENTION
+                )
+                last_completed_step = (
+                    ExitRecoveryStep
+                    .INCONSISTENT_STATE_RECORDED
+                )
+                failure_code = "exit_execution_exceeds_position"
+                failure_reason = (
+                    "Total sell execution exceeds the "
+                    "original filled position."
+                )
+                operator_ack_required = True
+
+            if (
+                executed_quantity > 0
+                and (
+                    average_fill_price is None
+                    or average_fill_price <= 0
+                )
+            ):
+                observation_is_accountable = False
+                new_status = TradeStatus.EXIT_RECOVERY_REQUIRED
+                required_action = (
+                    ExitRecoveryAction.OPERATOR_INTERVENTION
+                )
+                last_completed_step = (
+                    ExitRecoveryStep
+                    .INCONSISTENT_STATE_RECORDED
+                )
+                failure_code = "exit_average_price_missing"
+                failure_reason = (
+                    "Positive exit execution has no "
+                    "valid broker-confirmed average price."
+                )
+                operator_ack_required = True
+
+            accounting_executed_quantity = (
+                executed_quantity
+                if observation_is_accountable
+                else current.exit_executed_quantity
+            )
+            accounted_order_fees = (
+                order_fees
+                if observation_is_accountable
+                else current.exit_order_fees
+            )
+            executed_delta = (
+                accounting_executed_quantity
+                - current.exit_executed_quantity
+            )
+            total_exited = (
+                current.exit_attempt_base_quantity
+                + accounting_executed_quantity
+            )
+
+            if (
+                observation_is_accountable
+                and accounting_executed_quantity > 0
+            ):
+                assert average_fill_price is not None
+                proceeds = (
+                    current.exit_attempt_base_proceeds
+                    + average_fill_price
+                    * Decimal(accounting_executed_quantity)
+                )
+                cumulative_average = (
+                    proceeds / Decimal(total_exited)
+                )
+                cumulative_pnl = (
+                    proceeds
+                    - current.average_entry_price
+                    * Decimal(total_exited)
+                )
+            elif not observation_is_accountable:
+                proceeds = current.cumulative_exit_proceeds
+                cumulative_average = (
+                    current.cumulative_average_exit_price
+                )
+                cumulative_pnl = (
+                    current.cumulative_realized_pnl
+                )
+            else:
+                proceeds = current.exit_attempt_base_proceeds
+                cumulative_average = (
+                    current.cumulative_average_exit_price
+                )
+                cumulative_pnl = (
+                    current.cumulative_realized_pnl
+                )
+            total_fees = (
+                current.exit_attempt_base_fees
+                + accounted_order_fees
+            )
+            remaining = max(
+                0,
+                current.filled_quantity - total_exited,
+            )
+            protected_quantity = min(
+                current.protected_quantity,
+                remaining,
+            )
+
+            cursor = connection.execute(
+                """
+                UPDATE trades
+                SET status = ?,
+                    exit_executed_quantity = ?,
+                    exit_order_fees = ?,
+                    cumulative_exited_quantity = ?,
+                    exit_remaining_position_quantity = ?,
+                    cumulative_average_exit_price = ?,
+                    cumulative_exit_proceeds = ?,
+                    cumulative_exit_fees = ?,
+                    cumulative_realized_pnl = ?,
+                    realized_pnl = ?,
+                    protected_quantity = ?,
+                    required_exit_recovery_action = ?,
+                    last_completed_exit_recovery_step = ?,
+                    exit_recovery_failure_reason = ?,
+                    exit_operator_ack_required = ?,
+                    last_exit_observation_key = ?,
+                    last_exit_observation_at = ?,
+                    last_exit_reconciliation_id = NULL,
+                    updated_at = ?,
+                    version = version + 1
+                WHERE trade_id = ?
+                  AND version = ?
+                """,
+                (
+                    new_status.value,
+                    accounting_executed_quantity,
+                    serialize_decimal(accounted_order_fees),
+                    total_exited,
+                    remaining,
+                    serialize_decimal(cumulative_average),
+                    serialize_decimal(proceeds),
+                    serialize_decimal(total_fees),
+                    serialize_decimal(cumulative_pnl),
+                    serialize_decimal(cumulative_pnl),
+                    protected_quantity,
+                    required_action.value,
+                    last_completed_step.value,
+                    failure_reason,
+                    int(operator_ack_required),
+                    observation_key,
+                    timestamp.isoformat(),
+                    timestamp.isoformat(),
+                    trade_id,
+                    current.version,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                raise TradeStateError(
+                    "Trade state changed concurrently; "
+                    "exit recovery failed closed."
+                )
+
+            details = {
+                "broker_order_id": broker_order_id,
+                "broker_state": broker_state,
+                "requested_quantity": requested_quantity,
+                "reported_executed_quantity": executed_quantity,
+                "accounted_executed_quantity":
+                    accounting_executed_quantity,
+                "reported_average_fill_price":
+                    average_fill_price,
+                "reported_order_fees": order_fees,
+                "observation_is_accountable":
+                    observation_is_accountable,
+                "executed_delta": executed_delta,
+                "total_exited_quantity": total_exited,
+                "remaining_quantity": remaining,
+                "cumulative_average_price":
+                    cumulative_average,
+                "cumulative_proceeds": proceeds,
+                "cumulative_fees": total_fees,
+                "cumulative_realized_pnl":
+                    cumulative_pnl,
+                "failure_code": failure_code,
+                "failure_reason": failure_reason,
+            }
+
+            self._insert_trade_event(
+                connection,
+                trade_id=trade_id,
+                event_type="exit_observation_persisted",
+                old_status=current.status,
+                new_status=new_status,
+                occurred_at=timestamp,
+                details=details,
+            )
+            connection.execute(
+                """
+                INSERT INTO exit_recovery_events (
+                    trade_id, observation_key,
+                    event_source, broker_order_id,
+                    broker_state, requested_quantity,
+                    executed_quantity, executed_delta,
+                    remaining_quantity,
+                    cumulative_average_price,
+                    cumulative_proceeds, cumulative_fees,
+                    cumulative_realized_pnl,
+                    protection_result, reconciliation_id,
+                    old_status, new_status,
+                    required_action, failure_code,
+                    failure_reason, occurred_at,
+                    details_json
+                )
+                VALUES (
+                    ?, ?, 'order_observation', ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, NULL, NULL,
+                    ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    trade_id,
+                    observation_key,
+                    broker_order_id,
+                    broker_state,
+                    requested_quantity,
+                    executed_quantity,
+                    executed_delta,
+                    remaining,
+                    serialize_decimal(cumulative_average),
+                    serialize_decimal(proceeds),
+                    serialize_decimal(total_fees),
+                    serialize_decimal(cumulative_pnl),
+                    current.status.value,
+                    new_status.value,
+                    required_action.value,
+                    failure_code,
+                    failure_reason,
+                    timestamp.isoformat(),
+                    json.dumps(
+                        details,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                ),
+            )
+            self._activate_entry_halt(
+                connection,
+                halt_key=f"trade:{trade_id}",
+                strategy=current.strategy,
+                trade_id=trade_id,
+                reason=(
+                    failure_reason
+                    or "Exit lifecycle remains active; "
+                    "fresh broker reconciliation is required."
+                ),
+                operator_ack_required=(
+                    operator_ack_required
+                ),
+                occurred_at=timestamp,
+            )
+
+        return self.get_trade(trade_id), True
 
     def close_trade(
         self,
@@ -2470,6 +3532,27 @@ class TradeStateStore:
             raise TradeStateError(
                 "Average exit price must be positive."
             )
+
+        if current.status in {
+            TradeStatus.EXIT_PENDING,
+            TradeStatus.EXIT_PARTIALLY_FILLED,
+            TradeStatus.EXIT_RECOVERY_REQUIRED,
+        }:
+            exit_close_proved = (
+                current.last_exit_reconciliation_id is not None
+                and current.last_completed_exit_recovery_step
+                == ExitRecoveryStep.FLAT_CONFIRMED.value
+                and current.cumulative_exited_quantity
+                == current.filled_quantity
+                and current.cumulative_average_exit_price
+                == average_exit_price
+                and current.exit_close_reason == reason
+            )
+            if not exit_close_proved:
+                raise TradeStateError(
+                    "Durable exit closure requires fresh flat-snapshot "
+                    "proof with complete matching accounting."
+                )
 
         realized_pnl = (
             average_exit_price
@@ -2613,6 +3696,16 @@ class TradeStateStore:
 
         return int(row["count_value"])
 
+    def count_exit_recovery_events(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count_value
+                FROM exit_recovery_events
+                """
+            ).fetchone()
+
+        return int(row["count_value"])
     def realized_pnl_between(
         self,
         *,
@@ -2629,13 +3722,11 @@ class TradeStateStore:
         query = """
             SELECT realized_pnl
             FROM trades
-            WHERE status = ?
-              AND session_date >= ?
+            WHERE session_date >= ?
               AND session_date <= ?
         """
 
         parameters: list[Any] = [
-            TradeStatus.CLOSED.value,
             start_date.isoformat(),
             end_date.isoformat(),
         ]
@@ -2702,19 +3793,17 @@ class TradeStateStore:
         query = """
             SELECT realized_pnl
             FROM trades
-            WHERE status = ?
+            WHERE realized_pnl != '0'
         """
 
-        parameters: list[Any] = [
-            TradeStatus.CLOSED.value
-        ]
+        parameters: list[Any] = []
 
         if strategy:
             query += " AND strategy = ?"
             parameters.append(strategy)
 
         query += """
-            ORDER BY closed_at, trade_id
+            ORDER BY COALESCE(closed_at, updated_at), trade_id
         """
 
         with self._connect() as connection:
@@ -3190,6 +4279,395 @@ class TradeStateStore:
             "stop_quantity": stop_quantity,
         }
 
+    def _record_exit_reconciliation_event(
+        self,
+        *,
+        reconciliation_id: str,
+        trade: TradeRecord,
+        new_status: TradeStatus,
+        outcome: dict[str, Any],
+        occurred_at: datetime,
+    ) -> None:
+        observation_key = f"reconciliation:{reconciliation_id}"
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO exit_recovery_events (
+                    trade_id, observation_key, event_source,
+                    broker_order_id, broker_state,
+                    requested_quantity, executed_quantity,
+                    executed_delta, remaining_quantity,
+                    cumulative_average_price,
+                    cumulative_proceeds, cumulative_fees,
+                    cumulative_realized_pnl,
+                    protection_result, reconciliation_id,
+                    old_status, new_status, required_action,
+                    failure_code, failure_reason,
+                    occurred_at, details_json
+                )
+                VALUES (
+                    ?, ?, 'broker_reconciliation', ?, NULL,
+                    ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?
+                )
+                """,
+                (
+                    trade.trade_id,
+                    observation_key,
+                    trade.exit_order_id,
+                    trade.exit_requested_quantity,
+                    trade.exit_executed_quantity,
+                    (
+                        int(outcome["position_quantity"])
+                        if outcome["position_quantity"] is not None
+                        and outcome["position_quantity"] >= 0
+                        and outcome["position_quantity"]
+                        == outcome["position_quantity"].to_integral_value()
+                        else None
+                    ),
+                    serialize_decimal(
+                        trade.cumulative_average_exit_price
+                    ),
+                    serialize_decimal(
+                        trade.cumulative_exit_proceeds
+                    ),
+                    serialize_decimal(
+                        trade.cumulative_exit_fees
+                    ),
+                    serialize_decimal(
+                        trade.cumulative_realized_pnl
+                    ),
+                    outcome["result_code"],
+                    reconciliation_id,
+                    trade.status.value,
+                    new_status.value,
+                    outcome["recovery_action"].value,
+                    (
+                        None
+                        if outcome["confirmed"]
+                        else outcome["result_code"]
+                    ),
+                    outcome["failure_reason"],
+                    occurred_at.isoformat(),
+                    json.dumps(
+                        {
+                            "reconciliation_id": reconciliation_id,
+                            "confirmed": outcome["confirmed"],
+                            "flat": outcome["flat"],
+                            "result_code": outcome["result_code"],
+                            "position_quantity": outcome[
+                                "position_quantity"
+                            ],
+                            "stop_quantity": outcome[
+                                "stop_quantity"
+                            ],
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ),
+                ),
+            )
+
+    @staticmethod
+    def _exit_reconciliation_outcome(
+        trade: TradeRecord,
+        account_state: Any,
+    ) -> dict[str, Any]:
+        active_states = {
+            "new",
+            "queued",
+            "confirmed",
+            "unconfirmed",
+            "partially_filled",
+            "pending_cancel",
+            "pending_cancelled",
+            "locating",
+            "open",
+            "submitted",
+            "accepted",
+        }
+        valid_stop_states = {
+            "new",
+            "queued",
+            "confirmed",
+            "unconfirmed",
+            "locating",
+            "open",
+            "submitted",
+            "accepted",
+        }
+        position = next(
+            (
+                item
+                for item in account_state.positions
+                if item.symbol == trade.symbol
+                and item.quantity != 0
+            ),
+            None,
+        )
+        entry_still_open = any(
+            order.order_id == trade.entry_order_id
+            and order.side.strip().lower() == "buy"
+            and order.state.strip().lower() in active_states
+            for order in account_state.open_orders
+        )
+
+        def result(
+            *,
+            confirmed: bool,
+            flat: bool,
+            code: str,
+            reason: str | None,
+            stop_quantity: Decimal | None = None,
+            action: ExitRecoveryAction,
+        ) -> dict[str, Any]:
+            return {
+                "confirmed": confirmed,
+                "flat": flat,
+                "result_code": code,
+                "failure_reason": reason,
+                "position_quantity": (
+                    position.quantity
+                    if position is not None
+                    else None
+                ),
+                "stop_quantity": stop_quantity,
+                "recovery_action": action,
+            }
+
+        if position is None and not entry_still_open:
+            accounting_complete = (
+                bool(trade.exit_close_reason)
+                and trade.exit_intent_type is not None
+                and bool(trade.exit_recovery_ref_id)
+                and trade.cumulative_exited_quantity
+                == trade.filled_quantity
+                and trade.cumulative_average_exit_price
+                is not None
+                and trade.cumulative_average_exit_price > 0
+                and trade.cumulative_exit_proceeds > 0
+                and trade.exit_attempt_base_quantity
+                + trade.exit_executed_quantity
+                == trade.cumulative_exited_quantity
+            )
+            return result(
+                confirmed=accounting_complete,
+                flat=True,
+                code=(
+                    "exit_flat_accounting_complete"
+                    if accounting_complete
+                    else "exit_flat_accounting_incomplete"
+                ),
+                reason=(
+                    None
+                    if accounting_complete
+                    else (
+                        "Broker is flat, but durable exit quantity, "
+                        "price, or intent accounting is incomplete."
+                    )
+                ),
+                action=(
+                    ExitRecoveryAction.NONE
+                    if accounting_complete
+                    else ExitRecoveryAction.OPERATOR_INTERVENTION
+                ),
+            )
+
+        if position is None:
+            return result(
+                confirmed=False,
+                flat=False,
+                code="exit_entry_order_still_open",
+                reason=(
+                    "The linked entry order remains active while no "
+                    "broker position is present."
+                ),
+                action=ExitRecoveryAction.OPERATOR_INTERVENTION,
+            )
+
+        if entry_still_open:
+            return result(
+                confirmed=False,
+                flat=False,
+                code="exit_entry_order_still_open",
+                reason=(
+                    "The linked entry order has an active broker "
+                    "remainder during exit recovery."
+                ),
+                action=ExitRecoveryAction.OPERATOR_INTERVENTION,
+            )
+
+        if (
+            position.quantity <= 0
+            or position.quantity
+            != position.quantity.to_integral_value()
+        ):
+            return result(
+                confirmed=False,
+                flat=False,
+                code="invalid_exit_position_quantity",
+                reason=(
+                    "Exit-recovery broker position must be a positive "
+                    "whole-share quantity."
+                ),
+                action=ExitRecoveryAction.OPERATOR_INTERVENTION,
+            )
+
+        expected_remaining = (
+            trade.filled_quantity
+            - trade.cumulative_exited_quantity
+        )
+        if (
+            expected_remaining <= 0
+            or position.quantity != Decimal(expected_remaining)
+        ):
+            return result(
+                confirmed=False,
+                flat=False,
+                code="exit_position_quantity_mismatch",
+                reason=(
+                    "Broker position does not equal the durable "
+                    "remaining exit quantity."
+                ),
+                action=ExitRecoveryAction.OPERATOR_INTERVENTION,
+            )
+
+        active_exit = any(
+            order.order_id == trade.exit_order_id
+            and order.side.strip().lower() == "sell"
+            and order.state.strip().lower() in active_states
+            for order in account_state.open_orders
+        )
+        if active_exit:
+            return result(
+                confirmed=False,
+                flat=False,
+                code="exit_order_still_active",
+                reason=(
+                    "The linked exit remains active and conflicts with "
+                    "proof of exact remaining protection."
+                ),
+                action=ExitRecoveryAction.RECONCILE_BROKER_STATE,
+            )
+
+        if not trade.protective_stop_order_id:
+            return result(
+                confirmed=False,
+                flat=False,
+                code="exit_remaining_stop_missing",
+                reason=(
+                    "No protective stop is linked for the remaining "
+                    "broker position."
+                ),
+                action=ExitRecoveryAction.PROTECT_REMAINING_POSITION,
+            )
+
+        linked = [
+            order
+            for order in account_state.open_orders
+            if order.order_id == trade.protective_stop_order_id
+        ]
+        if len(linked) != 1:
+            return result(
+                confirmed=False,
+                flat=False,
+                code=(
+                    "exit_remaining_stop_missing"
+                    if not linked
+                    else "exit_duplicate_linked_stop"
+                ),
+                reason=(
+                    "Fresh snapshot does not contain exactly one "
+                    "linked protective stop."
+                ),
+                action=ExitRecoveryAction.PROTECT_REMAINING_POSITION,
+            )
+
+        stop = linked[0]
+        checks = (
+            (
+                stop.symbol == trade.symbol,
+                "exit_stop_symbol_mismatch",
+            ),
+            (
+                stop.side.strip().lower() == "sell",
+                "exit_stop_side_mismatch",
+            ),
+            (
+                stop.trigger.strip().lower() == "stop",
+                "exit_stop_trigger_mismatch",
+            ),
+            (
+                stop.order_type.strip().lower() == "stop_market",
+                "exit_stop_type_mismatch",
+            ),
+            (
+                stop.state.strip().lower() in valid_stop_states,
+                "exit_stop_state_invalid",
+            ),
+            (
+                stop.stop_price is not None and stop.stop_price > 0,
+                "exit_stop_price_invalid",
+            ),
+            (
+                stop.cumulative_quantity == 0,
+                "exit_stop_has_execution",
+            ),
+            (
+                stop.quantity == position.quantity,
+                "exit_stop_quantity_mismatch",
+            ),
+            (
+                stop.placed_agent.strip().lower() == "agentic",
+                "exit_stop_not_agentic",
+            ),
+        )
+        for passed, code in checks:
+            if not passed:
+                return result(
+                    confirmed=False,
+                    flat=False,
+                    code=code,
+                    reason=(
+                        "The linked protective stop cannot prove exact "
+                        "active coverage of the remaining position."
+                    ),
+                    stop_quantity=stop.quantity,
+                    action=(
+                        ExitRecoveryAction
+                        .PROTECT_REMAINING_POSITION
+                    ),
+                )
+
+        conflicting_sells = [
+            order
+            for order in account_state.open_orders
+            if order.order_id != stop.order_id
+            and order.symbol == trade.symbol
+            and order.side.strip().lower() == "sell"
+            and order.state.strip().lower() in active_states
+        ]
+        if conflicting_sells:
+            return result(
+                confirmed=False,
+                flat=False,
+                code="exit_conflicting_sell_order",
+                reason=(
+                    "Another active sell order conflicts with exact "
+                    "remaining protection."
+                ),
+                stop_quantity=stop.quantity,
+                action=ExitRecoveryAction.OPERATOR_INTERVENTION,
+            )
+
+        return result(
+            confirmed=True,
+            flat=False,
+            code="exit_remaining_protection_confirmed",
+            reason=None,
+            stop_quantity=stop.quantity,
+            action=ExitRecoveryAction.NONE,
+        )
     def apply_startup_reconciliation(
         self,
         *,
@@ -3279,6 +4757,22 @@ class TradeStateStore:
             for row in halted_rows
         )
 
+        def exit_proof_required(trade: TradeRecord) -> bool:
+            return (
+                trade.status in {
+                    TradeStatus.EXIT_PENDING,
+                    TradeStatus.EXIT_PARTIALLY_FILLED,
+                    TradeStatus.EXIT_RECOVERY_REQUIRED,
+                }
+                or (
+                    bool(trade.exit_recovery_ref_id)
+                    and trade.cumulative_exited_quantity > 0
+                    and trade.status in {
+                        TradeStatus.STOP_LINKED,
+                        TradeStatus.OPEN_PROTECTED,
+                    }
+                )
+            )
         if not validation.valid:
             self._record_reconciliation_run(
                 strategy=strategy,
@@ -3293,22 +4787,44 @@ class TradeStateStore:
             )
 
             for trade in halted_trades:
-                self._record_protection_reconciliation_event(
-                    reconciliation_id=(
-                        metadata.reconciliation_id
-                    ),
-                    trade=trade,
-                    new_status=trade.status,
-                    confirmed=False,
-                    result_code=validation.result_code,
-                    failure_reason=(
-                        validation.failure_reason
-                    ),
-                    position_quantity=None,
-                    stop_quantity=None,
-                    occurred_at=timestamp,
-                )
-
+                if exit_proof_required(trade):
+                    invalid_outcome = {
+                        "confirmed": False,
+                        "flat": False,
+                        "result_code": validation.result_code,
+                        "failure_reason": validation.failure_reason,
+                        "position_quantity": None,
+                        "stop_quantity": None,
+                        "recovery_action": (
+                            ExitRecoveryAction
+                            .RECONCILE_BROKER_STATE
+                        ),
+                    }
+                    self._record_exit_reconciliation_event(
+                        reconciliation_id=(
+                            metadata.reconciliation_id
+                        ),
+                        trade=trade,
+                        new_status=trade.status,
+                        outcome=invalid_outcome,
+                        occurred_at=timestamp,
+                    )
+                else:
+                    self._record_protection_reconciliation_event(
+                        reconciliation_id=(
+                            metadata.reconciliation_id
+                        ),
+                        trade=trade,
+                        new_status=trade.status,
+                        confirmed=False,
+                        result_code=validation.result_code,
+                        failure_reason=(
+                            validation.failure_reason
+                        ),
+                        position_quantity=None,
+                        stop_quantity=None,
+                        occurred_at=timestamp,
+                    )
             issues = list(
                 self.startup_reconciliation_issues(
                     strategy=strategy,
@@ -3330,9 +4846,16 @@ class TradeStateStore:
         outcomes = tuple(
             (
                 trade,
-                self._protection_reconciliation_outcome(
-                    trade,
-                    snapshot.account_state,
+                (
+                    self._exit_reconciliation_outcome(
+                        trade,
+                        snapshot.account_state,
+                    )
+                    if exit_proof_required(trade)
+                    else self._protection_reconciliation_outcome(
+                        trade,
+                        snapshot.account_state,
+                    )
                 ),
             )
             for trade in halted_trades
@@ -3366,6 +4889,176 @@ class TradeStateStore:
         for trade, outcome in outcomes:
             new_status = trade.status
 
+            if exit_proof_required(trade):
+                if outcome["confirmed"] and outcome["flat"]:
+                    proved = self._transition(
+                        trade.trade_id,
+                        new_status=trade.status,
+                        event_type="exit_flat_proved",
+                        updates={
+                            "exit_remaining_position_quantity": 0,
+                            "last_exit_reconciliation_id":
+                                metadata.reconciliation_id,
+                            "required_exit_recovery_action":
+                                ExitRecoveryAction.NONE.value,
+                            "last_completed_exit_recovery_step":
+                                ExitRecoveryStep.FLAT_CONFIRMED.value,
+                            "exit_recovery_failure_reason": None,
+                            "exit_operator_ack_required": 0,
+                        },
+                        details={
+                            "reconciliation_id":
+                                metadata.reconciliation_id,
+                            "proof": (
+                                "Fresh complete broker snapshot proved "
+                                "flat with complete durable accounting."
+                            ),
+                        },
+                        occurred_at=timestamp,
+                    )
+                    assert proved.cumulative_average_exit_price is not None
+                    assert proved.exit_close_reason is not None
+                    closed = self.close_trade(
+                        trade.trade_id,
+                        average_exit_price=(
+                            proved.cumulative_average_exit_price
+                        ),
+                        reason=proved.exit_close_reason,
+                        occurred_at=timestamp,
+                    )
+                    new_status = closed.status
+                    with self._connect() as connection:
+                        self._clear_entry_halt(
+                            connection,
+                            halt_key=f"trade:{trade.trade_id}",
+                            occurred_at=timestamp,
+                        )
+
+                elif outcome["confirmed"]:
+                    position_quantity = int(
+                        outcome["position_quantity"]
+                    )
+                    linked = self._transition(
+                        trade.trade_id,
+                        new_status=TradeStatus.STOP_LINKED,
+                        event_type=(
+                            "exit_remaining_stop_linked_for_"
+                            "reconciliation"
+                        ),
+                        updates={
+                            "protected_quantity": 0,
+                            "remaining_broker_position_quantity":
+                                position_quantity,
+                            "exit_remaining_position_quantity":
+                                position_quantity,
+                            "last_exit_reconciliation_id":
+                                metadata.reconciliation_id,
+                        },
+                        details={
+                            "reconciliation_id":
+                                metadata.reconciliation_id,
+                        },
+                        occurred_at=timestamp,
+                    )
+                    protected = self._transition(
+                        linked.trade_id,
+                        new_status=TradeStatus.OPEN_PROTECTED,
+                        event_type=(
+                            "exit_remaining_protection_confirmed"
+                        ),
+                        updates={
+                            "protected_quantity": position_quantity,
+                            "remaining_broker_position_quantity":
+                                position_quantity,
+                            "exit_remaining_position_quantity":
+                                position_quantity,
+                            "required_exit_recovery_action":
+                                ExitRecoveryAction.NONE.value,
+                            "last_completed_exit_recovery_step":
+                                ExitRecoveryStep
+                                .PROTECTION_CONFIRMED.value,
+                            "exit_recovery_failure_reason": None,
+                            "exit_operator_ack_required": 0,
+                            "last_exit_reconciliation_id":
+                                metadata.reconciliation_id,
+                            "required_recovery_action":
+                                EntryRecoveryAction.NONE.value,
+                            "last_completed_recovery_step":
+                                EntryRecoveryStep
+                                .PROTECTION_CONFIRMED.value,
+                            "recovery_failure_reason": None,
+                            "operator_ack_required": 0,
+                            "last_protection_reconciliation_id":
+                                metadata.reconciliation_id,
+                            "protection_confirmed_at": timestamp,
+                        },
+                        details={
+                            "reconciliation_id":
+                                metadata.reconciliation_id,
+                            "protected_quantity": position_quantity,
+                        },
+                        occurred_at=timestamp,
+                    )
+                    new_status = protected.status
+                    with self._connect() as connection:
+                        self._clear_entry_halt(
+                            connection,
+                            halt_key=f"trade:{trade.trade_id}",
+                            occurred_at=timestamp,
+                        )
+
+                else:
+                    broker_quantity = outcome["position_quantity"]
+                    persisted_quantity = None
+                    if (
+                        broker_quantity is not None
+                        and broker_quantity >= 0
+                        and broker_quantity
+                        == broker_quantity.to_integral_value()
+                    ):
+                        persisted_quantity = int(broker_quantity)
+
+                    unresolved = self._transition(
+                        trade.trade_id,
+                        new_status=(
+                            TradeStatus.EXIT_RECOVERY_REQUIRED
+                        ),
+                        event_type="exit_recovery_unresolved",
+                        updates={
+                            "exit_remaining_position_quantity":
+                                persisted_quantity,
+                            "last_exit_reconciliation_id":
+                                metadata.reconciliation_id,
+                            "required_exit_recovery_action":
+                                outcome["recovery_action"].value,
+                            "exit_recovery_failure_reason":
+                                outcome["failure_reason"],
+                            "exit_operator_ack_required": int(
+                                trade.exit_operator_ack_required
+                                or outcome["recovery_action"]
+                                == ExitRecoveryAction
+                                .OPERATOR_INTERVENTION
+                            ),
+                        },
+                        details={
+                            "reconciliation_id":
+                                metadata.reconciliation_id,
+                            "result_code": outcome["result_code"],
+                            "failure_reason":
+                                outcome["failure_reason"],
+                        },
+                        occurred_at=timestamp,
+                    )
+                    new_status = unresolved.status
+
+                self._record_exit_reconciliation_event(
+                    reconciliation_id=metadata.reconciliation_id,
+                    trade=trade,
+                    new_status=new_status,
+                    outcome=outcome,
+                    occurred_at=timestamp,
+                )
+                continue
             if outcome["confirmed"] and outcome["flat"]:
                 full_stop_close = (
                     trade.status
@@ -3551,6 +5244,40 @@ class TradeStateStore:
                         "stop_operator_ack_required": 0,
                         "last_stop_reconciliation_id":
                             metadata.reconciliation_id,
+                        "exit_remaining_position_quantity": (
+                            position_quantity
+                            if trade.exit_recovery_ref_id
+                            else trade.exit_remaining_position_quantity
+                        ),
+                        "required_exit_recovery_action": (
+                            ExitRecoveryAction.NONE.value
+                            if trade.exit_recovery_ref_id
+                            else trade.required_exit_recovery_action.value
+                        ),
+                        "last_completed_exit_recovery_step": (
+                            ExitRecoveryStep
+                            .PROTECTION_CONFIRMED.value
+                            if trade.exit_recovery_ref_id
+                            else trade
+                            .last_completed_exit_recovery_step
+                        ),
+                        "exit_recovery_failure_reason": (
+                            None
+                            if trade.exit_recovery_ref_id
+                            else trade.exit_recovery_failure_reason
+                        ),
+                        "exit_operator_ack_required": (
+                            0
+                            if trade.exit_recovery_ref_id
+                            else int(
+                                trade.exit_operator_ack_required
+                            )
+                        ),
+                        "last_exit_reconciliation_id": (
+                            metadata.reconciliation_id
+                            if trade.exit_recovery_ref_id
+                            else trade.last_exit_reconciliation_id
+                        ),
                     },
                     details={
                         "reconciliation_id":
@@ -3729,6 +5456,8 @@ class TradeStateStore:
                     TradeStatus.OPEN_PROTECTED,
                     TradeStatus.STOP_RECOVERY_REQUIRED,
                     TradeStatus.EXIT_PENDING,
+                    TradeStatus.EXIT_PARTIALLY_FILLED,
+                    TradeStatus.EXIT_RECOVERY_REQUIRED,
                 }
             )
         }
@@ -3746,6 +5475,9 @@ class TradeStateStore:
                 TradeStatus.RECOVERY_REQUIRED,
                 TradeStatus.STOP_LINKED,
                 TradeStatus.STOP_RECOVERY_REQUIRED,
+                TradeStatus.EXIT_PENDING,
+                TradeStatus.EXIT_PARTIALLY_FILLED,
+                TradeStatus.EXIT_RECOVERY_REQUIRED,
             }:
                 issues.append(
                     ReconciliationIssue(
@@ -3765,6 +5497,9 @@ class TradeStateStore:
                 TradeStatus.OPEN_UNPROTECTED,
                 TradeStatus.STOP_LINKED,
                 TradeStatus.STOP_RECOVERY_REQUIRED,
+                TradeStatus.EXIT_PENDING,
+                TradeStatus.EXIT_PARTIALLY_FILLED,
+                TradeStatus.EXIT_RECOVERY_REQUIRED,
             }:
                 issues.append(
                     ReconciliationIssue(
@@ -3850,10 +5585,15 @@ class TradeStateStore:
             )
 
             expected_position_quantity = (
-                trade.remaining_broker_position_quantity
-                if trade.remaining_broker_position_quantity
+                trade.exit_remaining_position_quantity
+                if trade.exit_remaining_position_quantity
                 is not None
-                else trade.filled_quantity
+                else (
+                    trade.remaining_broker_position_quantity
+                    if trade.remaining_broker_position_quantity
+                    is not None
+                    else trade.filled_quantity
+                )
             )
 
             if (
@@ -3946,6 +5686,8 @@ class TradeStateStore:
                     TradeStatus.OPEN_PROTECTED,
                     TradeStatus.STOP_RECOVERY_REQUIRED,
                     TradeStatus.EXIT_PENDING,
+                    TradeStatus.EXIT_PARTIALLY_FILLED,
+                    TradeStatus.EXIT_RECOVERY_REQUIRED,
                 }
                 and trade.symbol
                 not in broker_positions

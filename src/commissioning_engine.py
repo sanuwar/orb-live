@@ -181,6 +181,8 @@ class CommissioningEngine:
                     TradeStatus.OPEN_PROTECTED,
                     TradeStatus.STOP_RECOVERY_REQUIRED,
                     TradeStatus.EXIT_PENDING,
+                    TradeStatus.EXIT_PARTIALLY_FILLED,
+                    TradeStatus.EXIT_RECOVERY_REQUIRED,
                 }
             )
         )

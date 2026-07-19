@@ -171,6 +171,11 @@ def make_exit_pending_trade(
     return store.begin_exit(
         trade.trade_id,
         broker_order_id="exit-1",
+        requested_quantity=10,
+        close_reason="profit_target",
+        intent_type="profit_target",
+        intended_price=Decimal("102"),
+        recovery_ref_id="exit-intent-1",
     )
 
 
@@ -623,14 +628,14 @@ async def test_pending_exit_waits(
 
     assert result.role == MonitoredOrderRole.EXIT
     assert result.action == OrderMonitorAction.WAIT
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert result.trade_after.status == (
         TradeStatus.EXIT_PENDING
     )
 
 
 @pytest.mark.anyio
-async def test_full_exit_fill_closes_trade(
+async def test_full_exit_fill_requires_flat_snapshot(
     tmp_path,
 ):
     store = TradeStateStore(
@@ -662,23 +667,19 @@ async def test_full_exit_fill_closes_trade(
 
     assert (
         result.action
-        == OrderMonitorAction
-        .EXIT_FILLED_TRADE_CLOSED
+        == OrderMonitorAction.RECONCILE_IMMEDIATELY
     )
     assert result.ledger_changed is True
     assert result.trade_after.status == (
-        TradeStatus.CLOSED
+        TradeStatus.EXIT_RECOVERY_REQUIRED
     )
-    assert result.trade_after.realized_pnl == (
-        Decimal("20")
-    )
-    assert result.trade_after.close_reason == (
-        "profit_target"
-    )
+    assert result.trade_after.realized_pnl == Decimal("20")
+    assert result.trade_after.close_reason is None
+    assert result.requires_reconciliation is True
 
 
 @pytest.mark.anyio
-async def test_full_exit_without_close_reason_fails_closed(
+async def test_durable_close_reason_needs_no_external_repeat(
     tmp_path,
 ):
     store = TradeStateStore(
@@ -709,14 +710,15 @@ async def test_full_exit_without_close_reason_fails_closed(
 
     assert (
         result.action
-        == OrderMonitorAction.FAIL_CLOSED
+        == OrderMonitorAction.RECONCILE_IMMEDIATELY
     )
-    assert result.ledger_changed is False
+    assert result.ledger_changed is True
     assert result.order_event_recorded is True
     assert result.requires_reconciliation is True
     assert result.trade_after.status == (
-        TradeStatus.EXIT_PENDING
+        TradeStatus.EXIT_RECOVERY_REQUIRED
     )
+    assert result.trade_after.exit_close_reason == "profit_target"
 
 
 @pytest.mark.anyio
