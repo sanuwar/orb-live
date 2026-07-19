@@ -2361,6 +2361,7 @@ class TradeStateStore:
                 "Strategy, trade, and reconciliation IDs are required for broker action authorization."
             )
         if purpose not in {
+            "entry",
             "protect_filled_entry",
             "replace_protective_stop",
             "exit_position",

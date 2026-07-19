@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -56,6 +57,7 @@ class DryRunPlan:
     entry_review_payload: dict[str, Any] | None = None
     entry_placement_payload: dict[str, Any] | None = None
     protective_stop_payload: dict[str, Any] | None = None
+    generated_at: datetime | None = None
 
 
 class DryRunEngine:
@@ -227,6 +229,7 @@ class DryRunEngine:
             ),
             entry_placement_payload=entry_order.tool_arguments,
             protective_stop_payload=stop_order.tool_arguments,
+            generated_at=datetime.now(timezone.utc),
         )
 
         self._journal_plan(plan)
