@@ -5367,7 +5367,7 @@ class TradeStateStore:
         with self._connect() as connection:
             halted_rows = connection.execute(
                 """
-                SELECT trades.*
+                SELECT DISTINCT trades.*
                 FROM trades
                 JOIN entry_halts
                   ON entry_halts.trade_id
