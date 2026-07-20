@@ -13,12 +13,18 @@ try:
         BrokerSnapshotMetadata,
         account_fingerprint,
     )
+    from .read_only_broker_gateway import (
+        ReadOnlyBrokerGateway,
+    )
     from .robinhood_client import (
         RobinhoodClient,
         RobinhoodClientError,
         _unwrap_tool_result,
     )
 except ImportError:
+    from read_only_broker_gateway import (
+        ReadOnlyBrokerGateway,
+    )
     from broker_snapshot import (
         BrokerSnapshot,
         BrokerSnapshotMetadata,
@@ -308,8 +314,22 @@ class AccountStateReader:
     def __init__(
         self,
         client: RobinhoodClient | None = None,
+        *,
+        gateway: ReadOnlyBrokerGateway | None = None,
     ):
+        """
+        Reads account state through the read-only gateway.
+
+        Every broker read passes the allowlist, so a non-allowlisted
+        tool is rejected before the underlying session is opened. A
+        gateway may be injected for testing; by default one is built
+        around the supplied or default client.
+        """
+
         self.client = client or RobinhoodClient()
+        self.gateway = gateway or ReadOnlyBrokerGateway(
+            self.client
+        )
 
     async def read(
         self,
@@ -329,7 +349,7 @@ class AccountStateReader:
         reconciliation_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc)
 
-        async with self.client.session() as session:
+        async with self.gateway.session() as session:
             accounts_result = await session.call_tool(
                 "get_accounts",
                 {},
