@@ -12,6 +12,10 @@ credentials.json
 tokens.json
 cookies.json
 
+# Local operator-commissioned configuration overrides
+config/local.yaml
+config/local.*.yaml
+
 # Local trading data
 data/*.sqlite
 data/*.sqlite-shm

@@ -51,6 +51,13 @@ risk:
   short_selling_allowed: false
   averaging_down_allowed: false
 
+broker:
+  # Operator-commissioned account identity, as a SHA-256 fingerprint.
+  # Never store a full account number here. The real fingerprint is
+  # supplied through the gitignored config/local.yaml override and is
+  # never committed. Reconciliation fails closed while this is null.
+  expected_account_fingerprint: null
+
 execution:
   entry_order_type: limit
   protective_stop_order_type: stop_market
