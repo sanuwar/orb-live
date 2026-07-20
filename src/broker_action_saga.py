@@ -184,7 +184,11 @@ SAGA_TRANSITIONS = {
     SagaActionStatus.CONFIRMED_SUCCEEDED: set(),
     SagaActionStatus.TERMINAL_FAILURE: set(),
     SagaActionStatus.CANCELLED: set(),
-    SagaActionStatus.OPERATOR_REQUIRED: set(),
+    SagaActionStatus.OPERATOR_REQUIRED: {
+        SagaActionStatus
+        .AWAITING_BROKER_CONFIRMATION,
+        SagaActionStatus.CONFIRMED_NOT_PERFORMED,
+    },
 }
 
 RETRYABLE_STATUSES = {
@@ -2550,6 +2554,136 @@ class BrokerActionSagaStore:
 
         return self.get_action(action_id)
 
+    def resolve_operator_required(
+        self,
+        action_id: str,
+        *,
+        snapshot: BrokerSnapshot,
+        evaluated_at: datetime,
+        observation: dict[str, Any],
+        maximum_snapshot_age: timedelta = (
+            DEFAULT_MAXIMUM_SNAPSHOT_AGE
+        ),
+        occurred_at: datetime | None = None,
+    ) -> SagaActionRecord:
+        """
+        Resolves an OPERATOR_REQUIRED action with fresh
+        broker evidence only.
+
+        Operator acknowledgment can never reach this
+        transition; it requires a validated fresh,
+        complete, account-matched snapshot plus an
+        explicit machine-readable effect observation.
+        """
+        timestamp = occurred_at or evaluated_at
+        _require_aware(
+            timestamp, "operator resolution"
+        )
+        if not isinstance(observation, dict):
+            raise BrokerActionSagaError(
+                "Operator resolution requires a "
+                "machine-readable observation."
+            )
+
+        with self._connect() as connection:
+            current = self._row_to_action(
+                self._load_action_row(
+                    connection, action_id
+                )
+            )
+            if (
+                current.status
+                != SagaActionStatus.OPERATOR_REQUIRED
+            ):
+                raise BrokerActionSagaError(
+                    "Only OPERATOR_REQUIRED saga "
+                    "actions can be resolved with "
+                    "operator evidence."
+                )
+            validation = self._validated_proof(
+                current,
+                snapshot=snapshot,
+                evaluated_at=evaluated_at,
+                maximum_snapshot_age=(
+                    maximum_snapshot_age
+                ),
+            )
+
+            effect_present = observation.get(
+                "effect_present"
+            )
+            details = {
+                "reconciliation_id": (
+                    snapshot.metadata
+                    .reconciliation_id
+                ),
+                "snapshot_digest": (
+                    validation.snapshot_digest
+                ),
+                "effect_present": effect_present,
+            }
+            if effect_present is True:
+                set_clauses: dict[str, Any] = {
+                    "last_observation_at": (
+                        timestamp.isoformat()
+                    ),
+                }
+                observed_order_id = observation.get(
+                    "resulting_broker_order_id"
+                )
+                if observed_order_id:
+                    set_clauses[
+                        "resulting_broker_order_id"
+                    ] = str(observed_order_id)
+                self._transition(
+                    connection,
+                    current=current,
+                    new_status=(
+                        SagaActionStatus
+                        .AWAITING_BROKER_CONFIRMATION
+                    ),
+                    event_type=(
+                        "saga_operator_resolved_performed"
+                    ),
+                    occurred_at=timestamp,
+                    details=details,
+                    set_clauses=set_clauses,
+                )
+            elif effect_present is False:
+                self._transition(
+                    connection,
+                    current=current,
+                    new_status=(
+                        SagaActionStatus
+                        .CONFIRMED_NOT_PERFORMED
+                    ),
+                    event_type=(
+                        "saga_operator_resolved_not_performed"
+                    ),
+                    occurred_at=timestamp,
+                    details=details,
+                    set_clauses={
+                        "last_observation_at": (
+                            timestamp.isoformat()
+                        ),
+                    },
+                )
+            else:
+                self._insert_event(
+                    connection,
+                    action_id=action_id,
+                    event_type=(
+                        "saga_operator_evidence_ambiguous"
+                    ),
+                    old_status=current.status,
+                    new_status=current.status,
+                    occurred_at=timestamp,
+                    details=details,
+                )
+                return current
+
+        return self.get_action(action_id)
+
     def confirm_action_succeeded(
         self,
         action_id: str,
@@ -3054,13 +3188,19 @@ class BrokerActionSagaStore:
                 if (
                     action_row is not None
                     and action_row["status"]
-                    == SagaActionStatus
-                    .OUTCOME_UNKNOWN.value
+                    in {
+                        SagaActionStatus
+                        .OUTCOME_UNKNOWN.value,
+                        SagaActionStatus
+                        .OPERATOR_REQUIRED.value,
+                    }
                 ):
                     raise BrokerActionSagaError(
                         "A halt cannot be cleared "
                         "while its saga action "
-                        "outcome remains unknown."
+                        "outcome remains unknown or "
+                        "requires unresolved "
+                        "operator evidence."
                     )
             connection.execute(
                 """
