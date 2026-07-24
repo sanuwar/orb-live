@@ -3,7 +3,9 @@ Grounded live broker capability model (OFFLINE, NON-BINDING).
 
 This module is a pure, additive description of what the broker's equity-order
 surface can and cannot do, as established by Checkpoint 7A (advertised input
-schemas) and Checkpoint 7B (observed live response shapes).
+schemas), Checkpoint 7B (observed live response shapes), and the official
+tools/list schema snapshot the operator later supplied as an untracked
+external reference (advertised INPUT and OUTPUT schemas).
 
 It performs NO broker, MCP, network, credential, token, or database access.
 It constructs no transport, no client, and no executor. It invokes no tool.
@@ -203,8 +205,10 @@ EQUITY_ORDER_CAPABILITY_EVIDENCE: tuple[CapabilityFact, ...] = (
         supported=True,
         evidence=CapabilityEvidence.SCHEMA_ADVERTISED,
         note=(
-            "cancel_equity_order advertises account_number + order_id. No "
-            "cancellation response has been observed."
+            "cancel_equity_order advertises account_number + order_id in, "
+            "and a single boolean acceptance out. The response contract is "
+            "now schema-advertised, but no cancellation response has been "
+            "observed live."
         ),
     ),
     CapabilityFact(
@@ -212,9 +216,10 @@ EQUITY_ORDER_CAPABILITY_EVIDENCE: tuple[CapabilityFact, ...] = (
         supported=True,
         evidence=CapabilityEvidence.SCHEMA_ADVERTISED,
         note=(
-            "Cancellation may be rejected or may not complete immediately; "
-            "acceptance is not completion. Final state must be confirmed by "
-            "an order-status read."
+            "The advertised output states that acceptance is not "
+            "completion and directs the caller to an order-status read for "
+            "the final state. Cancellation may also be refused outright. "
+            "Final state must be confirmed by an order-status read."
         ),
     ),
     CapabilityFact(
@@ -222,7 +227,9 @@ EQUITY_ORDER_CAPABILITY_EVIDENCE: tuple[CapabilityFact, ...] = (
         supported=True,
         evidence=CapabilityEvidence.LIVE_OBSERVED,
         note=(
-            "get_equity_orders returned order records during Checkpoint 7B."
+            "get_equity_orders returned order records during Checkpoint 7B. "
+            "Its full output contract, including the lifecycle state set, "
+            "is separately schema-advertised."
         ),
     ),
     CapabilityFact(
@@ -231,7 +238,8 @@ EQUITY_ORDER_CAPABILITY_EVIDENCE: tuple[CapabilityFact, ...] = (
         evidence=CapabilityEvidence.SCHEMA_ADVERTISED,
         note=(
             "get_equity_positions is on the commissioned read-only "
-            "allowlist. It was not exercised by Checkpoint 7B."
+            "allowlist and its output contract is schema-advertised. It was "
+            "not exercised by Checkpoint 7B."
         ),
     ),
     CapabilityFact(
@@ -272,6 +280,59 @@ EQUITY_ORDER_CAPABILITY_EVIDENCE: tuple[CapabilityFact, ...] = (
         note=(
             "A protective stop must be a separate order; it cannot be "
             "attached to the entry submission."
+        ),
+    ),
+)
+
+
+# Response-contract grounding, kept SEPARATE from the capability flags.
+#
+# These four facts moved from "schema unavailable" to "schema advertised"
+# when the operator supplied the official tools/list snapshot. None of them
+# is live-verified: a published output schema describes what the broker says
+# it returns, and no place or cancel response has ever been observed. They
+# change no capability flag; every unsupported flag above is unchanged.
+RESPONSE_CONTRACT_EVIDENCE: tuple[CapabilityFact, ...] = (
+    CapabilityFact(
+        name="place_response_returns_submitted_order",
+        supported=True,
+        evidence=CapabilityEvidence.SCHEMA_ADVERTISED,
+        note=(
+            "The place output advertises data.order as the newly created "
+            "order, in the same shape as the order-status output. It "
+            "establishes SUBMISSION only; it is not evidence of a fill."
+        ),
+    ),
+    CapabilityFact(
+        name="cancel_response_returns_async_acceptance",
+        supported=True,
+        evidence=CapabilityEvidence.SCHEMA_ADVERTISED,
+        note=(
+            "The cancel output advertises data.accepted as a boolean "
+            "describing acceptance of the cancel REQUEST. It is never "
+            "evidence of a completed cancellation."
+        ),
+    ),
+    CapabilityFact(
+        name="order_status_lifecycle_state_shape",
+        supported=True,
+        evidence=CapabilityEvidence.SCHEMA_ADVERTISED,
+        note=(
+            "The order-status output advertises a lifecycle state set that "
+            "is strictly larger than the input state filter, and includes "
+            "pending_cancelled and partially_filled_rest_cancelled. Which "
+            "of these states constitutes active protective coverage is NOT "
+            "advertised and remains ungrounded."
+        ),
+    ),
+    CapabilityFact(
+        name="position_response_contract",
+        supported=True,
+        evidence=CapabilityEvidence.SCHEMA_ADVERTISED,
+        note=(
+            "The position output advertises per-symbol quantity, "
+            "sellable-share, and hold-breakdown fields. It has not been "
+            "exercised live."
         ),
     ),
 )

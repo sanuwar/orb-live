@@ -12,6 +12,7 @@ import pytest
 
 from src.live_broker_capabilities import (
     APPROVED_PROTECTION_INVARIANT,
+    RESPONSE_CONTRACT_EVIDENCE,
     AtomicStopReplacementUnsupportedError,
     BracketOrderUnsupportedError,
     CapabilityEvidence,
@@ -34,6 +35,8 @@ NEW_MODULES = (
     "live_broker_capabilities.py",
     "live_order_contract.py",
     "same_ref_payload_guard.py",
+    "live_order_state_model.py",
+    "live_cancel_reconciliation.py",
 )
 
 
@@ -188,6 +191,79 @@ def test_lookup_by_ref_evidence_is_honest_about_sampling():
     fact = capability_evidence("supports_lookup_by_ref")
     assert fact.supported is False
     assert "not proof" in fact.note.lower()
+
+
+# ---------- response-contract evidence (schema advertised, not verified) ----
+
+RESPONSE_CONTRACT_FACTS = (
+    "place_response_returns_submitted_order",
+    "cancel_response_returns_async_acceptance",
+    "order_status_lifecycle_state_shape",
+    "position_response_contract",
+)
+
+
+def test_response_contract_evidence_covers_the_four_grounded_facts():
+    assert {fact.name for fact in RESPONSE_CONTRACT_EVIDENCE} == set(
+        RESPONSE_CONTRACT_FACTS
+    )
+
+
+@pytest.mark.parametrize("name", RESPONSE_CONTRACT_FACTS)
+def test_response_contracts_are_advertised_never_live_verified(name):
+    """
+    A published output schema is not an observation.
+
+    These four moved from "schema unavailable" to "schema advertised". None
+    of them may be described as live-verified: no place or cancel response
+    has ever been observed.
+    """
+    fact = capability_evidence(name, RESPONSE_CONTRACT_EVIDENCE)
+
+    assert fact.supported is True
+    assert fact.evidence is CapabilityEvidence.SCHEMA_ADVERTISED
+    assert fact.is_verified_live is False
+
+
+def test_response_contract_evidence_is_separate_from_the_flags():
+    """These facts must not silently become capability flags."""
+    flags = set(EQUITY_ORDER_CAPABILITIES.as_mapping())
+    assert not (set(RESPONSE_CONTRACT_FACTS) & flags)
+    assert len(flags) == 11
+
+
+def test_unsupported_flags_are_unchanged_by_the_schema_snapshot():
+    """The output schemas ground responses; they add no capability."""
+    for flag in UNSUPPORTED_FLAGS:
+        assert EQUITY_ORDER_CAPABILITIES.supports(flag) is False
+
+
+def test_place_response_evidence_states_submission_is_not_fill():
+    fact = capability_evidence(
+        "place_response_returns_submitted_order", RESPONSE_CONTRACT_EVIDENCE
+    )
+    assert "not evidence of a fill" in fact.note.lower()
+
+
+def test_cancel_response_evidence_states_acceptance_is_not_completion():
+    fact = capability_evidence(
+        "cancel_response_returns_async_acceptance", RESPONSE_CONTRACT_EVIDENCE
+    )
+    note = fact.note.lower()
+    assert "request" in note
+    assert "never evidence of a completed cancellation" in note
+
+
+def test_active_protection_mapping_is_recorded_as_ungrounded():
+    fact = capability_evidence(
+        "order_status_lifecycle_state_shape", RESPONSE_CONTRACT_EVIDENCE
+    )
+    assert "ungrounded" in fact.note.lower()
+
+
+def test_unknown_response_contract_evidence_fails_closed():
+    with pytest.raises(UnsupportedCapabilityError):
+        capability_evidence("no_such_contract", RESPONSE_CONTRACT_EVIDENCE)
 
 
 # ---------- absolute protection invariant ----------
