@@ -1,5 +1,4 @@
 ﻿import Callout from '../components/Callout'
-import JourneySpine from '../components/JourneySpine'
 import PageHeader from '../components/PageHeader'
 import DecisionFunnel from '../components/diagrams/DecisionFunnel'
 import SystemFlowDiagram from '../components/diagrams/SystemFlowDiagram'
@@ -8,39 +7,29 @@ export default function SystemFlowPage() {
   return (
     <div className="page">
       <PageHeader
-        eyebrow="Separated responsibilities"
-        title="A decision is not an authorization. An authorization is not a fill."
-        lead="ORB-LIVE is organized as a series of boundaries. Read-only observations become hypothetical decisions; only a separate, explicit process could authorize a durable broker action."
-      />
-
-      <JourneySpine
-        compact
-        title="The complete system journey"
-        description="System Flow is where all five chapters connect. Each chapter still stops independently when its evidence is insufficient."
+        eyebrow="Quantified system flow"
+        title="15 → 0–1 → 15s → 1R → evidence"
+        lead="Each stage transforms measured input into a smaller, bounded, durable output."
       />
 
       <SystemFlowDiagram />
 
-      <div className="two-column-diagrams">
-        <DecisionFunnel />
-        <section className="boundary-explainer" aria-labelledby="boundary-title">
-          <span className="section-label">How the thread changes state</span>
-          <h2 id="boundary-title">Four different kinds of progress</h2>
-          <dl>
-            <div><dt>Observed</dt><dd>Data was read and checked for freshness or conflicts.</dd></div>
-            <div><dt>Hypothetical</dt><dd>A strategy rule evaluated a possible decision in shadow.</dd></div>
-            <div><dt>Reviewed</dt><dd>A bounded proposal or external state was inspected.</dd></div>
-            <div><dt>Authorized</dt><dd>An operator approved a specific intent for a short-lived context—not a general permission to trade.</dd></div>
-          </dl>
-        </section>
-      </div>
+      <DecisionFunnel />
 
-      <Callout title="Current boundary" tone="warning" icon="!">
-        <p>
-          The dashboard is not connected to any of these runtime stages.
-          Strategy execution remains disabled, and the current commissioning
-          state does not authorize a live entry.
-        </p>
+      <section className="semantic-equations" aria-labelledby="semantics-title">
+        <div className="section-heading">
+          <span className="section-label">Outcome math</span>
+          <h2 id="semantics-title">Three inequalities prevent false certainty</h2>
+        </div>
+        <div>
+          <article><strong>REVIEW</strong><span>≠</span><b>ORDER</b></article>
+          <article><strong>SUBMIT</strong><span>≠</span><b>FILL</b></article>
+          <article><strong>CANCEL ACCEPTED</strong><span>≠</span><b>CANCELLED</b></article>
+        </div>
+      </section>
+
+      <Callout title="Current executable output: 0" tone="warning" icon="!">
+        <p>Strategy execution is disabled, and Checkpoint 7C remains blocked.</p>
       </Callout>
     </div>
   )

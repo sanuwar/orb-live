@@ -79,8 +79,6 @@ describe('documentation dashboard', () => {
     render(<App />)
 
     expect(screen.getByText('1,609')).toBeInTheDocument()
-    expect(
-      screen.getByText('At the time this dashboard was created'),
-    ).toBeInTheDocument()
+    expect(screen.getByText('tests at dashboard creation')).toBeInTheDocument()
   })
 })

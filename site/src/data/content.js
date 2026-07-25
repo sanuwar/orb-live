@@ -20,38 +20,87 @@ export const journeyStages = [
     slug: 'observe',
     number: '01',
     title: 'Observe',
-    summary: 'Build a bounded, read-only view of the session.',
     question: 'What is happening?',
+    metrics: [
+      { value: '15', label: 'symbols' },
+      { value: '5m', label: 'opening range' },
+      { value: '20d', label: 'volume baseline' },
+    ],
   },
   {
     slug: 'narrow',
     number: '02',
     title: 'Narrow',
-    summary: 'Filter many possibilities into a qualified candidate.',
-    question: 'Does it fit the strategy?',
+    question: 'Does it qualify?',
+    metrics: [
+      { value: '≥1%', label: 'gap' },
+      { value: '≥3×', label: 'relative volume' },
+      { value: '80m', label: 'entry window' },
+    ],
   },
   {
     slug: 'authorize',
     number: '03',
     title: 'Authorize',
-    summary: 'Apply risk gates and bind explicit operator intent.',
-    question: 'May this specific plan proceed?',
+    question: 'Is it within limits?',
+    metrics: [
+      { value: '$15', label: 'planned risk' },
+      { value: '$3k', label: 'position cap' },
+      { value: '1', label: 'open position' },
+    ],
   },
   {
     slug: 'protect',
     number: '04',
     title: 'Protect',
-    summary: 'Manage lifecycle state around bounded exposure.',
-    question: 'Is the position managed safely?',
+    question: 'How is exposure bounded?',
+    metrics: [
+      { value: '1R', label: 'breakeven' },
+      { value: '2R', label: 'target' },
+      { value: '15:45', label: 'time exit' },
+    ],
   },
   {
     slug: 'prove',
     number: '05',
     title: 'Prove',
-    summary: 'Reconcile outcomes and preserve evidence.',
-    question: 'What can the evidence establish?',
+    question: 'What is established?',
+    metrics: [
+      { value: '0', label: 'verified stop mappings' },
+      { value: '0', label: 'dashboard broker calls' },
+      { value: '1,609', label: 'tests at dashboard creation' },
+    ],
   },
 ]
+
+export const strategyMeasurements = [
+  { stage: 'Observe', value: '15', unit: 'symbols', measure: 'Fixed universe', capture: 'Configuration before the session', operation: 'Ignore every symbol outside the basket' },
+  { stage: 'Observe', value: '5', unit: 'minutes', measure: 'Opening range', capture: 'High and low from 09:30–09:35 ET', operation: 'Create the breakout and stop references' },
+  { stage: 'Observe', value: '20', unit: 'sessions', measure: 'Volume baseline', capture: 'Historical relative-volume lookback', operation: 'Establish expected participation' },
+  { stage: 'Narrow', value: '≥1.0', unit: '% gap', measure: 'Gap threshold', capture: 'Opening price versus prior close', operation: 'Reject smaller opening moves' },
+  { stage: 'Narrow', value: '≥3.0', unit: '× volume', measure: 'Participation threshold', capture: 'Current activity versus 20-session baseline', operation: 'Reject low-participation breakouts' },
+  { stage: 'Narrow', value: 'SPY > VWAP', unit: 'pass / fail', measure: 'Market context', capture: 'Current SPY price versus intraday VWAP', operation: 'Reject a long setup when the condition is false' },
+  { stage: 'Narrow', value: '1', unit: 'minute close', measure: 'Breakout confirmation', capture: 'Completed bar above the opening-range high', operation: 'Reject an unconfirmed price excursion' },
+  { stage: 'Narrow', value: '09:40–11:00', unit: 'ET', measure: 'Entry window', capture: 'Timestamp of the confirmed candidate', operation: 'Reject candidates outside the 80-minute window' },
+]
+
+export const safetyLimits = [
+  { value: 'OFF', label: 'strategy execution', group: 'Default state' },
+  { value: '15s', label: 'authorization lifetime', group: 'Authority' },
+  { value: '$15', label: 'planned trade risk', group: 'Trade limits' },
+  { value: '$3,000', label: 'position value cap', group: 'Trade limits' },
+  { value: '1', label: 'open position', group: 'Exposure limits' },
+  { value: '2', label: 'entries per day', group: 'Exposure limits' },
+  { value: '$45', label: 'daily loss stop', group: 'Loss limits' },
+  { value: '$120', label: 'weekly loss stop', group: 'Loss limits' },
+  { value: '$300', label: 'drawdown halt', group: 'Loss limits' },
+  { value: '0', label: 'margin use', group: 'Prohibited' },
+  { value: '0', label: 'short sales', group: 'Prohibited' },
+  { value: '0', label: 'average-down actions', group: 'Prohibited' },
+  { value: '0', label: 'blind retries after uncertainty', group: 'Prohibited' },
+  { value: '0', label: 'verified active-stop mappings', group: 'Current proof' },
+]
+
 export const riskConstraints = [
   { value: '$15', label: 'Planned risk per trade' },
   { value: '$3,000', label: 'Maximum position size' },

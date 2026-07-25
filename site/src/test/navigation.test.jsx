@@ -4,9 +4,9 @@ import App from '../App'
 
 const destinations = [
   ['overview', /disciplined opening-range system/i],
-  ['strategy', /wait for the range/i],
-  ['system-flow', /decision is not an authorization/i],
-  ['safety', /safe answer is stop/i],
+  ['strategy', /15 symbols/i],
+  ['system-flow', /15 → 0–1/i],
+  ['safety', /risk/i],
   ['development-journey', /closing one uncertainty/i],
   ['architecture-glossary', /narrow layers/i],
 ]
@@ -31,8 +31,25 @@ describe('hash navigation', () => {
     render(<App />)
     navigate('system-flow')
 
-    expect(document.querySelectorAll('.flow-chapter')).toHaveLength(5)
-    expect(document.querySelectorAll('.flow-chapter > ol > li')).toHaveLength(10)
+    expect(document.querySelectorAll('.system-equation > ol > li')).toHaveLength(5)
+    expect(screen.getByText('$15 ∩ $3k ∩ 1')).toBeVisible()
+  })
+
+  it('renders eight captured strategy measurements', () => {
+    render(<App />)
+    navigate('strategy')
+
+    expect(document.querySelectorAll('.measurement-group > ol > li')).toHaveLength(8)
+    expect(screen.getByText('≥3.0')).toBeVisible()
+    expect(screen.getByText('09:40–11:00')).toBeVisible()
+  })
+
+  it('renders fourteen explicit safety limits', () => {
+    render(<App />)
+    navigate('safety')
+
+    expect(document.querySelectorAll('.limit-groups dd')).toHaveLength(14)
+    expect(screen.getByText('blind retries after uncertainty')).toBeVisible()
   })
 
   it('marks the active destination', () => {

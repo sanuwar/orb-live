@@ -1,52 +1,43 @@
-const states = [
+﻿const states = [
   {
+    value: '0×',
     name: 'NOT_PROTECTED',
-    label: 'Not protected',
-    detail: 'Evidence shows required protection is absent or insufficient.',
+    label: 'Required coverage absent',
+    detail: 'Covered quantity is insufficient or required protection is missing.',
     tone: 'danger',
   },
   {
+    value: '?',
     name: 'INDETERMINATE',
-    label: 'Indeterminate',
-    detail: 'Evidence cannot prove whether valid active protection exists.',
+    label: 'Evidence unresolved',
+    detail: 'Observed fields cannot prove valid active protection.',
     tone: 'warning',
   },
   {
+    value: '0',
     name: 'VERIFIED_ACTIVE_PROTECTION',
-    label: 'Verified active protection',
-    detail: 'Reserved for a directly grounded state-and-fields proof.',
+    label: 'Grounded mappings',
+    detail: 'No broker state-and-fields predicate is currently approved.',
     tone: 'safe',
   },
 ]
 
 export default function ProtectionStateMap() {
   return (
-    <figure
-      className="protection-map diagram-card"
-      aria-labelledby="protection-map-title"
-    >
+    <figure className="protection-map diagram-card" aria-labelledby="protection-map-title">
       <figcaption>
-        <span className="section-label">Evidence classification</span>
-        <h2 id="protection-map-title">Protection states</h2>
-        <p>
-          The verified-active mapping is intentionally empty until direct
-          evidence establishes an exact predicate.
-        </p>
+        <span className="section-label">Protection proof</span>
+        <h2 id="protection-map-title">0 grounded active-state mappings</h2>
+        <p>Unknown stays unknown until direct evidence establishes an exact predicate.</p>
       </figcaption>
       <ol>
-        {states.map((state, index) => (
+        {states.map((state) => (
           <li key={state.name} className={`protection-${state.tone}`}>
-            <span className="state-marker" aria-hidden="true">
-              {index + 1}
-            </span>
-            <div>
-              <code>{state.name}</code>
-              <strong>{state.label}</strong>
-              <p>{state.detail}</p>
-              {state.tone === 'safe' && (
-                <span className="empty-state-pill">No grounded mapping yet</span>
-              )}
-            </div>
+            <span className="state-value">{state.value}</span>
+            <code>{state.name}</code>
+            <strong>{state.label}</strong>
+            <p>{state.detail}</p>
+            {state.tone === 'safe' && <span className="empty-state-pill">No grounded mapping yet</span>}
           </li>
         ))}
       </ol>

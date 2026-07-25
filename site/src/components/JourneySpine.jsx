@@ -2,8 +2,8 @@
 
 export default function JourneySpine({
   focus = [],
-  title = 'One system story',
-  description = 'The same five stages organize every view of ORB-LIVE.',
+  title = 'Five stages. Fifteen operating numbers.',
+  description = 'Configuration, thresholds, limits, and current proof status.',
   compact = false,
 }) {
   return (
@@ -12,7 +12,7 @@ export default function JourneySpine({
       aria-labelledby="journey-spine-title"
     >
       <figcaption>
-        <span className="section-label">Shared narrative</span>
+        <span className="section-label">Quantified system</span>
         <h2 id="journey-spine-title">{title}</h2>
         <p>{description}</p>
       </figcaption>
@@ -26,14 +26,19 @@ export default function JourneySpine({
                 isFocused ? ' journey-stage-focused' : ''
               }`}
             >
-              <span className="journey-number" aria-hidden="true">
-                {stage.number}
-              </span>
-              <div>
+              <header>
+                <span className="journey-number" aria-hidden="true">{stage.number}</span>
                 <strong>{stage.title}</strong>
-                {!compact && <p>{stage.summary}</p>}
                 <small>{stage.question}</small>
-              </div>
+              </header>
+              <dl>
+                {stage.metrics.map((metric) => (
+                  <div key={metric.label}>
+                    <dt>{metric.value}</dt>
+                    <dd>{metric.label}</dd>
+                  </div>
+                ))}
+              </dl>
             </li>
           )
         })}

@@ -63,14 +63,14 @@ describe('safety isolation', () => {
     ).toBeVisible()
     expect(screen.getByText('No grounded mapping yet')).toBeVisible()
     expect(
-      screen.getByText(/verified-active mapping is intentionally empty/i),
+      screen.getByRole('heading', { name: /0 grounded active-state mappings/i }),
     ).toBeVisible()
   })
 
   it('labels the dashboard as documentation rather than a trading console', () => {
     render(createElement(App))
 
-    expect(screen.getByText(/This site explains the work/)).toBeVisible()
+    expect(screen.getByRole('heading', { name: /documentation—not a trading console/i })).toBeVisible()
     expect(screen.getByText(/Not financial advice/)).toBeVisible()
     expect(
       screen.queryByRole('button', { name: /buy|sell|place|cancel/i }),
