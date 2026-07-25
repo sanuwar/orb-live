@@ -17,6 +17,9 @@ from tests.call_site_guard import (
 from src.read_only_broker_gateway import (
     READ_ONLY_TOOL_ALLOWLIST,
 )
+from src.robinhood_live_adapter import (
+    INITIALIZATION_TOOL_SEQUENCE,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).parent.parent
@@ -58,24 +61,47 @@ def test_guard_excludes_tests_and_environments():
 
 # ---------- the live repository must be clean ----------
 
+def _partition_initialization_sites(sites):
+    initialization = [
+        site
+        for site in sites
+        if site.path == "src/robinhood_live_adapter.py"
+    ]
+    ordinary = [site for site in sites if site not in initialization]
+    return ordinary, initialization
+
+
 def test_repository_has_no_violating_call_site():
-    offending = violations(
-        analyze_runtime_tree(), READ_ONLY_TOOL_ALLOWLIST
+    ordinary, initialization = _partition_initialization_sites(
+        analyze_runtime_tree()
     )
 
-    assert [site.describe() for site in offending] == []
+    assert [
+        site.describe()
+        for site in violations(ordinary, READ_ONLY_TOOL_ALLOWLIST)
+    ] == []
+    assert [site.kind for site in initialization] == [LITERAL] * 4
+    assert tuple(site.tool for site in initialization) == (
+        INITIALIZATION_TOOL_SEQUENCE
+    )
 
 
 def test_every_runtime_call_site_is_accounted_for():
-    sites = analyze_runtime_tree()
+    ordinary, initialization = _partition_initialization_sites(
+        analyze_runtime_tree()
+    )
 
-    assert sites, "the guard found no call sites at all"
+    assert ordinary, "the guard found no ordinary call sites"
 
-    for site in sites:
+    for site in ordinary:
         assert site.kind in {LITERAL, SAFE_WRAPPER}
 
         if site.kind == LITERAL:
             assert site.tool in READ_ONLY_TOOL_ALLOWLIST
+
+    assert tuple(site.tool for site in initialization) == (
+        INITIALIZATION_TOOL_SEQUENCE
+    )
 
 
 def test_manual_read_only_scripts_pass():

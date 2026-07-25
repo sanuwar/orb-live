@@ -40,6 +40,7 @@ from src.live_order_contract import (
     ResponseContractViolationError,
     derive_quantities,
     parse_cancel_response,
+    parse_order_status,
     parse_place_response,
     remaining_quantity,
     require_response_contract,
@@ -98,6 +99,19 @@ def make_cancel_response(accepted) -> dict:
         "guide": "Invented placeholder guide text.",
     }
 
+
+def test_order_status_parser_is_independent_of_place_entry_point(monkeypatch):
+    def prohibited_place_parser(_response):
+        raise AssertionError("place response parser was invoked")
+
+    monkeypatch.setattr(
+        "src.live_order_contract.parse_place_response",
+        prohibited_place_parser,
+    )
+    parsed = parse_order_status(make_order())
+    assert parsed.state == "queued"
+    assert parsed.remaining_quantity == Decimal("4")
+    assert not hasattr(parsed, "establishes_submission_only")
 
 # ---------- observed field names vs. advertised field names ----------
 
