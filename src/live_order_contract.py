@@ -709,6 +709,24 @@ class ParsedPlaceResponse:
         return self.cumulative_quantity > 0
 
 
+
+@dataclass(frozen=True)
+class ParsedOrderStatus:
+    """
+    Strictly parsed equity-order row from ``get_equity_orders``.
+
+    The advertised row is the same object schema as
+    ``place_equity_order.data.order``. This type deliberately omits the
+    place-only submission conclusion and carries no raw response, guide,
+    reject text, execution identifiers, or ref_id.
+    """
+
+    state: str
+    submitted_quantity: Decimal | None
+    cumulative_quantity: Decimal
+    remaining_quantity: Decimal | None
+    execution_count: int
+
 class CancelAcceptance(str, Enum):
     """
     The only two conclusions a cancel response supports.
@@ -938,6 +956,96 @@ def parse_place_response(response: Any) -> ParsedPlaceResponse:
         establishes_submission_only=True,
     )
 
+
+
+def parse_order_status(order: Any) -> ParsedOrderStatus:
+    """
+    Parse one advertised ``get_equity_orders.data.orders[]`` object.
+
+    The row has the same advertised object schema as a submitted order, but
+    this entry point validates it independently of ``parse_place_response``.
+    Therefore a historical read exercises the strict status-row contract,
+    never the place-response envelope or the write-response parser.
+    """
+    payload = _require_mapping(order, "order-status record")
+    _require_exact_keys(
+        payload,
+        required=ORDER_REQUIRED_FIELDS,
+        optional=ORDER_OPTIONAL_FIELDS,
+        label="order-status record",
+    )
+
+    for name in sorted(_ORDER_REQUIRED_TEXT_FIELDS):
+        _require_text(payload.get(name), f"order-status record {name}")
+
+    if "reject_reason" in payload:
+        _require_text(
+            payload.get("reject_reason"),
+            "order-status record reject_reason",
+        )
+
+    _validate_dollar_based_amount(payload.get("dollar_based_amount"))
+    execution_count = _validate_executions(payload.get("executions"))
+
+    cumulative = _require_decimal_text(
+        payload.get("cumulative_quantity"),
+        "order-status record cumulative_quantity",
+    )
+    if cumulative < 0:
+        raise ResponseContractViolationError(
+            "The order-status record cumulative_quantity must not be "
+            "negative."
+        )
+
+    _require_decimal_text(payload.get("fees"), "order-status record fees")
+    submitted = _optional_decimal_text(
+        payload.get("quantity"), "order-status record quantity"
+    )
+
+    remaining: Decimal | None = None
+    if submitted is not None:
+        if submitted < 0:
+            raise ResponseContractViolationError(
+                "The order-status record quantity must not be negative."
+            )
+        try:
+            remaining = derive_quantities(submitted, cumulative).remaining
+        except QuantityDerivationError as error:
+            raise ResponseContractViolationError(str(error)) from None
+
+    _require_positive(
+        _optional_decimal_text(
+            payload.get("price"), "order-status record price"
+        ),
+        "order-status record price",
+    )
+    _require_positive(
+        _optional_decimal_text(
+            payload.get("stop_price"), "order-status record stop_price"
+        ),
+        "order-status record stop_price",
+    )
+    _require_positive(
+        _optional_decimal_text(
+            payload.get("average_price"),
+            "order-status record average_price",
+        ),
+        "order-status record average_price",
+    )
+    _optional_text(
+        payload.get("last_transaction_at"),
+        "order-status record last_transaction_at",
+    )
+
+    return ParsedOrderStatus(
+        state=_require_text(
+            payload.get("state"), "order-status record state"
+        ),
+        submitted_quantity=submitted,
+        cumulative_quantity=cumulative,
+        remaining_quantity=remaining,
+        execution_count=execution_count,
+    )
 
 # --------------------------------------------------------------------------
 # Strict cancel-response parsing.

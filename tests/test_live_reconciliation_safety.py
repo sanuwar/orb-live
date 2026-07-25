@@ -10,6 +10,7 @@ from src.read_only_broker_gateway import (
     FORBIDDEN_TOOL_MARKERS,
     READ_ONLY_TOOL_ALLOWLIST,
 )
+from src.robinhood_live_adapter import INITIALIZATION_TOOL_SEQUENCE
 
 
 REPOSITORY_ROOT = Path(__file__).parent.parent
@@ -59,22 +60,28 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _is_initialization_review(path: Path, tool_name: str) -> bool:
+    return (
+        path.name == "robinhood_live_adapter.py"
+        and tool_name == "review_equity_order"
+    )
+
+
 def test_no_write_tool_is_called_anywhere_in_src():
     offenders: list[str] = []
 
     for path in source_files():
-        for tool_name in CALL_TOOL_PATTERN.findall(
-            read(path)
-        ):
+        for tool_name in CALL_TOOL_PATTERN.findall(read(path)):
             lowered = tool_name.lower()
 
-            if any(
-                marker in lowered
-                for marker in FORBIDDEN_TOOL_MARKERS
-            ):
-                offenders.append(
-                    f"{path.name}: {tool_name}"
+            if (
+                any(
+                    marker in lowered
+                    for marker in FORBIDDEN_TOOL_MARKERS
                 )
+                and not _is_initialization_review(path, tool_name)
+            ):
+                offenders.append(f"{path.name}: {tool_name}")
 
     assert offenders == []
 
@@ -83,18 +90,21 @@ def test_every_call_tool_site_is_allowlisted():
     unexpected: list[str] = []
 
     for path in source_files():
-        for tool_name in CALL_TOOL_PATTERN.findall(
-            read(path)
-        ):
+        for tool_name in CALL_TOOL_PATTERN.findall(read(path)):
             if (
-                tool_name
-                not in READ_ONLY_TOOL_ALLOWLIST
+                tool_name not in READ_ONLY_TOOL_ALLOWLIST
+                and not _is_initialization_review(path, tool_name)
             ):
-                unexpected.append(
-                    f"{path.name}: {tool_name}"
-                )
+                unexpected.append(f"{path.name}: {tool_name}")
 
     assert unexpected == []
+
+
+def test_initialization_adapter_call_surface_is_exact():
+    source = read(SOURCE_DIRECTORY / "robinhood_live_adapter.py")
+    assert tuple(CALL_TOOL_PATTERN.findall(source)) == (
+        INITIALIZATION_TOOL_SEQUENCE
+    )
 
 
 def test_allowlist_has_no_write_capability():
