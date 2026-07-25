@@ -1,4 +1,4 @@
-export const navigation = [
+﻿export const navigation = [
   { slug: 'overview', label: 'Overview', shortLabel: '01' },
   { slug: 'strategy', label: 'Strategy', shortLabel: '02' },
   { slug: 'system-flow', label: 'System Flow', shortLabel: '03' },
@@ -15,6 +15,43 @@ export const navigation = [
   },
 ]
 
+export const journeyStages = [
+  {
+    slug: 'observe',
+    number: '01',
+    title: 'Observe',
+    summary: 'Build a bounded, read-only view of the session.',
+    question: 'What is happening?',
+  },
+  {
+    slug: 'narrow',
+    number: '02',
+    title: 'Narrow',
+    summary: 'Filter many possibilities into a qualified candidate.',
+    question: 'Does it fit the strategy?',
+  },
+  {
+    slug: 'authorize',
+    number: '03',
+    title: 'Authorize',
+    summary: 'Apply risk gates and bind explicit operator intent.',
+    question: 'May this specific plan proceed?',
+  },
+  {
+    slug: 'protect',
+    number: '04',
+    title: 'Protect',
+    summary: 'Manage lifecycle state around bounded exposure.',
+    question: 'Is the position managed safely?',
+  },
+  {
+    slug: 'prove',
+    number: '05',
+    title: 'Prove',
+    summary: 'Reconcile outcomes and preserve evidence.',
+    question: 'What can the evidence establish?',
+  },
+]
 export const riskConstraints = [
   { value: '$15', label: 'Planned risk per trade' },
   { value: '$3,000', label: 'Maximum position size' },
@@ -63,61 +100,61 @@ export const strategySteps = [
 
 export const flowStages = [
   {
-    group: 'Observe',
+    group: 'observe',
     title: 'Market observation',
     description: 'Collect a bounded, read-only view of the session.',
     kind: 'observe',
   },
   {
-    group: 'Observe',
+    group: 'narrow',
     title: 'Eligibility filters',
     description: 'Apply watchlist, gap, volume, and market-context rules.',
     kind: 'observe',
   },
   {
-    group: 'Decide',
+    group: 'observe',
     title: 'Opening-range calculation',
     description: 'Derive the first five-minute high and low.',
     kind: 'hypothetical',
   },
   {
-    group: 'Decide',
+    group: 'narrow',
     title: 'Entry-candidate evaluation',
     description: 'Evaluate a confirmed breakout in shadow logic.',
     kind: 'hypothetical',
   },
   {
-    group: 'Control',
+    group: 'authorize',
     title: 'Risk and safety gates',
     description: 'Reject anything outside configured boundaries.',
     kind: 'reviewed',
   },
   {
-    group: 'Control',
+    group: 'authorize',
     title: 'Operator authorization',
     description: 'Bind approved intent to a short-lived envelope.',
     kind: 'reviewed',
   },
   {
-    group: 'Act',
+    group: 'protect',
     title: 'Broker action review',
-    description: 'Review is evidence for a proposed action—not an order.',
+    description: 'Review is evidence for a proposed actionâ€”not an order.',
     kind: 'authorized',
   },
   {
-    group: 'Act',
+    group: 'protect',
     title: 'Execution lifecycle',
     description: 'Durable saga states model outcomes and uncertainty.',
     kind: 'authorized',
   },
   {
-    group: 'Verify',
+    group: 'prove',
     title: 'Reconciliation',
     description: 'Compare durable expectations with broker observations.',
     kind: 'reviewed',
   },
   {
-    group: 'Verify',
+    group: 'prove',
     title: 'Evidence and operator resolution',
     description: 'Escalate ambiguous outcomes instead of guessing.',
     kind: 'reviewed',

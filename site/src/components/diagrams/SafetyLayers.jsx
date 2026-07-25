@@ -1,4 +1,4 @@
-import { safetyLayers } from '../../data/content'
+﻿import { journeyStages, safetyLayers } from '../../data/content'
 
 export default function SafetyLayers() {
   return (
@@ -7,21 +7,32 @@ export default function SafetyLayers() {
       aria-labelledby="safety-layers-title"
     >
       <figcaption>
-        <span className="section-label">Defense in depth</span>
-        <h2 id="safety-layers-title">Ten controls, one fail-closed posture</h2>
+        <span className="section-label">Defense along the shared thread</span>
+        <h2 id="safety-layers-title">Two safeguards reinforce each stage</h2>
         <p>
-          No single check carries the entire safety case. Each layer narrows
-          permission or strengthens evidence.
+          The controls are easier to understand as protection attached to the
+          system journey—not as a separate ten-step process.
         </p>
       </figcaption>
       <ol>
-        {safetyLayers.map((layer, index) => (
-          <li key={layer.title} tabIndex="0">
-            <span>{String(index + 1).padStart(2, '0')}</span>
-            <div>
-              <strong>{layer.title}</strong>
-              <p>{layer.detail}</p>
-            </div>
+        {journeyStages.map((stage, index) => (
+          <li
+            key={stage.slug}
+            className={`safety-stage journey-${stage.slug}`}
+            tabIndex="0"
+          >
+            <header>
+              <span aria-hidden="true">{stage.number}</span>
+              <strong>{stage.title}</strong>
+            </header>
+            <ul>
+              {safetyLayers.slice(index * 2, index * 2 + 2).map((layer) => (
+                <li key={layer.title}>
+                  <strong>{layer.title}</strong>
+                  <p>{layer.detail}</p>
+                </li>
+              ))}
+            </ul>
           </li>
         ))}
       </ol>

@@ -1,18 +1,28 @@
-import Callout from '../components/Callout'
+﻿import Callout from '../components/Callout'
+import JourneySpine from '../components/JourneySpine'
 import PageHeader from '../components/PageHeader'
 import ProtectionStateMap from '../components/diagrams/ProtectionStateMap'
 import SafetyLayers from '../components/diagrams/SafetyLayers'
 
-const boundaries = [
-  'No margin',
-  'No short selling',
-  'No averaging down',
-  'One open position',
-  'Limited daily entries',
-  'Daily and weekly loss stops',
-  'Total drawdown halt',
-  'No automatic retry of an uncertain broker write',
-  'Unsupported broker capabilities remain unsupported',
+const boundaryGroups = [
+  {
+    title: 'Position boundaries',
+    stage: 'Authorize',
+    items: ['No margin', 'No short selling', 'No averaging down', 'One open position'],
+  },
+  {
+    title: 'Loss boundaries',
+    stage: 'Authorize → Protect',
+    items: ['Limited daily entries', 'Daily and weekly loss stops', 'Total drawdown halt'],
+  },
+  {
+    title: 'Uncertainty boundaries',
+    stage: 'Prove',
+    items: [
+      'No automatic retry of an uncertain broker write',
+      'Unsupported broker capabilities remain unsupported',
+    ],
+  },
 ]
 
 export default function SafetyPage() {
@@ -32,25 +42,36 @@ export default function SafetyPage() {
         </p>
       </Callout>
 
+      <JourneySpine
+        compact
+        title="Safety travels with the work"
+        description="The controls below attach to the same Observe–Narrow–Authorize–Protect–Prove journey. They are not a second workflow."
+      />
+
       <SafetyLayers />
 
       <section className="hard-boundaries" aria-labelledby="boundaries-title">
         <div className="section-heading">
-          <span className="section-label">Non-negotiable constraints</span>
-          <h2 id="boundaries-title">Hard boundaries</h2>
+          <span className="section-label">Always-on constraints</span>
+          <h2 id="boundaries-title">Hard boundaries, grouped by purpose</h2>
           <p>
-            These controls either reject a plan, halt progress, or require
-            fresh evidence and operator resolution.
+            These constraints apply across the journey. Grouping them shows
+            why they exist without turning them into another nine-step list.
           </p>
         </div>
-        <ul>
-          {boundaries.map((boundary) => (
-            <li key={boundary}>
-              <span aria-hidden="true">✓</span>
-              {boundary}
-            </li>
+        <div className="boundary-groups">
+          {boundaryGroups.map((group) => (
+            <article key={group.title}>
+              <span>{group.stage}</span>
+              <h3>{group.title}</h3>
+              <ul>
+                {group.items.map((item) => (
+                  <li key={item}><span aria-hidden="true">✓</span>{item}</li>
+                ))}
+              </ul>
+            </article>
           ))}
-        </ul>
+        </div>
       </section>
 
       <ProtectionStateMap />

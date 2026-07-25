@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react'
+﻿import { act, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import App from '../App'
 
@@ -25,6 +25,14 @@ describe('hash navigation', () => {
       navigate(route)
       expect(screen.getByRole('heading', { level: 1, name: heading })).toBeVisible()
     })
+  })
+
+  it('groups the technical system flow into five shared chapters', () => {
+    render(<App />)
+    navigate('system-flow')
+
+    expect(document.querySelectorAll('.flow-chapter')).toHaveLength(5)
+    expect(document.querySelectorAll('.flow-chapter > ol > li')).toHaveLength(10)
   })
 
   it('marks the active destination', () => {

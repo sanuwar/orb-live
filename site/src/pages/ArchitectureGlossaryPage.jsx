@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+﻿import { useMemo, useState } from 'react'
 import Callout from '../components/Callout'
+import JourneySpine from '../components/JourneySpine'
 import PageHeader from '../components/PageHeader'
 import ArchitectureMap from '../components/diagrams/ArchitectureMap'
 import { glossaryTerms } from '../data/glossary'
@@ -24,9 +25,15 @@ export default function ArchitectureGlossaryPage() {
         lead="The architecture separates strategy logic from authorization, durable workflows from broker capabilities, and automated evidence from operator judgment."
       />
 
+      <JourneySpine
+        compact
+        title="Five concepts, implemented by distinct layers"
+        description="The architecture map translates the shared narrative into software responsibilities while keeping the dashboard isolated."
+      />
+
       <ArchitectureMap />
 
-      <Callout title="Frontend isolation" tone="safe" icon="✓">
+      <Callout title="Frontend isolation" tone="safe" icon="âœ“">
         <p>
           This React application ships sanitized static content only. It does
           not import the Python application, connect to a backend, read

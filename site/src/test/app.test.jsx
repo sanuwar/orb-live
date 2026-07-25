@@ -1,4 +1,4 @@
-﻿import { render, screen } from '@testing-library/react'
+﻿import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import App from '../App'
@@ -20,6 +20,16 @@ describe('documentation dashboard', () => {
       expect(
         screen.getAllByRole('link', { name: label }).length,
       ).toBeGreaterThanOrEqual(1)
+    })
+  })
+
+  it('uses the same five-stage narrative spine', () => {
+    render(<App />)
+
+    const spine = document.querySelector('.journey-spine')
+    expect(spine).toBeInTheDocument()
+    ;['Observe', 'Narrow', 'Authorize', 'Protect', 'Prove'].forEach((stage) => {
+      expect(within(spine).getByText(stage)).toBeVisible()
     })
   })
 

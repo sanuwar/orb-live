@@ -1,3 +1,4 @@
+﻿import JourneySpine from '../components/JourneySpine'
 import PageHeader from '../components/PageHeader'
 import DevelopmentTimeline from '../components/diagrams/DevelopmentTimeline'
 
@@ -43,6 +44,12 @@ export default function DevelopmentJourneyPage() {
         eyebrow="Development journey"
         title="Maturity comes from closing one uncertainty at a time."
         lead="ORB-LIVE has progressed from strategy rules to durable state, deterministic simulation, reconciliation, and carefully bounded commissioning work. Unfinished validation stays visibly unfinished."
+      />
+
+      <JourneySpine
+        compact
+        title="The same thread matured one boundary at a time"
+        description="The milestones below strengthened Observe, Narrow, Authorize, Protect, and Prove rather than creating separate product stories."
       />
 
       <DevelopmentTimeline />

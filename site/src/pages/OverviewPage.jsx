@@ -1,20 +1,21 @@
-import Callout from '../components/Callout'
+﻿import Callout from '../components/Callout'
+import JourneySpine from '../components/JourneySpine'
 import MetricCard from '../components/MetricCard'
 import PageHeader from '../components/PageHeader'
 
 const objectives = [
   {
-    number: '01',
+    label: 'Observe + Narrow',
     title: 'Detect with discipline',
     text: 'Evaluate a fixed universe for opening-range opportunities only after predetermined evidence aligns.',
   },
   {
-    number: '02',
+    label: 'Authorize + Protect',
     title: 'Constrain the downside',
     text: 'Size hypothetical trades from an initial stop and reject plans outside configured risk boundaries.',
   },
   {
-    number: '03',
+    label: 'Prove',
     title: 'Preserve control',
     text: 'Keep authorization explicit, state durable, outcomes reconciled, and uncertainty visible to the operator.',
   },
@@ -47,10 +48,15 @@ export default function OverviewPage() {
         </p>
       </Callout>
 
+      <JourneySpine
+        title="Observe. Narrow. Authorize. Protect. Prove."
+        description="This five-stage thread connects the trading idea, software workflow, safety controls, architecture, and evidence model. Every page returns to it."
+      />
+
       <section aria-labelledby="objective-title">
         <div className="section-heading">
-          <span className="section-label">Purpose</span>
-          <h2 id="objective-title">Three objectives shape the system</h2>
+          <span className="section-label">Guiding principles</span>
+          <h2 id="objective-title">Why the five stages exist</h2>
           <p>
             The goal is not to predict every move. It is to make a narrow
             decision process observable, bounded, and reviewable.
@@ -59,7 +65,7 @@ export default function OverviewPage() {
         <div className="objective-grid">
           {objectives.map((objective) => (
             <article className="objective-card" key={objective.title}>
-              <span>{objective.number}</span>
+              <span>{objective.label}</span>
               <h3>{objective.title}</h3>
               <p>{objective.text}</p>
             </article>
@@ -74,9 +80,7 @@ export default function OverviewPage() {
         </div>
         <div className="comparison-grid">
           <article className="comparison-card comparison-does">
-            <span className="comparison-icon" aria-hidden="true">
-              ✓
-            </span>
+            <span className="comparison-icon" aria-hidden="true">✓</span>
             <h3>What it does</h3>
             <ul>
               <li>Models a fixed, long-only ORB V0 strategy</li>
@@ -86,9 +90,7 @@ export default function OverviewPage() {
             </ul>
           </article>
           <article className="comparison-card comparison-does-not">
-            <span className="comparison-icon" aria-hidden="true">
-              ×
-            </span>
+            <span className="comparison-icon" aria-hidden="true">×</span>
             <h3>What it does not do</h3>
             <ul>
               <li>Promise profitability or guarantee limited losses</li>
@@ -104,21 +106,20 @@ export default function OverviewPage() {
         <div className="section-heading section-heading-row">
           <div>
             <span className="section-label">At a glance</span>
-            <h2 id="numbers-title">A small strategy, extensively exercised</h2>
+            <h2 id="numbers-title">The documentation baseline</h2>
           </div>
           <p>
             Metrics describe repository design and test coverage, not trading
             performance.
           </p>
         </div>
-        <div className="metrics-grid">
+        <div className="metrics-grid metrics-grid-three">
           <MetricCard
             value="1,609"
             label="Repository tests"
             note="At the time this dashboard was created"
           />
-          <MetricCard value="6" label="Strategy filters" note="Before risk gates" />
-          <MetricCard value="10" label="Defense layers" note="Conceptual controls" />
+          <MetricCard value="5" label="Shared narrative stages" note="Used throughout every page" />
           <MetricCard value="0" label="Dashboard broker calls" note="Static by design" />
         </div>
       </section>
