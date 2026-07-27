@@ -7,13 +7,13 @@ import pytest
 
 from src.one_share_commissioning import (
     AtomicEvidenceStore, CommissioningError, CommissioningMachine,
-    ENTRY_AUTHORIZATION_PHRASE, FLATTEN_AUTHORIZATION_PHRASE,
-    OrderObservation, RuntimeAuthorization, State, WriteDisposition,
+    EASTERN, ENTRY_AUTHORIZATION_PHRASE, FLATTEN_AUTHORIZATION_PHRASE,
+    EntryFillObservation, OrderObservation, RuntimeAuthorization, State, WriteDisposition,
     assess_provisional_protection, normalize_stop_price, validate_sanitized_evidence,
 )
 
 
-NOW = datetime(2026, 7, 27, 11, 5)
+NOW = datetime(2026, 7, 27, 11, 5, tzinfo=EASTERN)
 
 
 def auth(run_id, phrase, **changes):
@@ -45,7 +45,7 @@ def to_entry_reconciling(value):
 
 def to_stop_reconciling(value):
     to_entry_reconciling(value)
-    value.entry_observed(filled_quantity=1, position_quantity=1, fill_price="200")
+    value.entry_observed(order=entry_order(), position_quantity=1)
     value.stop_reviewed(accepted=True, construction_seconds=1)
     value.stop_submitted(WriteDisposition.ACCEPTED)
 
@@ -53,6 +53,17 @@ def to_stop_reconciling(value):
 def good_order():
     return OrderObservation(True, "AAPL", "sell", "stop_market", Decimal("1"),
         Decimal("0"), Decimal("1"), Decimal("185.00"), "confirmed")
+
+
+def entry_order(*, filled=Decimal("1"), remaining=Decimal("0"),
+                state="filled", price=Decimal("200"), **changes):
+    values = dict(
+        commissioned_account=True, symbol="AAPL", side="buy", order_type="market",
+        requested_quantity=Decimal("1"), cumulative_quantity=filled,
+        remaining_quantity=remaining, state=state, average_fill_price=price,
+    )
+    values.update(changes)
+    return EntryFillObservation(**values)
 
 
 def test_clean_one_share_entry_flow(tmp_path):
@@ -89,24 +100,36 @@ def test_entry_placement_rejection_or_ambiguity_has_no_retry(tmp_path, dispositi
 
 def test_zero_fill_through_deadline(tmp_path):
     value = machine(tmp_path); to_entry_reconciling(value)
-    value.entry_observed(filled_quantity=0, position_quantity=0, fill_price=None,
+    value.entry_observed(order=entry_order(filled=Decimal("0"), remaining=Decimal("1"),
+                         state="confirmed", price=None), position_quantity=0,
                          deadline_exceeded=True)
     assert value.state is State.FAILED_CLOSED
 
 
 def test_exact_one_share_fill_and_missing_price(tmp_path):
     value = machine(tmp_path); to_entry_reconciling(value)
-    value.entry_observed(filled_quantity=1, position_quantity=1, fill_price="200")
+    value.entry_observed(order=entry_order(), position_quantity=1)
     assert value.state is State.ENTRY_FILLED
     missing = machine(tmp_path, "run-2"); to_entry_reconciling(missing)
-    missing.entry_observed(filled_quantity=1, position_quantity=1, fill_price=None)
+    missing.entry_observed(order=entry_order(price=None), position_quantity=1)
     assert missing.state is State.OPERATOR_REQUIRED
+
+
+@pytest.mark.parametrize("changes", [
+    {"commissioned_account": False}, {"symbol": "MSFT"}, {"side": "sell"},
+    {"requested_quantity": Decimal("2")}, {"state": "confirmed"},
+])
+def test_entry_requires_grounded_exact_fill(tmp_path, changes):
+    value = machine(tmp_path); to_entry_reconciling(value)
+    value.entry_observed(order=entry_order(**changes), position_quantity=1)
+    assert value.state is State.OPERATOR_REQUIRED
 
 
 @pytest.mark.parametrize("filled,position", [(Decimal("0.5"), 1), (1, 2)])
 def test_invalid_quantity_requires_operator(tmp_path, filled, position):
     value = machine(tmp_path); to_entry_reconciling(value)
-    value.entry_observed(filled_quantity=filled, position_quantity=position, fill_price="200")
+    value.entry_observed(order=entry_order(filled=filled, remaining=Decimal("0")),
+                         position_quantity=position)
     assert value.state is State.OPERATOR_REQUIRED
 
 
@@ -122,7 +145,7 @@ def test_stop_calculation_and_normalization():
 ])
 def test_stop_failures_require_operator_without_retry(tmp_path, accepted, disposition):
     value = machine(tmp_path); to_entry_reconciling(value)
-    value.entry_observed(filled_quantity=1, position_quantity=1, fill_price="200")
+    value.entry_observed(order=entry_order(), position_quantity=1)
     value.stop_reviewed(accepted=accepted, construction_seconds=1)
     if disposition is not None:
         value.stop_submitted(disposition)
@@ -158,9 +181,11 @@ def to_exit_authorization(value):
 def test_stop_cancel_pending_then_stop_fills(tmp_path):
     value = machine(tmp_path); to_exit_authorization(value)
     value.stop_cancel_requested(WriteDisposition.ACCEPTED)
-    value.stop_cancel_observed(stop_terminal=False, stop_filled=False, position_quantity=1)
+    value.stop_cancel_observed(stop_state="pending_cancelled", cumulative_quantity=0,
+                               remaining_quantity=1, position_quantity=1)
     assert value.state is State.STOP_CANCEL_RECONCILING
-    value.stop_cancel_observed(stop_terminal=True, stop_filled=True, position_quantity=0)
+    value.stop_cancel_observed(stop_state="filled", cumulative_quantity=1,
+                               remaining_quantity=0, position_quantity=0)
     assert value.state is State.VERIFIED_FLAT
     assert not value.exit_place_attempted
 
@@ -168,7 +193,8 @@ def test_stop_cancel_pending_then_stop_fills(tmp_path):
 def test_cancelled_stop_followed_by_exit_and_complete(tmp_path):
     value = machine(tmp_path); to_exit_authorization(value)
     value.stop_cancel_requested(WriteDisposition.ACCEPTED)
-    value.stop_cancel_observed(stop_terminal=True, stop_filled=False, position_quantity=1)
+    value.stop_cancel_observed(stop_state="cancelled", cumulative_quantity=0,
+                               remaining_quantity=1, position_quantity=1)
     value.exit_submitted(WriteDisposition.ACCEPTED, latest_position_quantity=1)
     value.exit_observed(position_quantity=0, related_nonterminal_orders=0)
     evidence_path = value.complete(related_nonterminal_orders=0)
@@ -181,14 +207,16 @@ def test_cancelled_stop_followed_by_exit_and_complete(tmp_path):
 def test_flat_account_prevents_duplicate_exit(tmp_path):
     value = machine(tmp_path); to_exit_authorization(value)
     value.stop_cancel_requested(WriteDisposition.ACCEPTED)
-    value.stop_cancel_observed(stop_terminal=True, stop_filled=False, position_quantity=0)
+    value.stop_cancel_observed(stop_state="cancelled", cumulative_quantity=0,
+                               remaining_quantity=1, position_quantity=0)
     assert value.state is State.VERIFIED_FLAT and not value.exit_place_attempted
 
 
 def test_unresolved_stop_prevents_exit(tmp_path):
     value = machine(tmp_path); to_exit_authorization(value)
     value.stop_cancel_requested(WriteDisposition.ACCEPTED)
-    value.stop_cancel_observed(stop_terminal=False, stop_filled=False, position_quantity=1)
+    value.stop_cancel_observed(stop_state="pending_cancelled", cumulative_quantity=0,
+                               remaining_quantity=1, position_quantity=1)
     value.exit_submitted(WriteDisposition.ACCEPTED, latest_position_quantity=1)
     assert value.state is State.OPERATOR_REQUIRED and not value.exit_place_attempted
 
@@ -196,7 +224,8 @@ def test_unresolved_stop_prevents_exit(tmp_path):
 def test_ambiguous_exit_has_no_retry(tmp_path):
     value = machine(tmp_path); to_exit_authorization(value)
     value.stop_cancel_requested(WriteDisposition.ACCEPTED)
-    value.stop_cancel_observed(stop_terminal=True, stop_filled=False, position_quantity=1)
+    value.stop_cancel_observed(stop_state="cancelled", cumulative_quantity=0,
+                               remaining_quantity=1, position_quantity=1)
     value.exit_submitted(WriteDisposition.AMBIGUOUS, latest_position_quantity=1)
     assert value.state is State.OPERATOR_REQUIRED and value.exit_place_attempted
 
@@ -208,7 +237,8 @@ def test_ambiguous_exit_has_no_retry(tmp_path):
 def test_final_position_or_order_failure(tmp_path, position, orders, reason):
     value = machine(tmp_path); to_exit_authorization(value)
     value.stop_cancel_requested(WriteDisposition.ACCEPTED)
-    value.stop_cancel_observed(stop_terminal=True, stop_filled=False, position_quantity=1)
+    value.stop_cancel_observed(stop_state="cancelled", cumulative_quantity=0,
+                               remaining_quantity=1, position_quantity=1)
     value.exit_submitted(WriteDisposition.ACCEPTED, latest_position_quantity=1)
     value.exit_observed(position_quantity=position, related_nonterminal_orders=orders,
                         deadline_exceeded=True)
@@ -241,6 +271,24 @@ def test_authorization_and_run_id_are_not_reusable(tmp_path):
         machine(tmp_path)
 
 
+def test_authorization_requires_eastern_narrow_window(tmp_path):
+    naive = auth("run-1", ENTRY_AUTHORIZATION_PHRASE)
+    naive.window_start = naive.window_start.replace(tzinfo=None)
+    with pytest.raises(CommissioningError):
+        naive.consume(now=NOW, expected_phrase=ENTRY_AUTHORIZATION_PHRASE, run_id="run-1")
+    wide = auth("run-2", ENTRY_AUTHORIZATION_PHRASE,
+                window_start=NOW - timedelta(minutes=8),
+                window_end=NOW + timedelta(minutes=8))
+    with pytest.raises(CommissioningError):
+        wide.consume(now=NOW, expected_phrase=ENTRY_AUTHORIZATION_PHRASE, run_id="run-2")
+
+
+@pytest.mark.parametrize("run_id", ["", ".", "..", "../escape", "bad/name", "bad\\name"])
+def test_run_id_must_be_path_safe(tmp_path, run_id):
+    with pytest.raises(CommissioningError):
+        machine(tmp_path, run_id)
+
+
 def test_strategy_enabled_and_second_trade_policy_rejected(tmp_path):
     value = machine(tmp_path)
     with pytest.raises(CommissioningError):
@@ -270,6 +318,14 @@ def test_partial_directory_recovery_fails_closed(tmp_path):
     partial.mkdir()
     with pytest.raises(CommissioningError):
         machine(tmp_path, "used")
+
+
+def test_unknown_cancel_state_requires_operator(tmp_path):
+    value = machine(tmp_path); to_exit_authorization(value)
+    value.stop_cancel_requested(WriteDisposition.ACCEPTED)
+    value.stop_cancel_observed(stop_state="future_state", cumulative_quantity=0,
+                               remaining_quantity=1, position_quantity=1)
+    assert value.state is State.OPERATOR_REQUIRED
 
 
 @pytest.mark.parametrize("field", [

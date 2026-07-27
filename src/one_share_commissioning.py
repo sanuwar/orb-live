@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
+
+from src.live_order_state_model import OrderStateClass, classify_order_state
 
 
 PLANNED_RISK_USD = Decimal("15")
@@ -29,6 +33,9 @@ ENTRY_AUTHORIZATION_PHRASE = (
 FLATTEN_AUTHORIZATION_PHRASE = (
     "AUTHORIZE ORB LIVE AAPL ONE SHARE CONTROLLED FLATTEN"
 )
+EASTERN = ZoneInfo("America/New_York")
+MAX_AUTHORIZATION_WINDOW_SECONDS = 15 * 60
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 
 
 class CommissioningError(RuntimeError):
@@ -101,6 +108,14 @@ class RuntimeAuthorization:
             raise CommissioningError("authorization is not reusable")
         if self.run_id != run_id or self.phrase != expected_phrase:
             raise CommissioningError("authorization scope mismatch")
+        times = (now, self.window_start, self.window_end)
+        if any(value.tzinfo is None or value.utcoffset() is None for value in times):
+            raise CommissioningError("authorization timestamps must be timezone-aware")
+        if any(value.tzinfo != EASTERN for value in times):
+            raise CommissioningError("authorization timestamps must use America/New_York")
+        window_seconds = (self.window_end - self.window_start).total_seconds()
+        if window_seconds <= 0 or window_seconds > MAX_AUTHORIZATION_WINDOW_SECONDS:
+            raise CommissioningError("authorization window is not narrow")
         if now.date() != self.eastern_date or not self.window_start <= now <= self.window_end:
             raise CommissioningError("authorization window is not active")
         if self.symbol != SYMBOL or self.quantity != QUANTITY:
@@ -131,6 +146,19 @@ class OrderObservation:
     stop_price: Decimal | None
     state: str
     related: bool = True
+
+
+@dataclass(frozen=True)
+class EntryFillObservation:
+    commissioned_account: bool
+    symbol: str
+    side: str
+    order_type: str
+    requested_quantity: Decimal | None
+    cumulative_quantity: Decimal | None
+    remaining_quantity: Decimal | None
+    state: str
+    average_fill_price: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -260,6 +288,8 @@ class AtomicEvidenceStore:
     """Durable one-run store with non-reusable run IDs and atomic completion."""
 
     def __init__(self, root: Path, run_id: str) -> None:
+        if not RUN_ID_PATTERN.fullmatch(run_id) or run_id in {".", ".."}:
+            raise CommissioningError("run ID is not a safe single path component")
         self.root = root
         self.run_id = run_id
         self.partial = root / f"{run_id}.partial"
@@ -398,8 +428,8 @@ class CommissioningMachine:
             self._record_state(State.ENTRY_SUBMITTED)
             self._record_state(State.ENTRY_RECONCILING)
 
-    def entry_observed(self, *, filled_quantity: object,
-                       position_quantity: object, fill_price: object | None,
+    def entry_observed(self, *, order: EntryFillObservation,
+                       position_quantity: object,
                        deadline_exceeded: bool = False,
                        detection_seconds: float = 0) -> None:
         self._require(State.ENTRY_RECONCILING)
@@ -407,22 +437,44 @@ class CommissioningMachine:
             detection_seconds * 1000
         )
         deadline_exceeded = deadline_exceeded or detection_seconds > ENTRY_FILL_DEADLINE_SECONDS
-        filled = decimal_value(filled_quantity)
+        identity_checks = {
+            "entry_commissioned_account": order.commissioned_account,
+            "entry_symbol_match": order.symbol.upper() == SYMBOL,
+            "entry_buy_side": order.side.lower() == "buy",
+            "entry_market_type": order.order_type.lower() == "market",
+            "entry_requested_quantity_one": order.requested_quantity == QUANTITY,
+        }
+        self.evidence.boolean_validations.update(identity_checks)
+        if not all(identity_checks.values()):
+            self.operator_required("ENTRY_ORDER_IDENTITY_MISMATCH")
+            return
+        if order.cumulative_quantity is None or order.remaining_quantity is None:
+            self.operator_required("ENTRY_QUANTITY_INDETERMINATE")
+            return
+        filled = decimal_value(order.cumulative_quantity)
+        remaining = decimal_value(order.remaining_quantity)
         position = decimal_value(position_quantity)
-        if filled not in {Decimal("0"), QUANTITY} or position not in {Decimal("0"), QUANTITY}:
+        if (filled not in {Decimal("0"), QUANTITY}
+                or remaining not in {Decimal("0"), QUANTITY}
+                or filled + remaining != QUANTITY
+                or position not in {Decimal("0"), QUANTITY}):
             self.operator_required("INVALID_ENTRY_QUANTITY")
             return
         if filled == 0:
+            if classify_order_state(order.state) is not OrderStateClass.ACTIVE_OR_WORKING:
+                self.operator_required("ENTRY_STATE_INDETERMINATE")
+                return
             if deadline_exceeded:
                 self.failed_closed("ENTRY_FILL_DEADLINE_EXCEEDED")
             return
-        if position != QUANTITY:
+        if (classify_order_state(order.state) is not OrderStateClass.TERMINAL_FILLED
+                or remaining != 0 or position != QUANTITY):
             self.operator_required("ENTRY_POSITION_MISMATCH")
             return
-        if fill_price is None:
+        if order.average_fill_price is None:
             self.operator_required("MISSING_ENTRY_FILL_PRICE")
             return
-        self.fill_price = normalize_explicit_price(fill_price)
+        self.fill_price = normalize_explicit_price(order.average_fill_price)
         self.expected_stop_price = normalize_stop_price(self.fill_price)
         self._record_state(State.ENTRY_FILLED)
 
@@ -514,17 +566,42 @@ class CommissioningMachine:
         else:
             self.operator_required("STOP_CANCEL_REJECTED")
 
-    def stop_cancel_observed(self, *, stop_terminal: bool, stop_filled: bool,
+    def stop_cancel_observed(self, *, stop_state: str,
+                             cumulative_quantity: object,
+                             remaining_quantity: object,
                              position_quantity: object) -> None:
         self._require(State.STOP_CANCEL_RECONCILING)
+        classification = classify_order_state(stop_state)
+        cumulative = decimal_value(cumulative_quantity)
+        remaining = decimal_value(remaining_quantity)
         position = decimal_value(position_quantity)
-        if stop_filled:
-            if position == 0:
+        if (cumulative not in {Decimal("0"), QUANTITY}
+                or remaining not in {Decimal("0"), QUANTITY}
+                or cumulative + remaining != QUANTITY
+                or position not in {Decimal("0"), QUANTITY}):
+            self.operator_required("STOP_CANCEL_QUANTITY_INVALID")
+            return
+        if classification is OrderStateClass.TERMINAL_FILLED:
+            if cumulative == QUANTITY and remaining == 0 and position == 0:
                 self._record_state(State.VERIFIED_FLAT)
             else:
                 self.operator_required("STOP_FILL_POSITION_MISMATCH")
             return
-        if not stop_terminal:
+        if classification in {
+            OrderStateClass.ACTIVE_OR_WORKING,
+            OrderStateClass.CANCELLATION_PENDING,
+        }:
+            if cumulative != 0 or remaining != QUANTITY:
+                self.operator_required("STOP_CANCEL_QUANTITY_INVALID")
+            return
+        if classification not in {
+            OrderStateClass.TERMINAL_CANCELLED,
+            OrderStateClass.TERMINAL_REJECTED_OR_FAILED,
+        }:
+            self.operator_required("STOP_CANCEL_STATE_INDETERMINATE")
+            return
+        if cumulative != 0 or remaining != QUANTITY:
+            self.operator_required("STOP_CANCEL_QUANTITY_INVALID")
             return
         self.stop_cancel_resolved = True
         if position == 0:

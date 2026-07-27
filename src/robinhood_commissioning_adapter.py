@@ -53,6 +53,7 @@ def _data(result: Any) -> Mapping[str, Any]:
 @dataclass
 class RobinhoodCommissioningAdapter:
     session: Any
+    commissioned_account_number: str
     call_counts: dict[str, int] = field(default_factory=dict)
     _write_keys: set[str] = field(default_factory=set)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -60,6 +61,42 @@ class RobinhoodCommissioningAdapter:
     def __post_init__(self) -> None:
         if self.session is None or not callable(getattr(self.session, "call_tool", None)):
             raise CommissioningError("one injected session is required")
+        if not isinstance(self.commissioned_account_number, str) or not self.commissioned_account_number.strip():
+            raise CommissioningError("one commissioned account is required")
+
+    def _validate_order_arguments(self, arguments: Mapping[str, Any], *, role: str) -> None:
+        expected = {
+            "entry": ("buy", "market", "gfd"),
+            "stop": ("sell", "stop_market", "gtc"),
+            "exit": ("sell", "market", "gfd"),
+        }
+        if role not in expected:
+            raise CommissioningError("unknown order role")
+        allowed_keys = {
+            "account_number", "symbol", "side", "type", "quantity",
+            "time_in_force", "market_hours",
+        }
+        if role == "stop":
+            allowed_keys.add("stop_price")
+        if set(arguments) != allowed_keys:
+            raise CommissioningError("order payload fields do not match fixed policy")
+        side, order_type, duration = expected[role]
+        checks = (
+            arguments.get("account_number") == self.commissioned_account_number,
+            arguments.get("symbol") == "AAPL",
+            arguments.get("side") == side,
+            arguments.get("type") == order_type,
+            arguments.get("quantity") == "1",
+            arguments.get("time_in_force") == duration,
+            arguments.get("market_hours") == "regular_hours",
+        )
+        if not all(checks):
+            raise CommissioningError("order payload violates fixed commissioning policy")
+        if role == "stop":
+            from src.one_share_commissioning import normalize_explicit_price
+            normalized = normalize_explicit_price(arguments.get("stop_price"))
+            if format(normalized, "f") != arguments.get("stop_price"):
+                raise CommissioningError("stop price is not contract-normalized")
 
     async def _call(self, tool_name: str, arguments: Mapping[str, Any],
                     *, write_key: str | None = None) -> Mapping[str, Any]:
@@ -90,11 +127,17 @@ class RobinhoodCommissioningAdapter:
     async def get_accounts(self) -> Mapping[str, Any]:
         return await self._call("get_accounts", {})
 
-    async def get_equity_positions(self, account_number: str) -> Mapping[str, Any]:
-        return await self._call("get_equity_positions", {"account_number": account_number})
+    async def get_equity_positions(self) -> Mapping[str, Any]:
+        return await self._call(
+            "get_equity_positions",
+            {"account_number": self.commissioned_account_number},
+        )
 
-    async def get_equity_orders(self, account_number: str) -> tuple[Any, ...]:
-        data = await self._call("get_equity_orders", {"account_number": account_number})
+    async def get_equity_orders(self) -> tuple[Any, ...]:
+        data = await self._call(
+            "get_equity_orders",
+            {"account_number": self.commissioned_account_number},
+        )
         rows = data.get("orders")
         if not isinstance(rows, list):
             raise CommissioningError("orders response is not an array")
@@ -103,12 +146,12 @@ class RobinhoodCommissioningAdapter:
         except Exception as exc:
             raise CommissioningError("order status contract rejected") from exc
 
-    async def review_equity_order(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+    async def review_equity_order(self, arguments: Mapping[str, Any], *, role: str) -> Mapping[str, Any]:
+        self._validate_order_arguments(arguments, role=role)
         return await self._call("review_equity_order", arguments)
 
     async def place_equity_order(self, arguments: Mapping[str, Any], *, role: str) -> Any:
-        if role not in {"entry", "stop", "exit"}:
-            raise CommissioningError("unknown write role")
+        self._validate_order_arguments(arguments, role=role)
         data = await self._call("place_equity_order", arguments, write_key=f"place:{role}")
         try:
             return parse_place_response({"data": data, "guide": "commissioning response"})
@@ -116,6 +159,11 @@ class RobinhoodCommissioningAdapter:
             raise AmbiguousWriteError("place response contract rejected; operator required") from exc
 
     async def cancel_equity_order(self, arguments: Mapping[str, Any]) -> Any:
+        if set(arguments) != {"order_id"}:
+            raise CommissioningError("cancel payload fields do not match fixed policy")
+        order_id = arguments.get("order_id")
+        if not isinstance(order_id, str) or not order_id.strip():
+            raise CommissioningError("cancel requires one transient broker order ID")
         data = await self._call("cancel_equity_order", arguments, write_key="cancel:stop")
         try:
             return parse_cancel_response({"data": data, "guide": "commissioning response"})

@@ -39,9 +39,12 @@ def test_fixed_order_payloads():
     exit_order = launcher.exit_arguments("transient")
     assert entry | {"side": "buy"} == entry
     assert entry["symbol"] == "AAPL" and entry["quantity"] == "1"
+    assert entry["market_hours"] == "regular_hours"
     assert stop["side"] == "sell" and stop["type"] == "stop_market"
     assert stop["time_in_force"] == "gtc" and stop["stop_price"] == "185.00"
+    assert stop["market_hours"] == "regular_hours"
     assert exit_order["side"] == "sell" and exit_order["quantity"] == "1"
+    assert exit_order["market_hours"] == "regular_hours"
 
 
 def test_sanitized_review_omits_prices_and_identity():

@@ -24,9 +24,9 @@ EXPECTED_BASE_HEAD = "1b378605b31e99ab9e436e5afe69fca270c87bf6"
 EXPECTED_BRANCH = "agent/m7-one-share-commissioning"
 REVIEWED_HASHES: Mapping[str, str] = {
     "src/one_share_commissioning.py":
-        "7ff5f25eba1b5a0b0bb8a326d717c7d72e9b27b14dc1d736efcbdf8cf8c0e071",
+        "fe4ffb3c32aec72cfda84a8a2326217025bde4ab7a07e1932185418610539240",
     "src/robinhood_commissioning_adapter.py":
-        "bd67cfd6b570613a0ad7688e367fed83badc8b84fd9f1013bdf346cf655f92df",
+        "8f44dc4378cbf2d0d985f4eccbe3cf5526920e4a35f35e1399e8505fe9d57eb5",
 }
 
 
@@ -69,6 +69,7 @@ def entry_arguments(account_number: str) -> dict[str, Any]:
         "type": "market",
         "quantity": "1",
         "time_in_force": "gfd",
+        "market_hours": "regular_hours",
     }
 
 
@@ -81,6 +82,7 @@ def stop_arguments(account_number: str, stop_price: Decimal) -> dict[str, Any]:
         "quantity": "1",
         "stop_price": format(stop_price, "f"),
         "time_in_force": "gtc",
+        "market_hours": "regular_hours",
     }
 
 
@@ -92,6 +94,7 @@ def exit_arguments(account_number: str) -> dict[str, Any]:
         "type": "market",
         "quantity": "1",
         "time_in_force": "gfd",
+        "market_hours": "regular_hours",
     }
 
 
