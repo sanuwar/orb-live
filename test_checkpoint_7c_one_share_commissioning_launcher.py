@@ -7,6 +7,7 @@ import pytest
 import checkpoint_7c_one_share_commissioning_launcher as launcher
 from src.one_share_commissioning import CommissioningError
 from src.one_share_commissioning import EASTERN, State
+from src.canonical_source_hash import canonical_source_sha256
 
 
 def test_direct_launcher_is_inert_and_fail_closed(capsys):
@@ -25,9 +26,19 @@ def test_reviewed_hash_manifest_required(tmp_path):
 def test_reviewed_hash_verification(tmp_path):
     path = tmp_path / "reviewed.txt"
     path.write_text("reviewed\n", encoding="utf-8")
-    launcher.verify_reviewed_hashes(tmp_path, {"reviewed.txt": launcher.sha256(path)})
+    launcher.verify_reviewed_hashes(
+        tmp_path, {"reviewed.txt": canonical_source_sha256(path)})
     with pytest.raises(CommissioningError):
         launcher.verify_reviewed_hashes(tmp_path, {"reviewed.txt": "0" * 64})
+
+
+def test_reviewed_hash_verification_detects_source_drift(tmp_path):
+    path = tmp_path / "reviewed.py"
+    path.write_bytes(b"value = 1\r\n")
+    expected = canonical_source_sha256(path)
+    path.write_bytes(b"value = 2\r\n")
+    with pytest.raises(CommissioningError, match="mismatch"):
+        launcher.verify_reviewed_hashes(tmp_path, {"reviewed.py": expected})
 
 
 def test_pinned_commissioning_source_hashes_match():

@@ -8,7 +8,6 @@ values. Running this module directly fails closed without making a broker call.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import subprocess
 from datetime import datetime, time
 from pathlib import Path
@@ -16,6 +15,9 @@ from typing import Any, Mapping
 
 from src.one_share_commissioning import (
     AtomicEvidenceStore, CommissioningError, EASTERN, PLANNED_RISK_USD, SYMBOL,
+)
+from src.canonical_source_hash import (
+    CanonicalSourceHashError, canonical_source_sha256,
 )
 from src.one_share_commissioning_orchestrator import (
     OneShareCommissioningOrchestrator, OrchestrationResult,
@@ -25,7 +27,7 @@ from src.robinhood_commissioning_adapter import RobinhoodCommissioningAdapter
 
 
 EXPECTED_BASE_HEAD = "1b378605b31e99ab9e436e5afe69fca270c87bf6"
-EXPECTED_BRANCH = "agent/m7-one-share-commissioning"
+EXPECTED_BRANCH = "main"
 REVIEWED_HASHES: Mapping[str, str] = {
     "src/one_share_commissioning.py":
         "f117b636f66a0df19cb66b92750862bc836975e7251b67b9f2f41ef87a3e6293",
@@ -37,19 +39,15 @@ REVIEWED_HASHES: Mapping[str, str] = {
 REAL_SESSION_RUNTIME_FLAG = "ENABLE_ATTENDED_ONE_SHARE_COMMISSIONING"
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(65536), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def verify_reviewed_hashes(root: Path, expected: Mapping[str, str]) -> None:
     if not expected:
         raise CommissioningError("reviewed hash manifest is not approved")
     for relative, digest in expected.items():
-        if sha256(root / relative) != digest:
+        try:
+            actual = canonical_source_sha256(root / relative)
+        except CanonicalSourceHashError as exc:
+            raise CommissioningError("reviewed file hash could not be verified") from exc
+        if actual != digest:
             raise CommissioningError("reviewed file hash mismatch")
 
 
