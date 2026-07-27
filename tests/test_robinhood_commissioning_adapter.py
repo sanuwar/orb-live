@@ -1,4 +1,6 @@
 import asyncio
+from decimal import Decimal
+from types import SimpleNamespace
 import pytest
 
 from src.one_share_commissioning import CommissioningError
@@ -41,6 +43,21 @@ def payload(role):
     return result
 
 
+def place_result(role, order_id="order-1"):
+    side, order_type, trigger, duration = {
+        "entry": ("buy", "market", "immediate", "gfd"),
+        "stop": ("sell", "market", "stop", "gtc"),
+        "exit": ("sell", "market", "immediate", "gfd"),
+    }[role]
+    return SimpleNamespace(
+        server_order_id=order_id, symbol="AAPL", side=side,
+        order_type=order_type, trigger=trigger,
+        submitted_quantity=Decimal("1"), time_in_force=duration,
+        market_hours="regular_hours",
+        stop_price=Decimal("185") if role == "stop" else None,
+    )
+
+
 def test_exact_allowed_surface_and_prohibited_tool_rejection():
     assert ALLOWED_COMMISSIONING_TOOLS == {
         "get_accounts", "get_equity_positions", "get_equity_orders",
@@ -54,7 +71,12 @@ def test_exact_allowed_surface_and_prohibited_tool_rejection():
 
 
 def test_reads_and_review_are_sequential_and_unpaginated():
-    session = Session([{"accounts": []}, {"positions": []}, {"symbol": "AAPL"}])
+    session = Session([{"accounts": [{"account_number": "transient",
+        "agentic_allowed": True, "state": "active", "deactivated": False,
+        "permanently_deactivated": False}]}, {"positions": []}, {
+            "symbol": "AAPL", "side": "buy", "type": "market", "quantity": "1",
+            "order_checks": {}, "quote_data": {},
+        }])
     instance = adapter(session)
     asyncio.run(instance.get_accounts())
     asyncio.run(instance.get_equity_positions())
@@ -76,7 +98,7 @@ def test_pagination_is_rejected():
 @pytest.mark.parametrize("role", ["entry", "stop", "exit"])
 def test_each_place_role_is_one_shot(monkeypatch, role):
     monkeypatch.setattr("src.robinhood_commissioning_adapter.parse_place_response",
-                        lambda value: value)
+                        lambda value: place_result(role))
     session = Session([{"accepted": True}, {"accepted": True}])
     instance = adapter(session)
     asyncio.run(instance.place_equity_order(payload(role), role=role))
@@ -148,6 +170,33 @@ def test_reads_always_use_bound_account():
                for _, arguments in session.calls)
 
 
+def test_rich_order_read_preserves_transient_identifier_only_in_memory(monkeypatch):
+    parsed = SimpleNamespace(
+        state="confirmed", submitted_quantity=Decimal("1"),
+        cumulative_quantity=Decimal("0"), remaining_quantity=Decimal("1"),
+    )
+    monkeypatch.setattr("src.robinhood_commissioning_adapter.parse_order_status",
+                        lambda row: parsed)
+    row = {
+        "id": "transient-id", "symbol": "AAPL", "side": "sell",
+        "type": "market", "trigger": "stop", "stop_price": "185.00",
+        "average_price": None, "time_in_force": "gtc",
+        "market_hours": "regular_hours",
+    }
+    instance = adapter(Session([{"orders": [row]}]))
+    records = asyncio.run(instance.get_equity_orders())
+    assert len(records) == 1
+    assert records[0].server_order_id == "transient-id"
+    assert records[0].order_type == "stop_market"
+    assert records[0].stop_price == Decimal("185.00")
+
+
+def test_position_read_rejects_missing_quantity():
+    instance = adapter(Session([{"positions": [{"symbol": "AAPL"}]}]))
+    with pytest.raises(CommissioningError):
+        asyncio.run(instance.get_equity_positions())
+
+
 def test_explicit_write_rejection_is_not_ambiguous():
     class Rejected:
         is_error = True
@@ -157,8 +206,10 @@ def test_explicit_write_rejection_is_not_ambiguous():
 
 
 def test_distinct_writes_are_serialized(monkeypatch):
+    responses = iter((place_result("entry", "entry-1"),
+                      place_result("stop", "stop-1")))
     monkeypatch.setattr("src.robinhood_commissioning_adapter.parse_place_response",
-                        lambda value: value)
+                        lambda value: next(responses))
 
     class ConcurrentSession:
         def __init__(self):

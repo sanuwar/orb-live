@@ -7,15 +7,19 @@ values. Running this module directly fails closed without making a broker call.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import subprocess
-from dataclasses import dataclass
-from decimal import Decimal
+from datetime import datetime, time
 from pathlib import Path
 from typing import Any, Mapping
 
 from src.one_share_commissioning import (
-    CommissioningError, CommissioningMachine, PLANNED_RISK_USD, QUANTITY, SYMBOL,
+    AtomicEvidenceStore, CommissioningError, EASTERN, PLANNED_RISK_USD, SYMBOL,
+)
+from src.one_share_commissioning_orchestrator import (
+    OneShareCommissioningOrchestrator, OrchestrationResult,
+    entry_arguments, exit_arguments, stop_arguments,
 )
 from src.robinhood_commissioning_adapter import RobinhoodCommissioningAdapter
 
@@ -24,10 +28,13 @@ EXPECTED_BASE_HEAD = "1b378605b31e99ab9e436e5afe69fca270c87bf6"
 EXPECTED_BRANCH = "agent/m7-one-share-commissioning"
 REVIEWED_HASHES: Mapping[str, str] = {
     "src/one_share_commissioning.py":
-        "fe4ffb3c32aec72cfda84a8a2326217025bde4ab7a07e1932185418610539240",
+        "f117b636f66a0df19cb66b92750862bc836975e7251b67b9f2f41ef87a3e6293",
     "src/robinhood_commissioning_adapter.py":
-        "8f44dc4378cbf2d0d985f4eccbe3cf5526920e4a35f35e1399e8505fe9d57eb5",
+        "aa0349176141410898a08e464ba736a457e00dc450b94a7bce10fb35d34a92b8",
+    "src/one_share_commissioning_orchestrator.py":
+        "eb06c9126b226bf65cf42b4c36f74004eaee2d383beb3a2316a795ffb8c76f91",
 }
+REAL_SESSION_RUNTIME_FLAG = "ENABLE_ATTENDED_ONE_SHARE_COMMISSIONING"
 
 
 def sha256(path: Path) -> str:
@@ -61,43 +68,6 @@ def verify_git_posture(root: Path) -> None:
         raise CommissioningError("reviewed base HEAD mismatch")
 
 
-def entry_arguments(account_number: str) -> dict[str, Any]:
-    return {
-        "account_number": account_number,
-        "symbol": SYMBOL,
-        "side": "buy",
-        "type": "market",
-        "quantity": "1",
-        "time_in_force": "gfd",
-        "market_hours": "regular_hours",
-    }
-
-
-def stop_arguments(account_number: str, stop_price: Decimal) -> dict[str, Any]:
-    return {
-        "account_number": account_number,
-        "symbol": SYMBOL,
-        "side": "sell",
-        "type": "stop_market",
-        "quantity": "1",
-        "stop_price": format(stop_price, "f"),
-        "time_in_force": "gtc",
-        "market_hours": "regular_hours",
-    }
-
-
-def exit_arguments(account_number: str) -> dict[str, Any]:
-    return {
-        "account_number": account_number,
-        "symbol": SYMBOL,
-        "side": "sell",
-        "type": "market",
-        "quantity": "1",
-        "time_in_force": "gfd",
-        "market_hours": "regular_hours",
-    }
-
-
 def sanitized_review_summary(review: Mapping[str, Any]) -> dict[str, Any]:
     """Return only policy facts and types; never echo private or price values."""
     return {
@@ -111,20 +81,55 @@ def sanitized_review_summary(review: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-@dataclass
-class CommissioningRuntime:
-    """Dependency-injected runtime, unreachable from the normal strategy runner."""
+def is_regular_market_hours(now: datetime) -> bool:
+    if now.tzinfo != EASTERN or now.weekday() >= 5:
+        return False
+    return time(9, 30) <= now.time().replace(tzinfo=None) < time(16, 0)
 
-    machine: CommissioningMachine
-    adapter: RobinhoodCommissioningAdapter
 
-    def verify_static_posture(self, *, strategy_enabled: bool) -> None:
-        if strategy_enabled:
-            raise CommissioningError("strategy.enabled must remain false")
-        if self.machine.policy.symbol != SYMBOL or self.machine.policy.quantity != QUANTITY:
-            raise CommissioningError("commissioning policy drift")
-        if self.machine.policy.planned_risk_usd != PLANNED_RISK_USD:
-            raise CommissioningError("planned risk policy drift")
+async def execute_commissioning(
+    *, root: Path, session: Any, commissioned_account_number: str,
+    run_id: str, evidence_root: Path, monotonic: Any, sleep: Any,
+    now_eastern: Any, authorization_provider: Any, emergency_handoff: Any,
+    strategy_enabled: bool, mode: str = "blocked", runtime_flag: str = "",
+    real_session_authorized: bool = False,
+) -> OrchestrationResult:
+    """Create exactly one adapter and orchestrator around an injected session."""
+    if mode not in {"fake", "real"}:
+        raise CommissioningError("launcher is fail closed by default")
+    if mode == "fake" and getattr(session, "offline_fixture", False) is not True:
+        raise CommissioningError("fake mode requires an explicitly marked offline fixture")
+    if mode == "real" and (
+        runtime_flag != REAL_SESSION_RUNTIME_FLAG or not real_session_authorized
+    ):
+        raise CommissioningError("real-session mode lacks explicit runtime authorization")
+    if mode == "real" and getattr(session, "offline_fixture", False) is True:
+        raise CommissioningError("offline fixture cannot enter real-session mode")
+    verify_git_posture(root)
+    verify_reviewed_hashes(root, REVIEWED_HASHES)
+    if strategy_enabled:
+        raise CommissioningError("strategy.enabled must remain false")
+    current = now_eastern()
+    if current.tzinfo != EASTERN or not is_regular_market_hours(current):
+        raise CommissioningError("current Eastern time is outside regular market hours")
+    store = AtomicEvidenceStore(evidence_root, run_id)
+    adapter = RobinhoodCommissioningAdapter(session, commissioned_account_number)
+    orchestrator = OneShareCommissioningOrchestrator(
+        run_id=run_id, adapter=adapter, monotonic=monotonic, sleep=sleep,
+        now_eastern=now_eastern, authorization_provider=authorization_provider,
+        evidence_store=store, emergency_handoff=emergency_handoff,
+        strategy_enabled=strategy_enabled, regular_market_hours=True,
+    )
+    result = await orchestrator.run()
+    print(f"commissioning_state={result.state.value}")
+    print("planned_risk_usd=15; actual loss may exceed planned risk")
+    return result
+
+
+def run_fake_demo(**kwargs: Any) -> OrchestrationResult:
+    """Run only with an explicitly injected offline fake session."""
+    kwargs["mode"] = "fake"
+    return asyncio.run(execute_commissioning(**kwargs))
 
 
 def main() -> int:

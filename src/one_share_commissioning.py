@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields as field_iter
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
@@ -320,6 +320,29 @@ class AtomicEvidenceStore:
         os.replace(self.partial, self.completed)
         return self.completed / "commissioning_evidence.json"
 
+    def recover_interrupted(self) -> tuple[SanitizedEvidence, str]:
+        """Mark an existing partial run operator-required; never resume it."""
+        if not self.partial.is_dir() or self.completed.exists():
+            raise CommissioningError("no recoverable interrupted run exists")
+        target = self.partial / "commissioning_evidence.json"
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise CommissioningError("interrupted evidence is unreadable") from exc
+        expected = {item.name for item in field_iter(SanitizedEvidence)}
+        if not isinstance(payload, Mapping) or set(payload) != expected:
+            raise CommissioningError("interrupted evidence shape is invalid")
+        validate_sanitized_evidence(payload)
+        evidence = SanitizedEvidence(**payload)
+        last_safe_state = evidence.state_transitions[-1] if evidence.state_transitions else "UNKNOWN"
+        evidence.state_transitions.append(State.OPERATOR_REQUIRED.value)
+        evidence.normalized_state_names.append(State.OPERATOR_REQUIRED.value)
+        evidence.conservative_classifications.append("OPERATOR_REQUIRED")
+        evidence.completion_or_failure_reason = "INTERRUPTED_RUN_REQUIRES_OPERATOR"
+        (self.partial / "commissioning_evidence.json.tmp").unlink(missing_ok=True)
+        self.persist(evidence)
+        return evidence, last_safe_state
+
 
 @dataclass
 class CommissioningMachine:
@@ -369,6 +392,12 @@ class CommissioningMachine:
             raise CommissioningError("prohibited tool call")
         self.evidence.approved_tool_names.append(name)
         self.evidence.call_counts[name] = self.evidence.call_counts.get(name, 0) + 1
+        self.evidence_store.persist(self.evidence)
+
+    def persist_write_boundary(self, role: str, phase: str) -> None:
+        if role not in {"entry", "stop", "cancel", "exit"} or phase not in {"before", "after"}:
+            raise CommissioningError("invalid write boundary")
+        self.evidence.boolean_validations[f"{role}_write_{phase}"] = True
         self.evidence_store.persist(self.evidence)
 
     def preflight_passed(self, *, strategy_enabled: bool,
@@ -465,7 +494,7 @@ class CommissioningMachine:
                 self.operator_required("ENTRY_STATE_INDETERMINATE")
                 return
             if deadline_exceeded:
-                self.failed_closed("ENTRY_FILL_DEADLINE_EXCEEDED")
+                self.operator_required("ENTRY_FILL_DEADLINE_EXCEEDED")
             return
         if (classify_order_state(order.state) is not OrderStateClass.TERMINAL_FILLED
                 or remaining != 0 or position != QUANTITY):

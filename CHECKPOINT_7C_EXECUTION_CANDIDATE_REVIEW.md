@@ -2,78 +2,70 @@
 
 ## Classification
 
-**INERT.** The launcher verifies policy helpers and fails closed from `main()`.
-It does not yet orchestrate the attended flow through an injected MCP session.
-It must not be used for a real order.
+**EXECUTABLE_CANDIDATE.** The launcher now owns one complete commissioning run
+through exactly one injected `RobinhoodCommissioningAdapter` and exactly one
+`OneShareCommissioningOrchestrator`. It remains fail closed by default. No
+Robinhood or MCP initializer exists in this path, and real-session mode requires
+both the explicit runtime flag and separate runtime authorization.
 
-## Blocking defects corrected
+This classification means the injected path is complete and fixture-tested. It
+does not authorize a real order or mark Checkpoint 7C complete.
 
-- Bound all account-scoped adapter reads and order payloads to one injected
-  commissioned account; wrong account, symbol, side, quantity, duration, or
-  market-hours posture is rejected before delegation.
-- Required AAPL, exactly one whole share, regular hours, and contract-normalized
-  stop pricing on every review/place payload.
-- Required timezone-aware America/New_York authorizations with a positive window
-  no longer than 15 minutes.
-- Restricted run IDs to one safe, non-reusable path component.
-- Replaced loose entry-fill scalars with an exact account/symbol/side/type/state/
-  quantity predicate before the fill price can be accepted.
-- Replaced cancel booleans with conservative recognized-state and exact-quantity
-  reconciliation, including pending cancel and cancel-versus-fill handling.
-- Refreshed reviewed source-hash pins. Ambiguous writes remain one-shot and are
-  never automatically retried.
+## Supported sequence
 
-## Remaining blockers before a real order
-
-1. Implement and review one launcher-owned orchestration path that invokes the
-   adapter, consumes both authorizations at the correct points, records every
-   call, and maps every ambiguous place/cancel result to `OPERATOR_REQUIRED`.
-2. Implement strict account, position, and rich order-record reconciliation that
-   binds the transient broker order ID to each entry/stop/exit observation.
-3. Implement monotonic deadline loops and interruption recovery that can only
-   resume by reconciliation or transfer control to the operator; never resubmit.
-4. Review and pin the completed launcher/orchestration source, then conduct a
-   separate attended go/no-go authorization. `strategy.enabled` must remain false.
-
-## Supported live surface and intended sequence
-
-The adapter supports only: `get_accounts`, `get_equity_positions`,
+The only live tools are `get_accounts`, `get_equity_positions`,
 `get_equity_orders`, `review_equity_order`, `place_equity_order`, and
 `cancel_equity_order`.
 
-The intended sequence is: account/position/order preflight; entry review; one
-entry place; order/position reconciliation; stop review; one stop place;
-order/position reconciliation; flatten authorization; one stop cancel;
-order/position reconciliation; if still long one and the stop is terminal,
-exit review and one exit place; final order/position reconciliation. Reads may
-repeat only within deadlines. Writes never retry, never overlap, and never
-paginate. The current inert launcher does not yet execute this sequence.
+The run sequence is: account/position/order preflight; entry review; entry
+authorization; one entry place; exact-ID order/position reconciliation; one-share
+fill confirmation; stop review; one stop place; exact-ID stop/position
+reconciliation; provisional protection observation; flatten authorization; one
+stop cancel; exact-ID cancellation reconciliation; if still long one with the
+stop terminal, exit review and one exit place; exact-ID exit reconciliation; and
+final verification of zero position with no related nonterminal order.
 
-## Runtime authorizations and operator actions
+Read-only order/position polling may repeat within monotonic deadlines. Maximum
+writes are one entry place, one stop place, one stop cancel, and one exit place.
+Writes are serialized and never automatically retried.
 
-Two separate, non-reusable authorizations are required: the exact entry phrase
-`AUTHORIZE ORB LIVE AAPL ONE SHARE ENTRY PLANNED RISK 15`, then the exact flatten
-phrase `AUTHORIZE ORB LIVE AAPL ONE SHARE CONTROLLED FLATTEN`. Each binds the run
-ID, current Eastern date, narrow window, AAPL, quantity 1,
-`planned_risk_usd=15`, acknowledgment that actual loss may exceed planned risk,
-continuous attendance, Robinhood UI availability, and no second trade.
+## Runtime controls and recovery
 
-The operator must remain present from authorization until verified flat with no
-related nonterminal order. On any ambiguous write, missed deadline, inconsistent
-quantity/state, unresolved stop, or interruption, automation stops at
-`OPERATOR_REQUIRED`; the operator assumes emergency manual control in the
-Robinhood UI. No automated exit may occur while the stop is potentially
-executable, and no sell may occur when the latest position is zero.
+Two separate, non-reusable authorizations are required:
 
-## Evidence and validation limits
+- `AUTHORIZE ORB LIVE AAPL ONE SHARE ENTRY PLANNED RISK 15`
+- `AUTHORIZE ORB LIVE AAPL ONE SHARE CONTROLLED FLATTEN`
 
-The durable atomic evidence contains only run ID, transitions, approved tool
-names/counts, booleans, normalized states, conservative classifications,
-durations, JSON types, record counts, reason, and `planned_risk_usd=15`. It omits
-account identity, order/ref IDs, raw responses, fill/stop prices, credentials,
-and tokens.
+Each binds the safe run ID, current Eastern date, narrow window, AAPL, one whole
+share, `planned_risk_usd=15`, acknowledgment that actual loss may exceed planned
+risk, continuous attendance, Robinhood UI availability, and no second trade.
 
-No real place response, cancel response, order reconciliation, injected-session
-orchestration, provisional protection observation, or emergency-control handoff
-has been live-validated. There is no live SagaExecutor binding and no normal
-strategy-runner reachability.
+Before and after every write boundary, sanitized state is persisted atomically.
+An interrupted partial run is never resumed and its run ID is never reused; it
+is marked `OPERATOR_REQUIRED` with the last safe state and manual reconciliation
+action. Exact transient broker order IDs exist only in memory and must match one
+and only one returned record. Missing, duplicate, or conflicting matches fail
+closed without symbol/side inference.
+
+## Emergency handoff and evidence
+
+Ambiguous writes, reconciliation deadlines, identifier conflicts, state or
+quantity mismatches, unresolved stops, and post-write interruptions invoke one
+sanitized emergency interface. It carries only state, reason, position/stop
+possibility booleans, the fixed-one-share boolean, and expected operator action.
+It never carries account identity, order IDs, prices, raw responses, or secrets.
+
+Atomic evidence contains only run ID, transitions, approved tool names/counts,
+booleans, normalized states, conservative classifications, durations, JSON
+types, record counts, completion/failure reason, and `planned_risk_usd=15`.
+
+## Still requiring live validation
+
+- actual `place_equity_order` response behavior;
+- actual `cancel_equity_order` response behavior;
+- real broker order-state transitions and latency;
+- emergency manual handoff in the Robinhood UI.
+
+`strategy.enabled` remains false. There is no normal strategy-runner or live
+`SagaExecutor` binding. Checkpoint 7C remains blocked pending attended go/no-go;
+Checkpoint 7D remains not executed; Milestone 7 remains incomplete.

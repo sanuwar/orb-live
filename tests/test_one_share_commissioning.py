@@ -103,7 +103,7 @@ def test_zero_fill_through_deadline(tmp_path):
     value.entry_observed(order=entry_order(filled=Decimal("0"), remaining=Decimal("1"),
                          state="confirmed", price=None), position_quantity=0,
                          deadline_exceeded=True)
-    assert value.state is State.FAILED_CLOSED
+    assert value.state is State.OPERATOR_REQUIRED
 
 
 def test_exact_one_share_fill_and_missing_price(tmp_path):

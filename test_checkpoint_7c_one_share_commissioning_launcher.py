@@ -1,10 +1,12 @@
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import checkpoint_7c_one_share_commissioning_launcher as launcher
 from src.one_share_commissioning import CommissioningError
+from src.one_share_commissioning import EASTERN, State
 
 
 def test_direct_launcher_is_inert_and_fail_closed(capsys):
@@ -65,3 +67,67 @@ def test_normal_strategy_does_not_import_commissioning_launcher():
         path = root / relative
         if path.exists():
             assert "one_share_commissioning" not in path.read_text(encoding="utf-8")
+
+
+def launcher_kwargs(tmp_path):
+    return dict(
+        root=Path(__file__).resolve().parent,
+        session=SimpleNamespace(offline_fixture=True),
+        commissioned_account_number="transient", run_id="fake-run",
+        evidence_root=tmp_path, monotonic=lambda: 0.0,
+        sleep=lambda seconds: None,
+        now_eastern=lambda: __import__("datetime").datetime(
+            2026, 7, 27, 11, 0, tzinfo=EASTERN),
+        authorization_provider=lambda stage: None,
+        emergency_handoff=lambda payload: None, strategy_enabled=False,
+    )
+
+
+def test_launcher_fake_session_mode_creates_one_adapter_and_orchestrator(
+        tmp_path, monkeypatch, capsys):
+    created = {"adapter": 0, "orchestrator": 0}
+
+    def fake_adapter(session, account):
+        created["adapter"] += 1
+        return SimpleNamespace(commissioned_account_number=account)
+
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            created["orchestrator"] += 1
+
+        async def run(self):
+            return SimpleNamespace(state=State.COMPLETE)
+
+    monkeypatch.setattr(launcher, "verify_git_posture", lambda root: None)
+    monkeypatch.setattr(launcher, "verify_reviewed_hashes", lambda root, hashes: None)
+    monkeypatch.setattr(launcher, "RobinhoodCommissioningAdapter", fake_adapter)
+    monkeypatch.setattr(launcher, "OneShareCommissioningOrchestrator", FakeOrchestrator)
+    result = launcher.run_fake_demo(**launcher_kwargs(tmp_path))
+    assert result.state is State.COMPLETE
+    assert created == {"adapter": 1, "orchestrator": 1}
+    assert "commissioning_state=COMPLETE" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("changes", [
+    {}, {"mode": "real"},
+    {"mode": "real", "runtime_flag": launcher.REAL_SESSION_RUNTIME_FLAG},
+])
+def test_launcher_real_session_mode_requires_both_explicit_gates(tmp_path, changes):
+    kwargs = launcher_kwargs(tmp_path)
+    kwargs.update(changes)
+    with pytest.raises(CommissioningError):
+        __import__("asyncio").run(launcher.execute_commissioning(**kwargs))
+
+
+def test_launcher_fake_mode_rejects_unmarked_session(tmp_path):
+    kwargs = launcher_kwargs(tmp_path)
+    kwargs.update(mode="fake", session=object())
+    with pytest.raises(CommissioningError, match="offline fixture"):
+        __import__("asyncio").run(launcher.execute_commissioning(**kwargs))
+
+
+def test_launcher_rejects_strategy_enabled_before_adapter(tmp_path):
+    kwargs = launcher_kwargs(tmp_path)
+    kwargs.update(mode="fake", strategy_enabled=True)
+    with pytest.raises(CommissioningError):
+        __import__("asyncio").run(launcher.execute_commissioning(**kwargs))
