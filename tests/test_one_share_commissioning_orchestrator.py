@@ -1,22 +1,25 @@
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
 from src.one_share_commissioning import (
-    AtomicEvidenceStore, EASTERN, ENTRY_AUTHORIZATION_PHRASE,
+    AtomicEvidenceStore, CommissioningError, EASTERN, ENTRY_AUTHORIZATION_PHRASE,
     FLATTEN_AUTHORIZATION_PHRASE, RuntimeAuthorization, State,
 )
-from src.one_share_commissioning_orchestrator import OneShareCommissioningOrchestrator
+from src.one_share_commissioning_orchestrator import (
+    OneShareCommissioningOrchestrator,
+    validate_commissioning_entry_time,
+)
 from src.robinhood_commissioning_adapter import (
     AmbiguousWriteError, CommissionedAccountRead,
     CommissioningOrderRecord, CommissioningPositionRecord,
 )
 
 
-NOW = datetime(2026, 7, 27, 11, 5, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 28, 9, 40, tzinfo=EASTERN)
 
 
 class Clock:
@@ -36,7 +39,7 @@ def authorization(run_id, stage):
     phrase = (ENTRY_AUTHORIZATION_PHRASE if stage == "entry"
               else FLATTEN_AUTHORIZATION_PHRASE)
     return RuntimeAuthorization(
-        run_id=run_id, eastern_date=date(2026, 7, 27),
+        run_id=run_id, eastern_date=date(2026, 7, 28),
         window_start=NOW - timedelta(minutes=5), window_end=NOW + timedelta(minutes=5),
         phrase=phrase, symbol="AAPL", quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"), acknowledges_loss_may_exceed_plan=True,
@@ -165,14 +168,21 @@ class FakeAdapter:
         return SimpleNamespace(request_was_accepted=True)
 
 
-def make_orchestrator(tmp_path, adapter=None, run_id="run-1"):
+def make_orchestrator(
+    tmp_path,
+    adapter=None,
+    run_id="run-1",
+    now_eastern=lambda: NOW,
+    authorization_provider=None,
+):
     clock = Clock()
     handoffs = []
     adapter = adapter or FakeAdapter()
     instance = OneShareCommissioningOrchestrator(
         run_id=run_id, adapter=adapter, monotonic=clock.monotonic,
-        sleep=clock.sleep, now_eastern=lambda: NOW,
-        authorization_provider=lambda stage: authorization(run_id, stage),
+        sleep=clock.sleep, now_eastern=now_eastern,
+        authorization_provider=(authorization_provider or
+                                (lambda stage: authorization(run_id, stage))),
         evidence_store=AtomicEvidenceStore(tmp_path, run_id),
         emergency_handoff=handoffs.append, strategy_enabled=False,
         regular_market_hours=True,
@@ -182,6 +192,95 @@ def make_orchestrator(tmp_path, adapter=None, run_id="run-1"):
 
 def run(instance):
     return asyncio.run(instance.run())
+
+
+@pytest.mark.parametrize(
+    "observed,permitted",
+    [
+        (datetime(2026, 7, 28, 9, 34, 59, tzinfo=EASTERN), False),
+        (datetime(2026, 7, 28, 9, 35, 0, tzinfo=EASTERN), True),
+        (datetime(2026, 7, 28, 9, 49, 59, tzinfo=EASTERN), True),
+        (datetime(2026, 7, 28, 9, 50, 0, tzinfo=EASTERN), False),
+        (datetime(2026, 7, 28, 10, 0, 1, tzinfo=EASTERN), False),
+    ],
+)
+def test_strict_entry_time_boundaries(observed, permitted):
+    if permitted:
+        validate_commissioning_entry_time(observed)
+    else:
+        with pytest.raises(CommissioningError):
+            validate_commissioning_entry_time(observed)
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        datetime(2026, 7, 28, 9, 40),
+        datetime(2026, 7, 28, 13, 40, tzinfo=timezone.utc),
+        datetime(2026, 7, 29, 9, 40, tzinfo=EASTERN),
+    ],
+)
+def test_entry_time_requires_aware_eastern_clock_and_exact_date(observed):
+    with pytest.raises(CommissioningError):
+        validate_commissioning_entry_time(observed)
+
+
+def test_entry_placement_is_rechecked_and_rejected_at_cutoff(tmp_path):
+    values = iter(
+        [
+            datetime(2026, 7, 28, 9, 49, 59, tzinfo=EASTERN),
+            datetime(2026, 7, 28, 9, 50, 0, tzinfo=EASTERN),
+        ]
+    )
+    adapter = FakeAdapter()
+    instance, adapter, _, handoffs = make_orchestrator(
+        tmp_path,
+        adapter,
+        now_eastern=lambda: next(values),
+    )
+    assert run(instance).state is State.OPERATOR_REQUIRED
+    assert adapter.write_roles == []
+    assert handoffs[-1].reason_code == "UNEXPECTED_ORCHESTRATION_FAILURE"
+
+
+def test_post_1000_protection_and_flattening_continue(tmp_path):
+    values = iter(
+        [
+            datetime(2026, 7, 28, 9, 49, 58, tzinfo=EASTERN),
+            datetime(2026, 7, 28, 9, 49, 59, tzinfo=EASTERN),
+            datetime(2026, 7, 28, 10, 1, 0, tzinfo=EASTERN),
+        ]
+    )
+
+    def provider(stage):
+        if stage == "entry":
+            return RuntimeAuthorization(
+                run_id="run-1", eastern_date=date(2026, 7, 28),
+                window_start=datetime(2026, 7, 28, 9, 35, tzinfo=EASTERN),
+                window_end=datetime(2026, 7, 28, 9, 50, tzinfo=EASTERN),
+                phrase=ENTRY_AUTHORIZATION_PHRASE, symbol="AAPL",
+                quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
+                acknowledges_loss_may_exceed_plan=True, operator_present=True,
+                robinhood_ui_available=True, no_second_trade=True,
+            )
+        return RuntimeAuthorization(
+            run_id="run-1", eastern_date=date(2026, 7, 28),
+            window_start=datetime(2026, 7, 28, 10, 0, tzinfo=EASTERN),
+            window_end=datetime(2026, 7, 28, 10, 10, tzinfo=EASTERN),
+            phrase=FLATTEN_AUTHORIZATION_PHRASE, symbol="AAPL",
+            quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
+            acknowledges_loss_may_exceed_plan=True, operator_present=True,
+            robinhood_ui_available=True, no_second_trade=True,
+        )
+
+    instance, adapter, _, handoffs = make_orchestrator(
+        tmp_path,
+        now_eastern=lambda: next(values),
+        authorization_provider=provider,
+    )
+    assert run(instance).state is State.COMPLETE
+    assert adapter.write_roles == ["entry", "stop", "cancel", "exit"]
+    assert handoffs == []
 
 
 def test_clean_complete_flow_and_exact_tool_order(tmp_path):

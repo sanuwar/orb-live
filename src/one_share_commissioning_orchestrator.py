@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from src.live_order_state_model import OrderStateClass, classify_order_state
 from src.one_share_commissioning import (
     AtomicEvidenceStore, CommissioningError, CommissioningMachine,
-    ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
+    EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
     RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
     WriteDisposition,
 )
@@ -26,10 +26,30 @@ POLL_SECONDS = 1.0
 STOP_CANCEL_DEADLINE_SECONDS = 30
 EXIT_FILL_DEADLINE_SECONDS = 30
 FINAL_FLAT_DEADLINE_SECONDS = 15
+COMMISSIONING_EXECUTION_DATE = date(2026, 7, 28)
+ENTRY_WINDOW_START = time(9, 35)
+ENTRY_CUTOFF_EXCLUSIVE = time(9, 50)
+NOMINAL_ATTENDED_WINDOW_END = time(10, 0)
 
 
 class OperatorRequired(CommissioningError):
     """Internal control-flow marker after durable emergency handoff."""
+
+
+def validate_commissioning_entry_time(now: datetime) -> None:
+    """Require 2026-07-28 from 09:35 through strictly before 09:50 ET."""
+
+    if now.tzinfo is None or now.utcoffset() is None or now.tzinfo != EASTERN:
+        raise CommissioningError(
+            "commissioning entry time must use America/New_York"
+        )
+    local_time = now.time().replace(tzinfo=None)
+    if now.date() != COMMISSIONING_EXECUTION_DATE:
+        raise CommissioningError("commissioning execution date mismatch")
+    if not ENTRY_WINDOW_START <= local_time < ENTRY_CUTOFF_EXCLUSIVE:
+        raise CommissioningError(
+            "entry authorization and placement require 09:35 <= time < 09:50 ET"
+        )
 
 
 @dataclass(frozen=True)
@@ -238,8 +258,13 @@ class OneShareCommissioningOrchestrator:
             entry_payload = entry_arguments(self.account_number)
             await self._review("entry", entry_payload)
             self.machine.entry_reviewed(accepted=True)
-            self.machine.authorize_entry(await self._authorization("entry"),
-                                         now=self.now_eastern())
+            entry_authorization_time = self.now_eastern()
+            validate_commissioning_entry_time(entry_authorization_time)
+            self.machine.authorize_entry(
+                await self._authorization("entry"),
+                now=entry_authorization_time,
+            )
+            validate_commissioning_entry_time(self.now_eastern())
             entry_result = await self._place("entry", entry_payload)
             await self._reconcile_entry(entry_result.server_order_id)
             assert self.machine.expected_stop_price is not None

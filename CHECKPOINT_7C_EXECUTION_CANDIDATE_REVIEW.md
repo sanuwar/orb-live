@@ -2,14 +2,23 @@
 
 ## Classification
 
-**EXECUTABLE_CANDIDATE.** The launcher now owns one complete commissioning run
-through exactly one injected `RobinhoodCommissioningAdapter` and exactly one
-`OneShareCommissioningOrchestrator`. It remains fail closed by default. No
-Robinhood or MCP initializer exists in this path, and real-session mode requires
-both the explicit runtime flag and separate runtime authorization.
+**EXECUTABLE_CANDIDATE.** The launcher owns one complete commissioning run
+through exactly one `RobinhoodCommissioningAdapter` and exactly one
+`OneShareCommissioningOrchestrator`. It remains fail closed by default. The
+tracked `robinhood_commissioning_session` binding now owns exactly one silently
+authenticated Robinhood MCP client/session and closes it after success or
+failure. Any request for interactive browser authentication fails closed.
 
-This classification means the injected path is complete and fixture-tested. It
-does not authorize a real order or mark Checkpoint 7C complete.
+The commissioned account is resolved once through the existing configured
+fingerprint validation and agentic-account selector. Its account identifier is
+kept only transiently in memory, cached for the adapter's one preflight replay,
+and never printed or persisted. Zero, multiple, unavailable, ambiguous, or
+mismatched identities fail closed.
+
+The obsolete pre-merge `merge-base` gate is removed. Runtime Git posture now
+requires the repository root containing the launcher, branch `main`, identical
+`HEAD` and local `origin/main`, a clean tracked tree, empty staging, approved
+canonical source hashes, and `strategy.enabled=false`.
 
 ## Supported sequence
 
@@ -40,6 +49,15 @@ Each binds the safe run ID, current Eastern date, narrow window, AAPL, one whole
 share, `planned_risk_usd=15`, acknowledgment that actual loss may exceed planned
 risk, continuous attendance, Robinhood UI availability, and no second trade.
 
+The reviewed Python path fixes the execution date at 2026-07-28. Entry
+authorization and placement are permitted from 09:35:00 ET through strictly
+before 09:50:00 ET; 09:50:00 is rejected. The placement time is checked again
+immediately before the one entry write. Once entry has been submitted, the
+10:00 nominal attended-window end does not stop protection, reconciliation,
+cancellation, emergency handling, controlled flattening, or final flat
+verification. No post-cutoff or second-entry path exists. These timing controls
+do not guarantee a maximum monetary loss.
+
 Before and after every write boundary, sanitized state is persisted atomically.
 An interrupted partial run is never resumed and its run ID is never reused; it
 is marked `OPERATOR_REQUIRED` with the last safe state and manual reconciliation
@@ -66,6 +84,8 @@ types, record counts, completion/failure reason, and `planned_risk_usd=15`.
 - real broker order-state transitions and latency;
 - emergency manual handoff in the Robinhood UI.
 
-`strategy.enabled` remains false. There is no normal strategy-runner or live
-`SagaExecutor` binding. Checkpoint 7C remains blocked pending attended go/no-go;
-Checkpoint 7D remains not executed; Milestone 7 remains incomplete.
+Real-session mode remains unexecuted, and real broker place/cancel response
+shapes and state transitions remain unvalidated. `strategy.enabled` remains
+false. There is no normal strategy-runner or live `SagaExecutor` binding.
+Checkpoint 7C remains **NOT EXECUTED LIVE**; Checkpoint 7D remains not executed;
+Milestone 7 remains incomplete.
