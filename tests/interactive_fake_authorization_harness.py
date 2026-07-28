@@ -31,7 +31,7 @@ from src.one_share_commissioning_orchestrator import OneShareCommissioningOrches
 from tests.test_one_share_commissioning_orchestrator import Clock, FakeAdapter
 
 FAKE_AUTHORIZATION_PHRASE = "FAKE AUTHORIZATION ACCEPTED"
-NOW = datetime(2026, 7, 28, 12, 0, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 28, 15, 35, tzinfo=EASTERN)
 FAKE_ACCOUNT = "OFFLINE-FAKE-COMMISSIONED-ACCOUNT"
 
 
@@ -57,8 +57,8 @@ def fake_request(root: Path, run_id: str) -> launcher.LiveRunRequest:
     return launcher.LiveRunRequest(
         run_id=run_id, evidence_root=root,
         execution_date=date(2026, 7, 28),
-        attended_start=time(11, 43), entry_cutoff=time(12, 5),
-        attended_end=time(12, 20), symbol="AAPL", quantity=Decimal("1"),
+        attended_start=time(15, 30), entry_cutoff=time(15, 45),
+        attended_end=time(15, 55), symbol="AAPL", quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"), acknowledges_loss_may_exceed_plan=True,
         operator_present=True, robinhood_ui_open=True, no_second_trade=True,
         real_session_flag="FAKE_ONLY_NO_REAL_SESSION",

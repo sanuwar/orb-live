@@ -28,9 +28,11 @@ STOP_CANCEL_DEADLINE_SECONDS = 30
 EXIT_FILL_DEADLINE_SECONDS = 30
 FINAL_FLAT_DEADLINE_SECONDS = 15
 COMMISSIONING_EXECUTION_DATE = date(2026, 7, 28)
-ENTRY_WINDOW_START = time(11, 43)
-ENTRY_CUTOFF_EXCLUSIVE = time(12, 5)
-NOMINAL_ATTENDED_WINDOW_END = time(12, 20)
+ENTRY_WINDOW_START = time(15, 30)
+ENTRY_CUTOFF_EXCLUSIVE = time(15, 45)
+MANDATORY_RISK_OFF_TIME = time(15, 50)
+VERIFIED_FLAT_DEADLINE = time(15, 55)
+NOMINAL_ATTENDED_WINDOW_END = VERIFIED_FLAT_DEADLINE
 
 
 class OperatorRequired(CommissioningError):
@@ -38,7 +40,7 @@ class OperatorRequired(CommissioningError):
 
 
 def validate_commissioning_entry_time(now: datetime) -> None:
-    """Require 2026-07-28 from 11:43 through strictly before 12:05 ET."""
+    """Require 2026-07-28 from 15:30 through strictly before 15:45 ET."""
 
     if now.tzinfo is None or now.utcoffset() is None or now.tzinfo != EASTERN:
         raise EntryWindowError(
@@ -49,8 +51,24 @@ def validate_commissioning_entry_time(now: datetime) -> None:
         raise EntryWindowError("commissioning execution date mismatch")
     if not ENTRY_WINDOW_START <= local_time < ENTRY_CUTOFF_EXCLUSIVE:
         raise EntryWindowError(
-            "entry authorization and placement require 11:43 <= time < 12:05 ET"
+            "entry authorization and placement require 15:30 <= time < 15:45 ET"
         )
+
+
+def _validated_policy_time(now: datetime) -> time:
+    if now.tzinfo is None or now.utcoffset() is None or now.tzinfo != EASTERN:
+        raise EntryWindowError("commissioning runtime must use America/New_York")
+    if now.date() != COMMISSIONING_EXECUTION_DATE:
+        raise EntryWindowError("commissioning execution date mismatch")
+    return now.time().replace(tzinfo=None)
+
+
+def mandatory_risk_off_due(now: datetime) -> bool:
+    return _validated_policy_time(now) >= MANDATORY_RISK_OFF_TIME
+
+
+def verified_flat_deadline_reached(now: datetime) -> bool:
+    return _validated_policy_time(now) >= VERIFIED_FLAT_DEADLINE
 
 
 @dataclass(frozen=True)
@@ -202,6 +220,22 @@ class OneShareCommissioningOrchestrator:
                            OrderStateClass.TERMINAL_REJECTED_OR_FAILED,
                            OrderStateClass.PARTIAL_FILL_WITH_REMAINDER_CANCELLED})
 
+    async def _require_before_flat_deadline(
+        self, *, position: bool, stop: bool, action: str
+    ) -> None:
+        try:
+            expired = verified_flat_deadline_reached(self.now_eastern())
+        except EntryWindowError:
+            await self._handoff(
+                "FINAL_FLAT_VERIFICATION_FAILED", position=position, stop=stop,
+                action="Take immediate manual Robinhood control.",
+            )
+        if expired:
+            await self._handoff(
+                "VERIFIED_FLAT_DEADLINE_REACHED", position=position, stop=stop,
+                action=action,
+            )
+
     async def _read_orders(self) -> tuple[CommissioningOrderRecord, ...]:
         self.machine.record_tool_call("get_equity_orders")
         return await self.adapter.get_equity_orders()
@@ -215,6 +249,11 @@ class OneShareCommissioningOrchestrator:
         return await self.adapter.review_equity_order(arguments, role=role)
 
     async def _place(self, role: str, arguments: Mapping[str, Any]) -> Any:
+        if role != "entry":
+            await self._require_before_flat_deadline(
+                position=True, stop=role == "exit",
+                action="Take immediate manual Robinhood control; do not submit another write.",
+            )
         self.machine.record_tool_call("place_equity_order")
         self.machine.persist_write_boundary(role, "before")
         self._last_write = role
@@ -253,6 +292,10 @@ class OneShareCommissioningOrchestrator:
         return result
 
     async def _cancel(self, stop_id: str) -> None:
+        await self._require_before_flat_deadline(
+            position=True, stop=True,
+            action="Take immediate manual Robinhood control; reconcile the stop and position.",
+        )
         self.machine.record_tool_call("cancel_equity_order")
         self.machine.persist_write_boundary("cancel", "before")
         self._last_write = "cancel"
@@ -331,6 +374,7 @@ class OneShareCommissioningOrchestrator:
             assert self.machine.expected_stop_price is not None
             stop_payload = stop_arguments(self.account_number,
                                           self.machine.expected_stop_price)
+
             self._stage = "STOP_PROTECTION"
             stop_review_started = self.monotonic()
             await self._review("stop", stop_payload)
@@ -415,6 +459,11 @@ class OneShareCommissioningOrchestrator:
                 await self._handoff(self.machine.evidence.completion_or_failure_reason,
                                     position=True, stop=False,
                                     action="Inspect the entry and position; do not retry placement.")
+            if mandatory_risk_off_due(self.now_eastern()):
+                await self._handoff(
+                    "MANDATORY_RISK_OFF_ENTRY_UNRESOLVED", position=True, stop=False,
+                    action="Take immediate manual control; cancel or flatten safely.",
+                )
             if elapsed >= ENTRY_FILL_DEADLINE_SECONDS:
                 await self._handoff("ENTRY_FILL_DEADLINE_EXCEEDED", position=True,
                                     stop=False,
@@ -458,6 +507,12 @@ class OneShareCommissioningOrchestrator:
             )
             if result.provisional:
                 return
+            if mandatory_risk_off_due(self.now_eastern()):
+                await self._handoff(
+                    "MANDATORY_RISK_OFF_PROTECTION_UNRESOLVED",
+                    position=True, stop=True,
+                    action="Take immediate manual control; reconcile protection and flatten.",
+                )
             await self._handoff(self.machine.evidence.completion_or_failure_reason,
                                 position=True, stop=True,
                                 action="Inspect and establish protection or flatten manually.")
@@ -485,6 +540,10 @@ class OneShareCommissioningOrchestrator:
                 await self._handoff(self.machine.evidence.completion_or_failure_reason,
                                     position=True, stop=True,
                                     action="Inspect stop cancellation and position manually.")
+            await self._require_before_flat_deadline(
+                position=True, stop=True,
+                action="Take immediate manual control; reconcile cancellation and flatten.",
+            )
             if self.monotonic() - started >= STOP_CANCEL_DEADLINE_SECONDS:
                 await self._handoff("STOP_CANCEL_DEADLINE_EXCEEDED", position=True,
                                     stop=True,
@@ -556,6 +615,10 @@ class OneShareCommissioningOrchestrator:
                 await self._handoff("EXIT_POSITION_ORDER_MISMATCH", position=False,
                                     stop=False,
                                     action="Verify flatness and remaining orders manually.")
+            await self._require_before_flat_deadline(
+                position=True, stop=False,
+                action="Take immediate manual control; verify the exit and flatness.",
+            )
             if self.monotonic() - started >= EXIT_FILL_DEADLINE_SECONDS:
                 await self._handoff("EXIT_FILL_DEADLINE_EXCEEDED", position=True,
                                     stop=False,
@@ -581,6 +644,10 @@ class OneShareCommissioningOrchestrator:
                                         action="Verify flatness manually.")
                 path = self.machine.complete(related_nonterminal_orders=0)
                 return OrchestrationResult(State.COMPLETE, path)
+            await self._require_before_flat_deadline(
+                position=position != 0, stop=related != 0,
+                action="Take immediate manual Robinhood control and verify flatness.",
+            )
             if self.monotonic() - started >= FINAL_FLAT_DEADLINE_SECONDS:
                 await self._handoff("FINAL_FLAT_DEADLINE_EXCEEDED",
                                     position=position != 0, stop=related != 0,
