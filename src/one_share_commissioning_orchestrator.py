@@ -27,9 +27,9 @@ STOP_CANCEL_DEADLINE_SECONDS = 30
 EXIT_FILL_DEADLINE_SECONDS = 30
 FINAL_FLAT_DEADLINE_SECONDS = 15
 COMMISSIONING_EXECUTION_DATE = date(2026, 7, 28)
-ENTRY_WINDOW_START = time(11, 0)
-ENTRY_CUTOFF_EXCLUSIVE = time(11, 20)
-NOMINAL_ATTENDED_WINDOW_END = time(11, 30)
+ENTRY_WINDOW_START = time(11, 25)
+ENTRY_CUTOFF_EXCLUSIVE = time(11, 40)
+NOMINAL_ATTENDED_WINDOW_END = time(11, 50)
 
 
 class OperatorRequired(CommissioningError):
@@ -37,7 +37,7 @@ class OperatorRequired(CommissioningError):
 
 
 def validate_commissioning_entry_time(now: datetime) -> None:
-    """Require 2026-07-28 from 11:00 through strictly before 11:20 ET."""
+    """Require 2026-07-28 from 11:25 through strictly before 11:40 ET."""
 
     if now.tzinfo is None or now.utcoffset() is None or now.tzinfo != EASTERN:
         raise CommissioningError(
@@ -48,7 +48,7 @@ def validate_commissioning_entry_time(now: datetime) -> None:
         raise CommissioningError("commissioning execution date mismatch")
     if not ENTRY_WINDOW_START <= local_time < ENTRY_CUTOFF_EXCLUSIVE:
         raise CommissioningError(
-            "entry authorization and placement require 11:00 <= time < 11:20 ET"
+            "entry authorization and placement require 11:25 <= time < 11:40 ET"
         )
 
 
