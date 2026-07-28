@@ -27,8 +27,8 @@ from src.canonical_source_hash import (
 )
 from src.config import load_config
 from src.one_share_commissioning import (
-    AtomicEvidenceStore, AuthorizationInputError, CommissioningDiagnosticError,
-    CommissioningError,
+    AtomicEvidenceStore, AuthorizationPhraseMismatchError,
+    AuthorizationReaderError, CommissioningDiagnosticError, CommissioningError,
     EASTERN,
     ENTRY_AUTHORIZATION_PHRASE,
     FLATTEN_AUTHORIZATION_PHRASE,
@@ -71,11 +71,11 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/config.py":
         "37669854c3e1dae3c282e787c0af22da9c89ce21fb790a482f4edb2e2db7f1c3",
     "src/one_share_commissioning.py":
-        "90a0b9615b2ad6368b0d0052166c534f29466160a18b846345bbd32cfcd6ff64",
+        "15e49cb39ede95a09ee95f2a7e730299624942706ab6eeeb93edbed189869779",
     "src/robinhood_commissioning_adapter.py":
         "aa0349176141410898a08e464ba736a457e00dc450b94a7bce10fb35d34a92b8",
     "src/one_share_commissioning_orchestrator.py":
-        "6f8addbe0044dd883d62e259d653a004563916fe9bad4efdf70d41dd4233ba70",
+        "19f91a4e95c3b06de565d92a6fd566a8f73654b5b46d42a275a8665142e1d519",
     "src/robinhood_commissioning_session.py":
         "ddbd65700c675f9fbda365cee49202fd78e516df27b67372e267b1e3191e7cb0",
     "src/robinhood_client.py":
@@ -265,15 +265,17 @@ class InteractiveAuthorizationProvider:
                 supplied, expected
             )
         except Exception:
-            raise AuthorizationInputError("AUTHORIZATION_INPUT_FAILED") from None
+            raise AuthorizationReaderError("AUTHORIZATION_INPUT_FAILED") from None
         finally:
             if "supplied" in locals():
                 supplied = ""
         if not accepted:
-            raise AuthorizationInputError("AUTHORIZATION_INPUT_FAILED")
+            raise AuthorizationPhraseMismatchError(
+                "AUTHORIZATION_INPUT_FAILED"
+            )
         accepted_at = self.now_eastern()
         if accepted_at.tzinfo != EASTERN or accepted_at.date() != self.request.execution_date:
-            raise AuthorizationInputError("AUTHORIZATION_INPUT_FAILED")
+            raise AuthorizationReaderError("AUTHORIZATION_INPUT_FAILED")
         if stage == "entry":
             validate_commissioning_entry_time(accepted_at)
             cutoff = datetime.combine(

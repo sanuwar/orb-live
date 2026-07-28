@@ -413,3 +413,46 @@ def test_retired_failed_run_id_is_never_reusable(tmp_path):
     )
     with pytest.raises(Exception, match="permanently retired"):
         launcher.validate_live_run_request(request, now=NOW)
+class FailOnceAtEntryBoundaryStore(AtomicEvidenceStore):
+    def __init__(self, root, run_id):
+        super().__init__(root, run_id)
+        self.failed = False
+
+    def persist(self, evidence):
+        if (
+            not self.failed
+            and evidence.boolean_validations.get("entry_write_before") is True
+        ):
+            self.failed = True
+            raise OSError("private evidence persistence detail")
+        return super().persist(evidence)
+
+
+def test_failed_before_write_marker_does_not_claim_a_write(tmp_path):
+    clock = Clock()
+    store = FailOnceAtEntryBoundaryStore(tmp_path, "boundary-persist-failure")
+    supplied = iter([ENTRY_AUTHORIZATION_PHRASE])
+    provider = launcher.InteractiveAuthorizationProvider(
+        live_request(tmp_path, run_id="boundary-persist-failure"),
+        now_eastern=lambda: NOW,
+        secret_reader=lambda _prompt: next(supplied),
+    )
+    adapter = FakeAdapter()
+    orchestrator = OneShareCommissioningOrchestrator(
+        run_id="boundary-persist-failure", adapter=adapter,
+        monotonic=clock.monotonic, sleep=clock.sleep,
+        now_eastern=lambda: NOW, authorization_provider=provider,
+        evidence_store=store, emergency_handoff=lambda payload: None,
+        strategy_enabled=False, regular_market_hours=True,
+    )
+    result = asyncio.run(orchestrator.run())
+    evidence = read_sanitized(store.partial / "commissioning_evidence.json")
+    assert result.state is State.FAILED_CLOSED
+    assert evidence["write_boundary_reached"] is False
+    assert evidence["write_attempt_counters"] == {
+        "entry_place": 0, "stop_place": 0,
+        "stop_cancel": 0, "exit_place": 0,
+    }
+    assert evidence["call_counts"]["place_equity_order"] == 1
+    assert adapter.write_roles == []
+    assert "private evidence persistence detail" not in json.dumps(evidence)

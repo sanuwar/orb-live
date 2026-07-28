@@ -81,3 +81,34 @@ executed or reused.
 Real place and cancel response behavior, real order-state transitions, broker
 latency, and emergency manual handoff remain live-validation risks. No new live
 attempt is authorized by this review.
+## Interactive fake authorization acceptance
+
+The exact historical initiating subcause remains unrecoverable. The repaired
+current authorization-input path has now been validated through the actual
+PowerShell/stdin route using a harness that cannot import or construct the real
+MCP client, real session factory, or real Robinhood adapter.
+
+The final single-use fake acceptance set produced these sanitized results:
+
+- invalid input: `FAILED_CLOSED`, `AUTHORIZATION_INPUT_FAILED`, sanitized type
+  `AuthorizationPhraseMismatchError`, no write boundary, zero write attempts,
+  and the fake session closed;
+- EOF/input-reader failure: `FAILED_CLOSED`,
+  `AUTHORIZATION_INPUT_FAILED`, sanitized type `AuthorizationReaderError`, no
+  write boundary, zero write attempts, and the fake session closed;
+- valid input: `COMPLETE` and `VERIFIED_FLAT`, no unresolved fake order, no
+  emergency handoff, and exactly one entry place, stop place, stop cancel, and
+  exit place;
+- Run-ID reuse: rejected before fake session creation, with all write counters
+  zero;
+- authorization-phrase leakage: zero;
+- raw-exception leakage: zero.
+
+The valid fake Run ID was `cp7c-fake-auth-input-valid-20260728-02`. Its sanitized
+evidence SHA-256 is
+`4116c86dd053ceed6f955603f12516acde42fd95d06b247fc2dffab1b03a1928`;
+it is 2,966 bytes and one line.
+
+Recommendation: **READY_FOR_FINAL_REVIEW**. This recommendation validates the
+current repaired path only; it does not claim recovery of Attempt 05's exact
+historical input failure.

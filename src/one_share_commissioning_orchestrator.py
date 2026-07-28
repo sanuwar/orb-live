@@ -215,9 +215,9 @@ class OneShareCommissioningOrchestrator:
         return await self.adapter.review_equity_order(arguments, role=role)
 
     async def _place(self, role: str, arguments: Mapping[str, Any]) -> Any:
-        self._last_write = role
-        self.machine.persist_write_boundary(role, "before")
         self.machine.record_tool_call("place_equity_order")
+        self.machine.persist_write_boundary(role, "before")
+        self._last_write = role
         try:
             result = await self.adapter.place_equity_order(arguments, role=role)
         except AmbiguousWriteError:
@@ -253,9 +253,9 @@ class OneShareCommissioningOrchestrator:
         return result
 
     async def _cancel(self, stop_id: str) -> None:
-        self._last_write = "cancel"
-        self.machine.persist_write_boundary("cancel", "before")
         self.machine.record_tool_call("cancel_equity_order")
+        self.machine.persist_write_boundary("cancel", "before")
+        self._last_write = "cancel"
         try:
             result = await self.adapter.cancel_equity_order({"order_id": stop_id})
         except AmbiguousWriteError:

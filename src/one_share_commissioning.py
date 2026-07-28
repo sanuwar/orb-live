@@ -46,6 +46,14 @@ class AuthorizationInputError(CommissioningError):
     """Interactive authorization failed without retaining supplied input."""
 
 
+class AuthorizationPhraseMismatchError(AuthorizationInputError):
+    """The supplied authorization did not exactly match the expected phrase."""
+
+
+class AuthorizationReaderError(AuthorizationInputError):
+    """The terminal authorization reader failed or reached EOF."""
+
+
 class EntryWindowError(CommissioningError):
     """The timezone-aware reviewed entry window rejected the operation."""
 
@@ -75,7 +83,8 @@ ALLOWED_FAILURE_STAGES = frozenset({
 
 SAFE_EXCEPTION_TYPES = frozenset({
     "AccountIdentityMismatchError", "AccountResolutionError",
-    "AuthorizationInputError", "BrowserAuthenticationRequestError",
+    "AuthorizationInputError", "AuthorizationPhraseMismatchError",
+    "AuthorizationReaderError", "BrowserAuthenticationRequestError",
     "CommissioningError", "CommissioningSessionBindingError",
     "EntryWindowError", "SilentAuthenticationError",
     "TimeoutError", "TypeError", "ValueError", "OSError", "RuntimeError",
@@ -494,8 +503,18 @@ class CommissioningMachine:
     def persist_write_boundary(self, role: str, phase: str) -> None:
         if role not in {"entry", "stop", "cancel", "exit"} or phase not in {"before", "after"}:
             raise CommissioningError("invalid write boundary")
-        self.evidence.boolean_validations[f"{role}_write_{phase}"] = True
-        self.evidence_store.persist(self.evidence)
+        key = f"{role}_write_{phase}"
+        existed = key in self.evidence.boolean_validations
+        previous = self.evidence.boolean_validations.get(key)
+        self.evidence.boolean_validations[key] = True
+        try:
+            self.evidence_store.persist(self.evidence)
+        except Exception:
+            if existed:
+                self.evidence.boolean_validations[key] = previous
+            else:
+                self.evidence.boolean_validations.pop(key, None)
+            raise
 
     def write_attempt_counts(self) -> dict[str, int]:
         return {
