@@ -11,7 +11,8 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from src.live_order_state_model import OrderStateClass, classify_order_state
 from src.one_share_commissioning import (
-    AtomicEvidenceStore, CommissioningError, CommissioningMachine,
+    AtomicEvidenceStore, CommissioningDiagnosticError, CommissioningError,
+    CommissioningMachine, EntryWindowError,
     EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
     RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
     WriteDisposition,
@@ -40,14 +41,14 @@ def validate_commissioning_entry_time(now: datetime) -> None:
     """Require 2026-07-28 from 11:43 through strictly before 12:05 ET."""
 
     if now.tzinfo is None or now.utcoffset() is None or now.tzinfo != EASTERN:
-        raise CommissioningError(
+        raise EntryWindowError(
             "commissioning entry time must use America/New_York"
         )
     local_time = now.time().replace(tzinfo=None)
     if now.date() != COMMISSIONING_EXECUTION_DATE:
-        raise CommissioningError("commissioning execution date mismatch")
+        raise EntryWindowError("commissioning execution date mismatch")
     if not ENTRY_WINDOW_START <= local_time < ENTRY_CUTOFF_EXCLUSIVE:
-        raise CommissioningError(
+        raise EntryWindowError(
             "entry authorization and placement require 11:43 <= time < 12:05 ET"
         )
 
@@ -110,6 +111,7 @@ class OneShareCommissioningOrchestrator:
     regular_market_hours: bool
     machine: CommissioningMachine = field(init=False)
     _last_write: str | None = field(default=None, init=False)
+    _stage: str = field(default="ORCHESTRATOR_INITIALIZATION", init=False)
 
     def __post_init__(self) -> None:
         self.machine = CommissioningMachine(self.run_id, self.evidence_store)
@@ -120,6 +122,11 @@ class OneShareCommissioningOrchestrator:
 
     async def _handoff(self, reason: str, *, position: bool,
                        stop: bool, action: str) -> None:
+        if self.machine.evidence.failure_category == "NONE":
+            self.machine.record_failure_diagnostic(
+                category=self._failure_category(reason), stage=self._stage,
+                error=CommissioningError(reason), operator_action=action,
+            )
         if self.machine.state is not State.OPERATOR_REQUIRED:
             self.machine.operator_required(reason)
         await _maybe_await(self.emergency_handoff(EmergencyHandoff(
@@ -128,6 +135,43 @@ class OneShareCommissioningOrchestrator:
             fixed_one_share=True, expected_operator_action=action,
         )))
         raise OperatorRequired(reason)
+
+    def _failure_category(self, reason: str | None = None) -> str:
+        if reason in {"AMBIGUOUS_ENTRY_SUBMISSION", "AMBIGUOUS_ENTRY_PLACE"}:
+            return "ENTRY_PLACE_AMBIGUOUS"
+        mapping = {
+            "ENTRY_AUTHORIZATION_INPUT": "AUTHORIZATION_INPUT_FAILED",
+            "ENTRY_AUTHORIZATION_CONSUMPTION": "AUTHORIZATION_INPUT_FAILED",
+            "ENTRY_WINDOW_VALIDATION": "ENTRY_WINDOW_REJECTED",
+            "ENTRY_REVIEW": "ENTRY_REVIEW_FAILED_BEFORE_WRITE",
+            "ENTRY_PLACE": "ENTRY_PLACE_AMBIGUOUS",
+            "ENTRY_RECONCILIATION": "RECONCILIATION_FAILED",
+            "STOP_PROTECTION": "STOP_PROTECTION_FAILED",
+            "CANCEL_RECONCILIATION": "CANCEL_RECONCILIATION_FAILED",
+            "FLATTENING": "FLATTEN_FAILED",
+            "FINAL_FLAT_VERIFICATION": "FINAL_FLAT_VERIFICATION_FAILED",
+            "EVIDENCE_INITIALIZATION": "EVIDENCE_PERSISTENCE_FAILED",
+            "PREFLIGHT_RECONCILIATION": "RECONCILIATION_FAILED",
+        }
+        return mapping.get(self._stage, "INTERNAL_INVARIANT_FAILURE")
+
+    async def _fail_closed_before_write(
+        self, category: str, error: BaseException, action: str
+    ) -> None:
+        self.machine.record_failure_diagnostic(
+            category=category, stage=self._stage, error=error,
+            operator_action=action,
+        )
+        if self.machine.state is not State.FAILED_CLOSED:
+            self.machine.failed_closed(category)
+        else:
+            self.machine.evidence.completion_or_failure_reason = category
+            self.machine.evidence_store.persist(self.machine.evidence)
+        await _maybe_await(self.emergency_handoff(EmergencyHandoff(
+            current_state=State.FAILED_CLOSED.value, reason_code=category,
+            position_may_exist=False, stop_may_remain_executable=False,
+            fixed_one_share=True, expected_operator_action=action,
+        )))
 
     async def _authorization(self, stage: str) -> RuntimeAuthorization:
         value = await _maybe_await(self.authorization_provider(stage))
@@ -242,8 +286,16 @@ class OneShareCommissioningOrchestrator:
             except OperatorRequired:
                 return OrchestrationResult(State.OPERATOR_REQUIRED,
                     self.evidence_store.partial / "commissioning_evidence.json")
-        self.machine.start()
+        self._stage = "EVIDENCE_INITIALIZATION"
         try:
+            self.machine.start()
+        except Exception as error:
+            raise CommissioningDiagnosticError(
+                "EVIDENCE_PERSISTENCE_FAILED", self._stage,
+                type(error).__name__,
+            ) from None
+        try:
+            self._stage = "PREFLIGHT_RECONCILIATION"
             self.machine.record_tool_call("get_accounts")
             account = await self.adapter.get_accounts()
             positions = await self._read_positions()
@@ -255,21 +307,31 @@ class OneShareCommissioningOrchestrator:
                 related_open_orders=self._related_nonterminal(orders),
                 regular_market_hours=self.regular_market_hours,
             )
+            self._stage = "ENTRY_REVIEW"
             entry_payload = entry_arguments(self.account_number)
             await self._review("entry", entry_payload)
             self.machine.entry_reviewed(accepted=True)
+            self._stage = "ENTRY_WINDOW_VALIDATION"
+            validate_commissioning_entry_time(self.now_eastern())
+            self._stage = "ENTRY_AUTHORIZATION_INPUT"
+            entry_authorization = await self._authorization("entry")
+            self._stage = "ENTRY_AUTHORIZATION_CONSUMPTION"
             entry_authorization_time = self.now_eastern()
             validate_commissioning_entry_time(entry_authorization_time)
             self.machine.authorize_entry(
-                await self._authorization("entry"),
+                entry_authorization,
                 now=entry_authorization_time,
             )
+            self._stage = "ENTRY_WINDOW_VALIDATION"
             validate_commissioning_entry_time(self.now_eastern())
+            self._stage = "ENTRY_PLACE"
             entry_result = await self._place("entry", entry_payload)
+            self._stage = "ENTRY_RECONCILIATION"
             await self._reconcile_entry(entry_result.server_order_id)
             assert self.machine.expected_stop_price is not None
             stop_payload = stop_arguments(self.account_number,
                                           self.machine.expected_stop_price)
+            self._stage = "STOP_PROTECTION"
             stop_review_started = self.monotonic()
             await self._review("stop", stop_payload)
             self.machine.stop_reviewed(
@@ -278,29 +340,52 @@ class OneShareCommissioningOrchestrator:
             )
             stop_result = await self._place("stop", stop_payload)
             await self._reconcile_stop(stop_result.server_order_id)
+            self._stage = "FLATTENING"
             self.machine.authorize_flatten(await self._authorization("flatten"),
                                            now=self.now_eastern())
+            self._stage = "CANCEL_RECONCILIATION"
             await self._cancel(stop_result.server_order_id)
             await self._reconcile_cancel(stop_result.server_order_id)
+            self._stage = "FLATTENING"
             return await self._finish_after_cancel(stop_result.server_order_id)
         except OperatorRequired:
             return OrchestrationResult(State.OPERATOR_REQUIRED,
                 self.evidence_store.partial / "commissioning_evidence.json")
-        except Exception:
+        except Exception as error:
             position = self._last_write is not None
             stop = self._last_write in {"stop", "cancel", "exit"}
+            category = (
+                "ENTRY_WINDOW_REJECTED"
+                if isinstance(error, EntryWindowError)
+                else self._failure_category()
+            )
+            action = (
+                "Assume manual control and reconcile; never repeat a write automatically."
+                if position else
+                "Stop the run; no broker write boundary was reached."
+            )
             try:
-                await self._handoff(
-                    "INTERRUPTION_AFTER_WRITE_BOUNDARY" if position
-                    else "UNEXPECTED_ORCHESTRATION_FAILURE",
-                    position=position, stop=stop,
-                    action="Assume manual control and reconcile; never repeat a write automatically.",
-                )
+                if position:
+                    self.machine.record_failure_diagnostic(
+                        category=category, stage=self._stage, error=error,
+                        operator_action=action,
+                    )
+                    await self._handoff(category, position=True, stop=stop,
+                                        action=action)
+                else:
+                    await self._fail_closed_before_write(
+                        category, error, action
+                    )
+                    return OrchestrationResult(
+                        State.FAILED_CLOSED,
+                        self.evidence_store.partial / "commissioning_evidence.json",
+                    )
             except OperatorRequired:
                 return OrchestrationResult(State.OPERATOR_REQUIRED,
                     self.evidence_store.partial / "commissioning_evidence.json")
 
     async def _reconcile_entry(self, entry_id: str) -> None:
+        self._stage = "ENTRY_RECONCILIATION"
         started = self.monotonic()
         while True:
             try:
@@ -337,6 +422,7 @@ class OneShareCommissioningOrchestrator:
             await self.sleep(POLL_SECONDS)
 
     async def _reconcile_stop(self, stop_id: str) -> None:
+        self._stage = "STOP_PROTECTION"
         started = self.monotonic()
         while True:
             try:
@@ -377,6 +463,7 @@ class OneShareCommissioningOrchestrator:
                                 action="Inspect and establish protection or flatten manually.")
 
     async def _reconcile_cancel(self, stop_id: str) -> None:
+        self._stage = "CANCEL_RECONCILIATION"
         started = self.monotonic()
         while True:
             try:
@@ -405,6 +492,7 @@ class OneShareCommissioningOrchestrator:
             await self.sleep(POLL_SECONDS)
 
     async def _finish_after_cancel(self, stop_id: str) -> OrchestrationResult:
+        self._stage = "FLATTENING"
         if self.machine.state is State.VERIFIED_FLAT:
             return await self._finalize_flat()
         try:
@@ -435,6 +523,7 @@ class OneShareCommissioningOrchestrator:
         return await self._finalize_flat()
 
     async def _reconcile_exit(self, exit_id: str) -> None:
+        self._stage = "FLATTENING"
         started = self.monotonic()
         while True:
             try:
@@ -474,6 +563,7 @@ class OneShareCommissioningOrchestrator:
             await self.sleep(POLL_SECONDS)
 
     async def _finalize_flat(self) -> OrchestrationResult:
+        self._stage = "FINAL_FLAT_VERIFICATION"
         started = self.monotonic()
         while True:
             try:

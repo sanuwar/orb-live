@@ -85,6 +85,22 @@ types, record counts, completion/failure reason, and `planned_risk_usd=15`.
 - real broker order-state transitions and latency;
 - emergency manual handoff in the Robinhood UI.
 
+Attempt 05 (`cp7c-live-aapl-one-share-20260728-05`) failed after
+`ENTRY_REVIEWED`, during entry-authorization acquisition or input handling and
+before any broker write boundary. The prior generic exception handling did not
+retain enough sanitized detail to distinguish invalid input from an input-reader
+failure. The wrapper and Run ID are permanently retired. The reviewed repair
+adds bounded authorization validity and stage-specific sanitized diagnostics
+without exposing raw exception text or broker-private values.
+
+Another live attempt requires all of the following:
+
+- the reviewed repair merged to `main`;
+- a successful post-incident fake rehearsal;
+- a new execution date and attended window;
+- a new single-use wrapper;
+- a new unused Run ID;
+- separate attended entry and flatten authorizations.
 Real-session mode remains unexecuted, and real broker place/cancel response
 shapes and state transitions remain unvalidated. `strategy.enabled` remains
 false. There is no normal strategy-runner or live `SagaExecutor` binding.

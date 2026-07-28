@@ -19,7 +19,7 @@ from src.robinhood_commissioning_adapter import (
 )
 
 
-NOW = datetime(2026, 7, 28, 11, 55, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 28, 12, 0, tzinfo=EASTERN)
 
 
 class Clock:
@@ -229,6 +229,7 @@ def test_entry_placement_is_rechecked_and_rejected_at_cutoff(tmp_path):
     values = iter(
         [
             datetime(2026, 7, 28, 12, 4, 59, tzinfo=EASTERN),
+            datetime(2026, 7, 28, 12, 4, 59, tzinfo=EASTERN),
             datetime(2026, 7, 28, 12, 5, 0, tzinfo=EASTERN),
         ]
     )
@@ -238,9 +239,11 @@ def test_entry_placement_is_rechecked_and_rejected_at_cutoff(tmp_path):
         adapter,
         now_eastern=lambda: next(values),
     )
-    assert run(instance).state is State.OPERATOR_REQUIRED
+    assert run(instance).state is State.FAILED_CLOSED
     assert adapter.write_roles == []
-    assert handoffs[-1].reason_code == "UNEXPECTED_ORCHESTRATION_FAILURE"
+    assert handoffs[-1].reason_code == "ENTRY_WINDOW_REJECTED"
+    assert instance.machine.evidence.failure_category == "ENTRY_WINDOW_REJECTED"
+    assert instance.machine.evidence.write_boundary_reached is False
 
 
 def test_post_1220_protection_cancellation_and_flattening_continue(tmp_path):
@@ -337,6 +340,19 @@ def test_ambiguous_write_handoffs_without_retry(tmp_path, role):
     expected = 1 if role != "stop" and role != "exit" else {"stop": 2, "exit": 3}[role]
     assert adapter.calls.count(tool) == expected
     assert handoffs[-1].reason_code.startswith("AMBIGUOUS_")
+    categories = {
+        "entry": "ENTRY_PLACE_AMBIGUOUS",
+        "stop": "STOP_PROTECTION_FAILED",
+        "cancel": "CANCEL_RECONCILIATION_FAILED",
+        "exit": "FLATTEN_FAILED",
+    }
+    counter_names = {
+        "entry": "entry_place", "stop": "stop_place",
+        "cancel": "stop_cancel", "exit": "exit_place",
+    }
+    assert instance.machine.evidence.failure_category == categories[role]
+    assert instance.machine.evidence.write_boundary_reached is True
+    assert instance.machine.evidence.write_attempt_counters[counter_names[role]] == 1
 
 
 @pytest.mark.parametrize("mode,reason", [
@@ -378,13 +394,25 @@ def test_flat_position_after_cancel_prevents_exit(tmp_path):
     assert adapter.calls.count("place_equity_order") == 2
 
 
-@pytest.mark.parametrize("boundary", ["entry", "stop", "cancel", "exit"])
-def test_interruption_after_each_write_boundary_never_retries(tmp_path, boundary):
+@pytest.mark.parametrize(
+    "boundary,category",
+    [
+        ("entry", "RECONCILIATION_FAILED"),
+        ("stop", "STOP_PROTECTION_FAILED"),
+        ("cancel", "CANCEL_RECONCILIATION_FAILED"),
+        ("exit", "FLATTEN_FAILED"),
+    ],
+)
+def test_interruption_after_each_write_boundary_never_retries(
+    tmp_path, boundary, category
+):
     instance, adapter, _, handoffs = make_orchestrator(
         tmp_path, FakeAdapter(interrupt_after=boundary)
     )
     assert run(instance).state is State.OPERATOR_REQUIRED
-    assert handoffs[-1].reason_code == "INTERRUPTION_AFTER_WRITE_BOUNDARY"
+    assert handoffs[-1].reason_code == category
+    assert instance.machine.evidence.failure_category == category
+    assert instance.machine.evidence.write_boundary_reached is True
     if boundary == "entry":
         assert adapter.calls.count("place_equity_order") == 1
     elif boundary == "stop":
@@ -414,7 +442,7 @@ def test_completed_run_id_is_rejected(tmp_path):
     first, _, _, _ = make_orchestrator(tmp_path)
     assert run(first).state is State.COMPLETE
     second, _, _, _ = make_orchestrator(tmp_path)
-    with pytest.raises(Exception, match="run ID already used"):
+    with pytest.raises(Exception, match="EVIDENCE_PERSISTENCE_FAILED"):
         run(second)
 
 
