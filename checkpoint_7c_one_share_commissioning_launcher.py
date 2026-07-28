@@ -27,12 +27,12 @@ from src.canonical_source_hash import (
 )
 from src.config import load_config
 from src.one_share_commissioning import (
-    AtomicEvidenceStore,
-    CommissioningError,
+    AtomicEvidenceStore, AuthorizationPhraseMismatchError,
+    AuthorizationReaderError, CommissioningDiagnosticError, CommissioningError,
     EASTERN,
     ENTRY_AUTHORIZATION_PHRASE,
     FLATTEN_AUTHORIZATION_PHRASE,
-    PLANNED_RISK_USD,
+    MAX_AUTHORIZATION_WINDOW_SECONDS, PLANNED_RISK_USD,
     QUANTITY,
     RUN_ID_PATTERN,
     RuntimeAuthorization,
@@ -71,18 +71,23 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/config.py":
         "37669854c3e1dae3c282e787c0af22da9c89ce21fb790a482f4edb2e2db7f1c3",
     "src/one_share_commissioning.py":
-        "f117b636f66a0df19cb66b92750862bc836975e7251b67b9f2f41ef87a3e6293",
+        "15e49cb39ede95a09ee95f2a7e730299624942706ab6eeeb93edbed189869779",
     "src/robinhood_commissioning_adapter.py":
         "aa0349176141410898a08e464ba736a457e00dc450b94a7bce10fb35d34a92b8",
     "src/one_share_commissioning_orchestrator.py":
-        "cb87ce0635d1b0ffdc35abd338a22919446413e177f497c20c1140bf6c1baecf",
+        "19f91a4e95c3b06de565d92a6fd566a8f73654b5b46d42a275a8665142e1d519",
     "src/robinhood_commissioning_session.py":
-        "715442fb58feceade8eee4903e9d52808a4441b1415e1f62cf987d482fa55ddf",
+        "ddbd65700c675f9fbda365cee49202fd78e516df27b67372e267b1e3191e7cb0",
     "src/robinhood_client.py":
         "8e00f808dda3e8741a2fccc6ae5edb42deb4a3761af5eae39304c601cfa1f39e",
 }
 REAL_SESSION_RUNTIME_FLAG = "ENABLE_ATTENDED_ONE_SHARE_COMMISSIONING"
 LIVE_CHECKPOINT_AUTHORIZATION_FLAG = "AUTHORIZE_CHECKPOINT_7C_LIVE"
+RETIRED_LIVE_RUN_IDS = frozenset({
+    "cp7c-live-aapl-one-share-20260728-03",
+    "cp7c-live-aapl-one-share-20260728-04",
+    "cp7c-live-aapl-one-share-20260728-05",
+})
 
 
 def _git_output(root: Path, *arguments: str) -> str:
@@ -203,6 +208,8 @@ def validate_live_run_request(request: LiveRunRequest, *, now: datetime) -> None
         raise CommissioningError("live-checkpoint authorization flag is absent")
     if not RUN_ID_PATTERN.fullmatch(request.run_id):
         raise CommissioningError("run ID is invalid")
+    if request.run_id in RETIRED_LIVE_RUN_IDS:
+        raise CommissioningError("run ID is permanently retired")
     if request.execution_date != COMMISSIONING_EXECUTION_DATE:
         raise CommissioningError("commissioning execution date mismatch")
     if (
@@ -248,29 +255,42 @@ class InteractiveAuthorizationProvider:
         if stage == "entry":
             validate_commissioning_entry_time(current)
             expected = ENTRY_AUTHORIZATION_PHRASE
-            start = datetime.combine(
-                self.request.execution_date,
-                self.request.attended_start,
-                tzinfo=EASTERN,
+            prompt = "Enter the exact single-use entry authorization phrase: "
+        else:
+            expected = FLATTEN_AUTHORIZATION_PHRASE
+            prompt = "Enter the exact separate flatten authorization phrase: "
+        try:
+            supplied = self.secret_reader(prompt)
+            accepted = isinstance(supplied, str) and hmac.compare_digest(
+                supplied, expected
             )
-            end = datetime.combine(
+        except Exception:
+            raise AuthorizationReaderError("AUTHORIZATION_INPUT_FAILED") from None
+        finally:
+            if "supplied" in locals():
+                supplied = ""
+        if not accepted:
+            raise AuthorizationPhraseMismatchError(
+                "AUTHORIZATION_INPUT_FAILED"
+            )
+        accepted_at = self.now_eastern()
+        if accepted_at.tzinfo != EASTERN or accepted_at.date() != self.request.execution_date:
+            raise AuthorizationReaderError("AUTHORIZATION_INPUT_FAILED")
+        if stage == "entry":
+            validate_commissioning_entry_time(accepted_at)
+            cutoff = datetime.combine(
                 self.request.execution_date,
                 self.request.entry_cutoff,
                 tzinfo=EASTERN,
             )
-            prompt = "Enter the exact single-use entry authorization phrase: "
+            start = accepted_at
+            end = min(
+                accepted_at + timedelta(seconds=MAX_AUTHORIZATION_WINDOW_SECONDS),
+                cutoff,
+            )
         else:
-            expected = FLATTEN_AUTHORIZATION_PHRASE
-            start = current
-            end = current + timedelta(minutes=15)
-            prompt = "Enter the exact separate flatten authorization phrase: "
-        supplied = self.secret_reader(prompt)
-        accepted = isinstance(supplied, str) and hmac.compare_digest(
-            supplied, expected
-        )
-        supplied = ""
-        if not accepted:
-            raise CommissioningError("runtime authorization phrase mismatch")
+            start = accepted_at
+            end = accepted_at + timedelta(seconds=MAX_AUTHORIZATION_WINDOW_SECONDS)
         self._used.add(stage)
         return RuntimeAuthorization(
             run_id=self.request.run_id,
@@ -478,6 +498,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except SystemExit:
         print("commissioning_result=FAILED_CLOSED")
+        print("assume manual Robinhood control if any position may exist")
+        return 2
+    except CommissioningDiagnosticError as error:
+        print("commissioning_result=FAILED_CLOSED")
+        print(f"failure_category={error.category}")
+        print(f"failure_stage={error.stage}")
+        print(f"sanitized_exception_type={error.exception_type}")
         print("assume manual Robinhood control if any position may exist")
         return 2
     except Exception:

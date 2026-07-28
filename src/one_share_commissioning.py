@@ -42,6 +42,78 @@ class CommissioningError(RuntimeError):
     """A fail-closed commissioning validation error."""
 
 
+class AuthorizationInputError(CommissioningError):
+    """Interactive authorization failed without retaining supplied input."""
+
+
+class AuthorizationPhraseMismatchError(AuthorizationInputError):
+    """The supplied authorization did not exactly match the expected phrase."""
+
+
+class AuthorizationReaderError(AuthorizationInputError):
+    """The terminal authorization reader failed or reached EOF."""
+
+
+class EntryWindowError(CommissioningError):
+    """The timezone-aware reviewed entry window rejected the operation."""
+
+
+ALLOWED_FAILURE_CATEGORIES = frozenset({
+    "SESSION_INITIALIZATION_FAILED", "SILENT_AUTH_FAILED",
+    "ACCOUNT_RESOLUTION_FAILED", "ACCOUNT_IDENTITY_MISMATCH",
+    "ADAPTER_INITIALIZATION_FAILED", "ORCHESTRATOR_INITIALIZATION_FAILED",
+    "AUTHORIZATION_INPUT_FAILED", "ENTRY_WINDOW_REJECTED",
+    "ENTRY_REVIEW_FAILED_BEFORE_WRITE", "ENTRY_PLACE_AMBIGUOUS",
+    "RECONCILIATION_FAILED", "STOP_PROTECTION_FAILED",
+    "CANCEL_RECONCILIATION_FAILED", "FLATTEN_FAILED",
+    "FINAL_FLAT_VERIFICATION_FAILED", "EVIDENCE_PERSISTENCE_FAILED",
+    "SESSION_CLOSE_FAILED", "INTERNAL_INVARIANT_FAILURE",
+})
+
+ALLOWED_FAILURE_STAGES = frozenset({
+    "SESSION_INITIALIZATION", "SILENT_AUTHENTICATION", "ACCOUNT_RESOLUTION",
+    "ADAPTER_INITIALIZATION", "ORCHESTRATOR_INITIALIZATION",
+    "EVIDENCE_INITIALIZATION", "PREFLIGHT_RECONCILIATION", "ENTRY_REVIEW",
+    "ENTRY_AUTHORIZATION_INPUT", "ENTRY_AUTHORIZATION_CONSUMPTION",
+    "ENTRY_WINDOW_VALIDATION", "ENTRY_PLACE", "ENTRY_RECONCILIATION",
+    "STOP_PROTECTION", "CANCEL_RECONCILIATION", "FLATTENING",
+    "FINAL_FLAT_VERIFICATION", "EVIDENCE_PERSISTENCE", "SESSION_CLOSE",
+    "INTERNAL_INVARIANT",
+})
+
+SAFE_EXCEPTION_TYPES = frozenset({
+    "AccountIdentityMismatchError", "AccountResolutionError",
+    "AuthorizationInputError", "AuthorizationPhraseMismatchError",
+    "AuthorizationReaderError", "BrowserAuthenticationRequestError",
+    "CommissioningError", "CommissioningSessionBindingError",
+    "EntryWindowError", "SilentAuthenticationError",
+    "TimeoutError", "TypeError", "ValueError", "OSError", "RuntimeError",
+})
+
+
+def sanitized_exception_type(error: BaseException) -> str:
+    """Return an allowlisted class name without retaining exception text."""
+
+    name = type(error).__name__
+    return name if name in SAFE_EXCEPTION_TYPES else "UNKNOWN_EXCEPTION"
+
+
+class CommissioningDiagnosticError(CommissioningError):
+    """Sanitized cross-layer failure with no raw exception message."""
+
+    def __init__(self, category: str, stage: str, exception_type: str) -> None:
+        if category not in ALLOWED_FAILURE_CATEGORIES:
+            category = "INTERNAL_INVARIANT_FAILURE"
+        if stage not in ALLOWED_FAILURE_STAGES:
+            stage = "INTERNAL_INVARIANT"
+        if exception_type not in SAFE_EXCEPTION_TYPES | {"UNKNOWN_EXCEPTION"}:
+            exception_type = "UNKNOWN_EXCEPTION"
+        self.category = category
+        self.stage = stage
+        self.exception_type = exception_type
+        super().__init__(category)
+
+
 class State(str, Enum):
     PREFLIGHT = "PREFLIGHT"
     ENTRY_REVIEWED = "ENTRY_REVIEWED"
@@ -282,6 +354,14 @@ class SanitizedEvidence:
     record_counts: dict[str, int] = field(default_factory=dict)
     completion_or_failure_reason: str = "IN_PROGRESS"
     planned_risk_usd: int = 15
+    sanitized_exception_type: str = "NONE"
+    failure_stage: str = "NONE"
+    failure_category: str = "NONE"
+    write_boundary_reached: bool = False
+    write_attempt_counters: dict[str, int] = field(default_factory=lambda: {
+        "entry_place": 0, "stop_place": 0, "stop_cancel": 0, "exit_place": 0,
+    })
+    required_operator_action: str = "NONE"
 
 
 class AtomicEvidenceStore:
@@ -344,6 +424,32 @@ class AtomicEvidenceStore:
         return evidence, last_safe_state
 
 
+def persist_standalone_failure(
+    store: AtomicEvidenceStore,
+    run_id: str,
+    *,
+    category: str,
+    stage: str,
+    error: BaseException,
+    operator_action: str,
+) -> Path:
+    """Persist a sanitized pre-orchestrator failure without broker values."""
+
+    evidence = SanitizedEvidence(run_id=run_id)
+    evidence.state_transitions.append(State.FAILED_CLOSED.value)
+    evidence.normalized_state_names.append(State.FAILED_CLOSED.value)
+    evidence.conservative_classifications.append("FAILED_CLOSED")
+    evidence.completion_or_failure_reason = category
+    evidence.sanitized_exception_type = sanitized_exception_type(error)
+    evidence.failure_stage = stage
+    evidence.failure_category = category
+    evidence.write_boundary_reached = False
+    evidence.required_operator_action = operator_action
+    store.start()
+    store.persist(evidence)
+    return store.partial / "commissioning_evidence.json"
+
+
 @dataclass
 class CommissioningMachine:
     """Strict state machine; broker results enter only as validated facts."""
@@ -397,7 +503,51 @@ class CommissioningMachine:
     def persist_write_boundary(self, role: str, phase: str) -> None:
         if role not in {"entry", "stop", "cancel", "exit"} or phase not in {"before", "after"}:
             raise CommissioningError("invalid write boundary")
-        self.evidence.boolean_validations[f"{role}_write_{phase}"] = True
+        key = f"{role}_write_{phase}"
+        existed = key in self.evidence.boolean_validations
+        previous = self.evidence.boolean_validations.get(key)
+        self.evidence.boolean_validations[key] = True
+        try:
+            self.evidence_store.persist(self.evidence)
+        except Exception:
+            if existed:
+                self.evidence.boolean_validations[key] = previous
+            else:
+                self.evidence.boolean_validations.pop(key, None)
+            raise
+
+    def write_attempt_counts(self) -> dict[str, int]:
+        return {
+            "entry_place": int(self.evidence.boolean_validations.get(
+                "entry_write_before", False)),
+            "stop_place": int(self.evidence.boolean_validations.get(
+                "stop_write_before", False)),
+            "stop_cancel": int(self.evidence.boolean_validations.get(
+                "cancel_write_before", False)),
+            "exit_place": int(self.evidence.boolean_validations.get(
+                "exit_write_before", False)),
+        }
+
+    def record_failure_diagnostic(
+        self,
+        *,
+        category: str,
+        stage: str,
+        error: BaseException,
+        operator_action: str,
+    ) -> None:
+        if category not in ALLOWED_FAILURE_CATEGORIES:
+            category = "INTERNAL_INVARIANT_FAILURE"
+        if stage not in ALLOWED_FAILURE_STAGES:
+            stage = "INTERNAL_INVARIANT"
+        counters = self.write_attempt_counts()
+        self.evidence.sanitized_exception_type = sanitized_exception_type(error)
+        self.evidence.failure_stage = stage
+        self.evidence.failure_category = category
+        self.evidence.write_attempt_counters = counters
+        self.evidence.write_boundary_reached = any(counters.values())
+        self.evidence.required_operator_action = operator_action
+        self.evidence.completion_or_failure_reason = category
         self.evidence_store.persist(self.evidence)
 
     def preflight_passed(self, *, strategy_enabled: bool,

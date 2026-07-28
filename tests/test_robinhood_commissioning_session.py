@@ -6,6 +6,7 @@ import pytest
 
 from src.broker_snapshot import account_fingerprint
 from src.one_share_commissioning import CommissioningError, State
+from src.one_share_commissioning import CommissioningDiagnosticError
 from src.robinhood_commissioning_session import (
     BrowserAuthenticationRequestError,
     CommissionedAccountResolution,
@@ -130,8 +131,10 @@ async def test_exactly_one_session_adapter_orchestrator_and_resolution():
 async def test_session_closes_after_orchestrator_failure():
     factory = SessionFactory()
     instance, _ = binding(factory, resolver_for(), orchestrator_failure=True)
-    with pytest.raises(RuntimeError, match="offline orchestrator failure"):
+    with pytest.raises(CommissioningDiagnosticError) as caught:
         await instance.run()
+    assert caught.value.category == "INTERNAL_INVARIANT_FAILURE"
+    assert "offline orchestrator failure" not in str(caught.value)
     assert factory.enters == 1 and factory.exits == 1
 
 
@@ -141,8 +144,9 @@ async def test_browser_authentication_requirement_fails_closed():
         enter_error=BrowserAuthenticationRequestError("private detail")
     )
     instance, counts = binding(factory, resolver_for())
-    with pytest.raises(CommissioningSessionBindingError, match="Silent") as caught:
+    with pytest.raises(CommissioningDiagnosticError) as caught:
         await instance.run()
+    assert caught.value.category == "SILENT_AUTH_FAILED"
     assert "private detail" not in str(caught.value)
     assert counts == {"adapter": 0, "orchestrator": 0}
 

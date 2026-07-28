@@ -15,7 +15,10 @@ from typing import Any, Callable, Mapping
 from src.broker_identity import CommissionedAccount, load_local_override
 from src.broker_snapshot import account_fingerprint
 from src.config import load_config
-from src.one_share_commissioning import CommissioningError
+from src.one_share_commissioning import (
+    CommissioningDiagnosticError, CommissioningError,
+    persist_standalone_failure, sanitized_exception_type,
+)
 from src.one_share_commissioning_orchestrator import (
     OneShareCommissioningOrchestrator,
     OrchestrationResult,
@@ -38,6 +41,18 @@ class CommissioningSessionBindingError(CommissioningError):
 
 class BrowserAuthenticationRequestError(CommissioningSessionBindingError):
     """The silent session attempted to request interactive authentication."""
+
+
+class SilentAuthenticationError(CommissioningSessionBindingError):
+    """Silent authentication was unavailable; browser fallback is prohibited."""
+
+
+class AccountResolutionError(CommissioningSessionBindingError):
+    """Exactly one commissioned account could not be resolved safely."""
+
+
+class AccountIdentityMismatchError(AccountResolutionError):
+    """The configured commissioned identity did not match."""
 
 
 @dataclass(frozen=True, repr=False)
@@ -80,6 +95,9 @@ class CommissionedAccountResolver:
                 self.config_loader(),
                 local_config=self.local_config_loader(),
             )
+        except Exception:
+            raise AccountResolutionError("ACCOUNT_RESOLUTION_FAILED") from None
+        try:
             result = await session.call_tool("get_accounts", {})
             rows = _response_data(result).get("accounts")
             if not isinstance(rows, list) or any(
@@ -102,17 +120,20 @@ class CommissionedAccountResolver:
                 )
             number = eligible[0].get("account_number")
             if not isinstance(number, str) or not number.strip():
-                raise CommissioningSessionBindingError(
+                raise AccountResolutionError(
                     "Commissioned account identity is unavailable."
                 )
-            commissioned.verify(account_fingerprint(number))
-            return CommissionedAccountResolution(number, result)
-        except CommissioningSessionBindingError:
+        except AccountResolutionError:
             raise
         except Exception:
-            raise CommissioningSessionBindingError(
-                "Commissioned account identity is unavailable or ambiguous."
+            raise AccountResolutionError("ACCOUNT_RESOLUTION_FAILED") from None
+        try:
+            commissioned.verify(account_fingerprint(number))
+        except Exception:
+            raise AccountIdentityMismatchError(
+                "ACCOUNT_IDENTITY_MISMATCH"
             ) from None
+        return CommissionedAccountResolution(number, result)
 
 
 @dataclass
@@ -191,8 +212,8 @@ async def silent_robinhood_session_factory():
         async with client.session() as session:
             yield session
     except BrowserAuthenticationRequestError:
-        raise CommissioningSessionBindingError(
-            "Silent Robinhood authentication is required."
+        raise SilentAuthenticationError(
+            "SILENT_AUTH_FAILED"
         ) from None
 
 
@@ -223,8 +244,10 @@ class RobinhoodCommissioningSessionBinding:
                 "The real-session binding is single-use."
             )
         self._used = True
+        stage = "SESSION_INITIALIZATION"
         try:
             async with self.session_factory() as session:
+                stage = "ACCOUNT_RESOLUTION"
                 resolution = await _maybe_await(
                     self.commissioned_account_resolver(session)
                 )
@@ -232,12 +255,14 @@ class RobinhoodCommissioningSessionBinding:
                     raise CommissioningSessionBindingError(
                         "Commissioned account resolution failed closed."
                     )
+                stage = "ADAPTER_INITIALIZATION"
                 replay_session = _ReplayInitialAccountsSession(
                     session, resolution.initial_accounts_result
                 )
                 adapter = self.adapter_factory(
                     replay_session, resolution.account_number
                 )
+                stage = "ORCHESTRATOR_INITIALIZATION"
                 orchestrator = self.orchestrator_factory(
                     run_id=self.run_id,
                     adapter=adapter,
@@ -250,10 +275,48 @@ class RobinhoodCommissioningSessionBinding:
                     strategy_enabled=False,
                     regular_market_hours=True,
                 )
-                return await orchestrator.run()
-        except BrowserAuthenticationRequestError:
-            raise CommissioningSessionBindingError(
-                "Silent Robinhood authentication is required."
-            ) from None
-        except CommissioningSessionBindingError:
+                stage = "INTERNAL_INVARIANT"
+                result = await orchestrator.run()
+                stage = "SESSION_CLOSE"
+                return result
+        except CommissioningDiagnosticError:
             raise
+        except Exception as error:
+            if isinstance(error, (BrowserAuthenticationRequestError,
+                                  SilentAuthenticationError)):
+                category = "SILENT_AUTH_FAILED"
+                diagnostic_stage = "SILENT_AUTHENTICATION"
+            elif isinstance(error, AccountIdentityMismatchError):
+                category = "ACCOUNT_IDENTITY_MISMATCH"
+                diagnostic_stage = "ACCOUNT_RESOLUTION"
+            elif isinstance(error, (AccountResolutionError,
+                                    CommissioningSessionBindingError)) and stage == "ACCOUNT_RESOLUTION":
+                category = "ACCOUNT_RESOLUTION_FAILED"
+                diagnostic_stage = "ACCOUNT_RESOLUTION"
+            else:
+                categories = {
+                    "SESSION_INITIALIZATION": "SESSION_INITIALIZATION_FAILED",
+                    "ADAPTER_INITIALIZATION": "ADAPTER_INITIALIZATION_FAILED",
+                    "ORCHESTRATOR_INITIALIZATION": "ORCHESTRATOR_INITIALIZATION_FAILED",
+                    "SESSION_CLOSE": "SESSION_CLOSE_FAILED",
+                }
+                category = categories.get(stage, "INTERNAL_INVARIANT_FAILURE")
+                diagnostic_stage = stage
+            partial = getattr(self.evidence_store, "partial", None)
+            completed = getattr(self.evidence_store, "completed", None)
+            if (partial is not None and completed is not None
+                    and not partial.exists() and not completed.exists()):
+                try:
+                    persist_standalone_failure(
+                        self.evidence_store, self.run_id, category=category,
+                        stage=diagnostic_stage, error=error,
+                        operator_action="Stop the run; no broker write boundary was reached.",
+                    )
+                except Exception as persistence_error:
+                    raise CommissioningDiagnosticError(
+                        "EVIDENCE_PERSISTENCE_FAILED", "EVIDENCE_PERSISTENCE",
+                        sanitized_exception_type(persistence_error),
+                    ) from None
+            raise CommissioningDiagnosticError(
+                category, diagnostic_stage, sanitized_exception_type(error)
+            ) from None
