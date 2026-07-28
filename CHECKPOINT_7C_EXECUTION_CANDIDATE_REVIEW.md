@@ -50,13 +50,14 @@ share, `planned_risk_usd=15`, acknowledgment that actual loss may exceed planned
 risk, continuous attendance, Robinhood UI availability, and no second trade.
 
 The reviewed Python path fixes the execution date at 2026-07-28. Entry
-authorization and placement are permitted from 09:35:00 ET through strictly
-before 09:50:00 ET; 09:50:00 is rejected. The placement time is checked again
-immediately before the one entry write. Once entry has been submitted, the
-10:00 nominal attended-window end does not stop protection, reconciliation,
-cancellation, emergency handling, controlled flattening, or final flat
-verification. No post-cutoff or second-entry path exists. These timing controls
-do not guarantee a maximum monetary loss.
+authorization and placement are permitted from 10:30:00 ET through strictly
+before 10:40:00 ET; 10:40:00 is rejected. The placement time is checked again
+immediately before the one entry write. Once entry has been submitted, neither
+the 10:40 entry cutoff nor the 10:50 nominal attended-window end stops entry
+reconciliation, protection, cancellation reconciliation, emergency handling,
+controlled flattening, or final-flat verification. No post-cutoff or
+second-entry path exists. These timing controls do not guarantee a maximum
+monetary loss.
 
 Before and after every write boundary, sanitized state is persisted atomically.
 An interrupted partial run is never resumed and its run ID is never reused; it
