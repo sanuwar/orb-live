@@ -34,7 +34,7 @@ from tests.test_one_share_commissioning_orchestrator import (
 )
 
 
-NOW = datetime(2026, 7, 28, 12, 0, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 28, 15, 35, tzinfo=EASTERN)
 FIXTURE_ACCOUNT = "OFFLINE-COMMISSIONED-ACCOUNT"
 
 
@@ -43,9 +43,9 @@ def live_request(tmp_path, *, run_id="offline-incident-reproduction"):
         run_id=run_id,
         evidence_root=tmp_path,
         execution_date=date(2026, 7, 28),
-        attended_start=time(11, 43),
-        entry_cutoff=time(12, 5),
-        attended_end=time(12, 20),
+        attended_start=time(15, 30),
+        entry_cutoff=time(15, 45),
+        attended_end=time(15, 55),
         symbol="AAPL",
         quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"),
@@ -187,7 +187,7 @@ def test_authorization_window_is_narrow_and_cutoff_bounded(tmp_path):
     ).total_seconds()
     assert 0 < seconds <= 15 * 60
     assert authorization.window_end <= datetime(
-        2026, 7, 28, 12, 5, tzinfo=EASTERN
+        2026, 7, 28, 15, 45, tzinfo=EASTERN
     )
 
 
