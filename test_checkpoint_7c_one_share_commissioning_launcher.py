@@ -18,7 +18,7 @@ from src.one_share_commissioning import (
 
 
 ROOT = Path(__file__).resolve().parent
-NOW = datetime(2026, 7, 28, 11, 32, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 28, 11, 55, tzinfo=EASTERN)
 
 
 def test_direct_launcher_is_inert_and_fail_closed(capsys):
@@ -222,9 +222,9 @@ def live_request(tmp_path, **changes):
         run_id="cp7c-live-aapl-one-share-20260728-01",
         evidence_root=tmp_path,
         execution_date=date(2026, 7, 28),
-        attended_start=time(11, 25),
-        entry_cutoff=time(11, 40),
-        attended_end=time(11, 50),
+        attended_start=time(11, 43),
+        entry_cutoff=time(12, 5),
+        attended_end=time(12, 20),
         symbol="AAPL",
         quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"),
@@ -246,9 +246,9 @@ def live_request(tmp_path, **changes):
         {"live_checkpoint_flag": ""},
         {"run_id": "../bad"},
         {"execution_date": date(2026, 7, 29)},
-        {"attended_start": time(11, 26)},
-        {"entry_cutoff": time(11, 41)},
-        {"attended_end": time(11, 51)},
+        {"attended_start": time(11, 44)},
+        {"entry_cutoff": time(12, 6)},
+        {"attended_end": time(12, 21)},
         {"symbol": "MSFT"},
         {"quantity": Decimal("2")},
         {"planned_risk_usd": Decimal("14")},
