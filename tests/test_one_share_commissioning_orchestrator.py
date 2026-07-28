@@ -19,7 +19,7 @@ from src.robinhood_commissioning_adapter import (
 )
 
 
-NOW = datetime(2026, 7, 28, 10, 35, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 28, 11, 10, tzinfo=EASTERN)
 
 
 class Clock:
@@ -197,11 +197,11 @@ def run(instance):
 @pytest.mark.parametrize(
     "observed,permitted",
     [
-        (datetime(2026, 7, 28, 10, 29, 59, tzinfo=EASTERN), False),
-        (datetime(2026, 7, 28, 10, 30, 0, tzinfo=EASTERN), True),
-        (datetime(2026, 7, 28, 10, 39, 59, tzinfo=EASTERN), True),
-        (datetime(2026, 7, 28, 10, 40, 0, tzinfo=EASTERN), False),
-        (datetime(2026, 7, 28, 10, 50, 1, tzinfo=EASTERN), False),
+        (datetime(2026, 7, 28, 10, 59, 59, tzinfo=EASTERN), False),
+        (datetime(2026, 7, 28, 11, 0, 0, tzinfo=EASTERN), True),
+        (datetime(2026, 7, 28, 11, 19, 59, tzinfo=EASTERN), True),
+        (datetime(2026, 7, 28, 11, 20, 0, tzinfo=EASTERN), False),
+        (datetime(2026, 7, 28, 11, 30, 1, tzinfo=EASTERN), False),
     ],
 )
 def test_strict_entry_time_boundaries(observed, permitted):
@@ -215,9 +215,9 @@ def test_strict_entry_time_boundaries(observed, permitted):
 @pytest.mark.parametrize(
     "observed",
     [
-        datetime(2026, 7, 28, 10, 35),
-        datetime(2026, 7, 28, 14, 35, tzinfo=timezone.utc),
-        datetime(2026, 7, 29, 10, 35, tzinfo=EASTERN),
+        datetime(2026, 7, 28, 11, 10),
+        datetime(2026, 7, 28, 15, 10, tzinfo=timezone.utc),
+        datetime(2026, 7, 29, 11, 10, tzinfo=EASTERN),
     ],
 )
 def test_entry_time_requires_aware_eastern_clock_and_exact_date(observed):
@@ -228,8 +228,8 @@ def test_entry_time_requires_aware_eastern_clock_and_exact_date(observed):
 def test_entry_placement_is_rechecked_and_rejected_at_cutoff(tmp_path):
     values = iter(
         [
-            datetime(2026, 7, 28, 10, 39, 59, tzinfo=EASTERN),
-            datetime(2026, 7, 28, 10, 40, 0, tzinfo=EASTERN),
+            datetime(2026, 7, 28, 11, 19, 59, tzinfo=EASTERN),
+            datetime(2026, 7, 28, 11, 20, 0, tzinfo=EASTERN),
         ]
     )
     adapter = FakeAdapter()
@@ -243,21 +243,26 @@ def test_entry_placement_is_rechecked_and_rejected_at_cutoff(tmp_path):
     assert handoffs[-1].reason_code == "UNEXPECTED_ORCHESTRATION_FAILURE"
 
 
-def test_post_1050_protection_and_flattening_continue(tmp_path):
-    values = iter(
-        [
-            datetime(2026, 7, 28, 10, 39, 58, tzinfo=EASTERN),
-            datetime(2026, 7, 28, 10, 39, 59, tzinfo=EASTERN),
-            datetime(2026, 7, 28, 10, 51, 0, tzinfo=EASTERN),
-        ]
-    )
+def test_post_1130_protection_and_flattening_continue(tmp_path):
+    current = {
+        "value": datetime(2026, 7, 28, 11, 19, 59, tzinfo=EASTERN)
+    }
+
+    class AdvanceAfterEntryAdapter(FakeAdapter):
+        async def place_equity_order(self, arguments, *, role):
+            result = await super().place_equity_order(arguments, role=role)
+            if role == "entry":
+                current["value"] = datetime(
+                    2026, 7, 28, 11, 31, 0, tzinfo=EASTERN
+                )
+            return result
 
     def provider(stage):
         if stage == "entry":
             return RuntimeAuthorization(
                 run_id="run-1", eastern_date=date(2026, 7, 28),
-                window_start=datetime(2026, 7, 28, 10, 30, tzinfo=EASTERN),
-                window_end=datetime(2026, 7, 28, 10, 40, tzinfo=EASTERN),
+                window_start=datetime(2026, 7, 28, 11, 15, tzinfo=EASTERN),
+                window_end=datetime(2026, 7, 28, 11, 20, tzinfo=EASTERN),
                 phrase=ENTRY_AUTHORIZATION_PHRASE, symbol="AAPL",
                 quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
                 acknowledges_loss_may_exceed_plan=True, operator_present=True,
@@ -265,8 +270,8 @@ def test_post_1050_protection_and_flattening_continue(tmp_path):
             )
         return RuntimeAuthorization(
             run_id="run-1", eastern_date=date(2026, 7, 28),
-            window_start=datetime(2026, 7, 28, 10, 51, tzinfo=EASTERN),
-            window_end=datetime(2026, 7, 28, 11, 6, tzinfo=EASTERN),
+            window_start=datetime(2026, 7, 28, 11, 31, tzinfo=EASTERN),
+            window_end=datetime(2026, 7, 28, 11, 46, tzinfo=EASTERN),
             phrase=FLATTEN_AUTHORIZATION_PHRASE, symbol="AAPL",
             quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
             acknowledges_loss_may_exceed_plan=True, operator_present=True,
@@ -275,7 +280,8 @@ def test_post_1050_protection_and_flattening_continue(tmp_path):
 
     instance, adapter, _, handoffs = make_orchestrator(
         tmp_path,
-        now_eastern=lambda: next(values),
+        adapter=AdvanceAfterEntryAdapter(),
+        now_eastern=lambda: current["value"],
         authorization_provider=provider,
     )
     assert run(instance).state is State.COMPLETE
