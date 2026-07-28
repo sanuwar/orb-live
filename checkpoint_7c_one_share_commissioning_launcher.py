@@ -75,7 +75,7 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/robinhood_commissioning_adapter.py":
         "aa0349176141410898a08e464ba736a457e00dc450b94a7bce10fb35d34a92b8",
     "src/one_share_commissioning_orchestrator.py":
-        "b7dd6bf56277a4f6ef9dbbfb35d7ac924e906e7a8056f13f66b3971a85df264a",
+        "2483aaa472a8c451d066a07bcc135a6e9e1d0e566aed954892b2ffa9282665db",
     "src/robinhood_commissioning_session.py":
         "715442fb58feceade8eee4903e9d52808a4441b1415e1f62cf987d482fa55ddf",
     "src/robinhood_client.py":
