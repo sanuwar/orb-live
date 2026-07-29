@@ -26,6 +26,10 @@ WRITE_TOOLS = frozenset({"place_equity_order", "cancel_equity_order"})
 class AmbiguousWriteError(CommissioningError):
     """A write did not produce a schema-valid result; operator control is required."""
 
+    def __init__(self, category: str = "WRITE_RESULT_AMBIGUOUS") -> None:
+        self.category = category
+        super().__init__(category)
+
 
 class BrokerRejectedError(CommissioningError):
     """The broker returned an explicit rejection rather than an ambiguous result."""
@@ -153,14 +157,29 @@ class RobinhoodCommissioningAdapter:
         async def invoke() -> Mapping[str, Any]:
             try:
                 result = await self.session.call_tool(allowed, dict(arguments))
+            except BrokerRejectedError:
+                raise
+            except Exception as exc:
+                if allowed in WRITE_TOOLS:
+                    category = (
+                        "ENTRY_PLACE_TRANSPORT_AMBIGUOUS"
+                        if write_key == "place:entry"
+                        else "WRITE_RESULT_AMBIGUOUS"
+                    )
+                    raise AmbiguousWriteError(category) from exc
+                raise CommissioningError("read operation failed") from exc
+            try:
                 return _data(result)
             except BrokerRejectedError:
                 raise
             except Exception as exc:
                 if allowed in WRITE_TOOLS:
-                    raise AmbiguousWriteError(
-                        "write result is ambiguous; operator required"
-                    ) from exc
+                    category = (
+                        "ENTRY_PLACE_RESPONSE_MALFORMED"
+                        if write_key == "place:entry"
+                        else "WRITE_RESULT_AMBIGUOUS"
+                    )
+                    raise AmbiguousWriteError(category) from exc
                 raise CommissioningError("read operation failed") from exc
 
         if allowed in WRITE_TOOLS:
@@ -275,7 +294,12 @@ class RobinhoodCommissioningAdapter:
         try:
             parsed = parse_place_response({"data": data, "guide": "commissioning response"})
         except Exception as exc:
-            raise AmbiguousWriteError("place response contract rejected; operator required") from exc
+            category = (
+                "ENTRY_PLACE_RESPONSE_MALFORMED"
+                if role == "entry"
+                else "WRITE_RESULT_AMBIGUOUS"
+            )
+            raise AmbiguousWriteError(category) from exc
         expected_side, expected_type, expected_duration = {
             "entry": ("buy", "market", "gfd"),
             "stop": ("sell", "stop_market", "gtc"),
@@ -292,7 +316,12 @@ class RobinhoodCommissioningAdapter:
             parsed.time_in_force.lower() == expected_duration,
             parsed.market_hours.lower() == "regular_hours",
         )):
-            raise AmbiguousWriteError("place response identity mismatch; operator required")
+            category = (
+                "ENTRY_PLACE_RESPONSE_MALFORMED"
+                if role == "entry"
+                else "WRITE_RESULT_AMBIGUOUS"
+            )
+            raise AmbiguousWriteError(category)
         if role == "stop" and parsed.stop_price != _decimal_text(arguments["stop_price"]):
             raise AmbiguousWriteError("place response stop mismatch; operator required")
         return parsed

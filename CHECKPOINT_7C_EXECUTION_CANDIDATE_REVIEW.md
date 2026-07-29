@@ -27,7 +27,7 @@ The only live tools are `get_accounts`, `get_equity_positions`,
 `cancel_equity_order`.
 
 The run sequence is: account/position/order preflight; entry review; entry
-authorization; one entry place; exact-ID order/position reconciliation; one-share
+authorization; one entry place; order/position reconciliation; one-share
 fill confirmation; stop review; one stop place; exact-ID stop/position
 reconciliation; provisional protection observation; flatten authorization; one
 stop cancel; exact-ID cancellation reconciliation; if still long one with the
@@ -37,6 +37,16 @@ final verification of zero position with no related nonterminal order.
 Read-only order/position polling may repeat within monotonic deadlines. Maximum
 writes are one entry place, one stop place, one stop cancel, and one exit place.
 Writes are serialized and never automatically retried.
+
+After an entry-place result that may have crossed the broker write boundary but
+did not yield a validated response, the entry write is never repeated. Bounded
+read-only reconciliation compares subsequent orders against the preflight
+order-ID baseline retained transiently in memory. The flow may proceed only
+when exactly one new fixed-policy AAPL buy is uniquely attributable and its
+recognized state, quantities, and latest position are internally consistent.
+A position-only observation is retained but is insufficient to proceed without
+the matching validated order and fill data. Multiple matches, missing
+attribution, inconsistency, or timeout require operator control.
 
 ## Runtime controls and recovery
 
@@ -95,6 +105,18 @@ retain enough sanitized detail to distinguish invalid input from an input-reader
 failure. The wrapper and Run ID are permanently retired. The reviewed repair
 adds bounded authorization validity and stage-specific sanitized diagnostics
 without exposing raw exception text or broker-private values.
+
+Attempt `cp7c-live-aapl-one-share-20260729-02` reached the entry write boundary
+once and returned `AMBIGUOUS_ENTRY_SUBMISSION`. The retained evidence proves
+that no validated place result reached the orchestrator and that no post-write
+order or position read occurred. It cannot recover whether the initiating
+subcause was transport failure, response-schema rejection, or response-identity
+rejection. The operator subsequently observed the entry fill, manually exited
+one share, and observed a flat account; those remain operator observations.
+The reviewed repair adds the conservative post-write reconciliation described
+above, permanent Run-ID retirement, and distinct sanitized ambiguity
+categories. A complete broker-free incident rehearsal reached `VERIFIED_FLAT`
+and `COMPLETE` with one write per role and no emergency handoff.
 
 Another live attempt requires all of the following:
 
