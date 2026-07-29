@@ -69,6 +69,18 @@ ALLOWED_FAILURE_CATEGORIES = frozenset({
     "ENTRY_RECONCILIATION_NOT_FOUND",
     "ENTRY_RECONCILIATION_INCONSISTENT", "ENTRY_RECONCILIATION_TIMEOUT",
     "RECONCILIATION_FAILED", "STOP_PROTECTION_FAILED",
+    "STOP_PLACE_ACCEPTED_PENDING", "STOP_PLACE_ACCEPTED_OPEN",
+    "STOP_PLACE_ACCEPTED_TRIGGERED", "STOP_PLACE_ACCEPTED_FILLED",
+    "STOP_PLACE_RESPONSE_MALFORMED", "STOP_PLACE_TRANSPORT_AMBIGUOUS",
+    "STOP_RECONCILED_BY_ORDER", "STOP_RECONCILED_BY_POSITION_AND_ORDER",
+    "STOP_ALREADY_FILLED_POSITION_FLAT",
+    "STOP_RECONCILIATION_MULTIPLE_MATCHES",
+    "STOP_RECONCILIATION_WRONG_QUANTITY",
+    "STOP_RECONCILIATION_WRONG_SIDE", "STOP_RECONCILIATION_WRONG_SYMBOL",
+    "STOP_RECONCILIATION_CONFLICTING_ORDER",
+    "STOP_RECONCILIATION_NOT_FOUND", "STOP_RECONCILIATION_INCONSISTENT",
+    "STOP_RECONCILIATION_TIMEOUT", "STOP_PARTIALLY_FILLED",
+    "STOP_CANCEL_PENDING", "STOP_CANCEL_CONFIRMED",
     "CANCEL_RECONCILIATION_FAILED", "FLATTEN_FAILED",
     "FINAL_FLAT_VERIFICATION_FAILED", "EVIDENCE_PERSISTENCE_FAILED",
     "SESSION_CLOSE_FAILED", "INTERNAL_INVARIANT_FAILURE",
@@ -544,6 +556,58 @@ class CommissioningMachine:
         ) + 1
         self.evidence_store.persist(self.evidence)
 
+    def record_stop_reconciliation(
+        self,
+        category: str,
+        *,
+        normalized_order_state: str | None = None,
+        attribution_unique: bool | None = None,
+        candidate_count: int | None = None,
+    ) -> None:
+        allowed = {
+            "STOP_PLACE_ACCEPTED_PENDING", "STOP_PLACE_ACCEPTED_OPEN",
+            "STOP_PLACE_ACCEPTED_TRIGGERED", "STOP_PLACE_ACCEPTED_FILLED",
+            "STOP_PLACE_RESPONSE_MALFORMED",
+            "STOP_PLACE_TRANSPORT_AMBIGUOUS",
+            "STOP_RECONCILED_BY_ORDER",
+            "STOP_RECONCILED_BY_POSITION_AND_ORDER",
+            "STOP_ALREADY_FILLED_POSITION_FLAT",
+            "STOP_RECONCILIATION_MULTIPLE_MATCHES",
+            "STOP_RECONCILIATION_WRONG_QUANTITY",
+            "STOP_RECONCILIATION_WRONG_SIDE",
+            "STOP_RECONCILIATION_WRONG_SYMBOL",
+            "STOP_RECONCILIATION_CONFLICTING_ORDER",
+            "STOP_RECONCILIATION_NOT_FOUND",
+            "STOP_RECONCILIATION_INCONSISTENT",
+            "STOP_RECONCILIATION_TIMEOUT",
+            "STOP_PARTIALLY_FILLED", "STOP_CANCEL_PENDING",
+            "STOP_CANCEL_CONFIRMED",
+        }
+        if category not in allowed:
+            raise CommissioningError("stop reconciliation category is invalid")
+        self.evidence.conservative_classifications.append(category)
+        if normalized_order_state is not None:
+            self.evidence.normalized_state_names.append(normalized_order_state)
+        if attribution_unique is not None:
+            self.evidence.boolean_validations[
+                "stop_attribution_unique"
+            ] = attribution_unique
+        if candidate_count is not None:
+            self.evidence.record_counts[
+                "stop_reconciliation_candidate_count"
+            ] = candidate_count
+        self.evidence.record_counts["stop_place_retries"] = 0
+        self.evidence_store.persist(self.evidence)
+
+    def record_stop_reconciliation_read(self, kind: str) -> None:
+        if kind not in {"orders", "positions"}:
+            raise CommissioningError("stop reconciliation read kind is invalid")
+        key = f"stop_reconciliation_{kind}_reads"
+        self.evidence.record_counts[key] = self.evidence.record_counts.get(
+            key, 0
+        ) + 1
+        self.evidence_store.persist(self.evidence)
+
     def persist_write_boundary(self, role: str, phase: str) -> None:
         if role not in {"entry", "stop", "cancel", "exit"} or phase not in {"before", "after"}:
             raise CommissioningError("invalid write boundary")
@@ -728,6 +792,28 @@ class CommissioningMachine:
             self.operator_required("AMBIGUOUS_STOP_SUBMISSION")
         else:
             self.operator_required("STOP_SUBMISSION_REJECTED")
+
+    def stop_filled_before_protection(
+        self,
+        *,
+        cumulative_quantity: object,
+        remaining_quantity: object,
+        position_quantity: object,
+    ) -> None:
+        self._require(State.STOP_RECONCILING)
+        cumulative = decimal_value(cumulative_quantity)
+        remaining = decimal_value(remaining_quantity)
+        position = decimal_value(position_quantity)
+        checks = {
+            "stop_filled_quantity_one": cumulative == QUANTITY,
+            "stop_filled_remaining_zero": remaining == Decimal("0"),
+            "stop_filled_position_flat": position == Decimal("0"),
+        }
+        self.evidence.boolean_validations.update(checks)
+        if not all(checks.values()):
+            self.operator_required("STOP_RECONCILIATION_INCONSISTENT")
+            return
+        self._record_state(State.VERIFIED_FLAT)
 
     def protection_observed(self, *, order: OrderObservation,
                             position_quantity: object,
