@@ -133,6 +133,21 @@ failed wrapper and Run ID are permanently retired. Broker-free pending-stop and
 filled-stop rehearsals both reached `VERIFIED_FLAT` and `COMPLETE` with no
 emergency handoff.
 
+Attempt `cp7c-live-aapl-one-share-20260729-04` reached a uniquely
+reconciled provisional protective stop and crossed the stop-cancel write
+boundary once. The retained evidence records zero post-cancel order reads and
+zero post-cancel position reads. It cannot distinguish a transport exception
+from a malformed cancel response, and it cannot establish whether the agent or
+operator caused the later terminal cancellation. The reviewed repair now
+classifies those ambiguity subtypes separately and performs bounded exact-order
+and position reconciliation without repeating cancel. Request acceptance is not
+treated as cancellation completion. Exit remains prohibited until terminal
+cancellation is confirmed; a filled stop with uniquely confirmed flatness
+causes no exit. The broker-free repaired-cancel rehearsal reached
+`VERIFIED_FLAT` and `COMPLETE` with one write per role, zero cancel retries, no
+unresolved orders, and no emergency handoff. A separate filled-stop scenario
+completed with no exit. The failed wrapper and Run ID are permanently retired.
+
 Another live attempt requires all of the following:
 
 - the reviewed repair merged to `main`;

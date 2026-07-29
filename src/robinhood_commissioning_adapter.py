@@ -167,7 +167,11 @@ class RobinhoodCommissioningAdapter:
                         else (
                             "STOP_PLACE_TRANSPORT_AMBIGUOUS"
                             if write_key == "place:stop"
-                            else "WRITE_RESULT_AMBIGUOUS"
+                            else (
+                                "STOP_CANCEL_TRANSPORT_AMBIGUOUS"
+                                if write_key == "cancel:stop"
+                                else "WRITE_RESULT_AMBIGUOUS"
+                            )
                         )
                     )
                     raise AmbiguousWriteError(category) from exc
@@ -184,7 +188,11 @@ class RobinhoodCommissioningAdapter:
                         else (
                             "STOP_PLACE_RESPONSE_MALFORMED"
                             if write_key == "place:stop"
-                            else "WRITE_RESULT_AMBIGUOUS"
+                            else (
+                                "STOP_CANCEL_RESPONSE_MALFORMED"
+                                if write_key == "cancel:stop"
+                                else "WRITE_RESULT_AMBIGUOUS"
+                            )
                         )
                     )
                     raise AmbiguousWriteError(category) from exc
@@ -352,4 +360,4 @@ class RobinhoodCommissioningAdapter:
         try:
             return parse_cancel_response({"data": data, "guide": "commissioning response"})
         except Exception as exc:
-            raise AmbiguousWriteError("cancel response contract rejected; operator required") from exc
+            raise AmbiguousWriteError("STOP_CANCEL_RESPONSE_MALFORMED") from exc
