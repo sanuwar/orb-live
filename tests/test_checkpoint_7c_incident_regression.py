@@ -30,11 +30,11 @@ from src.robinhood_commissioning_session import (
 )
 from tests.test_one_share_commissioning_orchestrator import (
     Clock,
-    FakeAdapter,
+    FakeAdapter, TIME_POLICY,
 )
 
 
-NOW = datetime(2026, 7, 28, 15, 35, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
 FIXTURE_ACCOUNT = "OFFLINE-COMMISSIONED-ACCOUNT"
 
 
@@ -42,10 +42,12 @@ def live_request(tmp_path, *, run_id="offline-incident-reproduction"):
     return launcher.LiveRunRequest(
         run_id=run_id,
         evidence_root=tmp_path,
-        execution_date=date(2026, 7, 28),
-        attended_start=time(15, 30),
-        entry_cutoff=time(15, 45),
-        attended_end=time(15, 55),
+        execution_date=date(2026, 7, 29),
+        attended_start=time(10, 35),
+        entry_cutoff=time(11, 0),
+        mandatory_risk_off=time(11, 10),
+        verified_flat_deadline=time(11, 15),
+        attended_end=time(11, 20),
         symbol="AAPL",
         quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"),
@@ -111,6 +113,7 @@ def actual_binding(
     store = AtomicEvidenceStore(tmp_path, run_id)
     binding = RobinhoodCommissioningSessionBinding(
         run_id=run_id,
+        time_policy=TIME_POLICY,
         session_factory=factory,
         commissioned_account_resolver=resolver,
         monotonic=Clock().monotonic,
@@ -187,7 +190,7 @@ def test_authorization_window_is_narrow_and_cutoff_bounded(tmp_path):
     ).total_seconds()
     assert 0 < seconds <= 15 * 60
     assert authorization.window_end <= datetime(
-        2026, 7, 28, 15, 45, tzinfo=EASTERN
+        2026, 7, 29, 11, 0, tzinfo=EASTERN
     )
 
 
@@ -226,6 +229,7 @@ def test_failure_before_entry_review_is_classified_without_write(tmp_path):
     store = AtomicEvidenceStore(tmp_path, "review-failure")
     orchestrator = OneShareCommissioningOrchestrator(
         run_id="review-failure",
+        time_policy=TIME_POLICY,
         adapter=BeforeReviewFailureAdapter(),
         monotonic=clock.monotonic,
         sleep=clock.sleep,
@@ -249,6 +253,7 @@ def test_failure_during_entry_review_is_classified_without_write(tmp_path):
     store = AtomicEvidenceStore(tmp_path, "review-call-failure")
     orchestrator = OneShareCommissioningOrchestrator(
         run_id="review-call-failure",
+        time_policy=TIME_POLICY,
         adapter=ReviewFailureAdapter(),
         monotonic=clock.monotonic,
         sleep=clock.sleep,
@@ -281,6 +286,7 @@ def test_ambiguous_entry_is_one_write_and_operator_required(tmp_path):
     store = AtomicEvidenceStore(tmp_path, request.run_id)
     orchestrator = OneShareCommissioningOrchestrator(
         run_id=request.run_id,
+        time_policy=TIME_POLICY,
         adapter=FakeAdapter(ambiguous_role="entry"),
         monotonic=clock.monotonic,
         sleep=clock.sleep,
@@ -347,6 +353,7 @@ def test_pre_orchestrator_failures_are_typed_and_close_sessions(
 
     binding = RobinhoodCommissioningSessionBinding(
         run_id=f"failure-{stage}",
+        time_policy=TIME_POLICY,
         session_factory=(
             (lambda: (_ for _ in ()).throw(RuntimeError("private")))
             if stage == "session"
@@ -383,6 +390,7 @@ def test_session_close_failure_is_sanitized(tmp_path):
 
     binding = RobinhoodCommissioningSessionBinding(
         run_id="close-failure",
+        time_policy=TIME_POLICY,
         session_factory=factory,
         commissioned_account_resolver=lambda session: CommissionedAccountResolution(
             FIXTURE_ACCOUNT, {}
@@ -440,6 +448,7 @@ def test_failed_before_write_marker_does_not_claim_a_write(tmp_path):
     adapter = FakeAdapter()
     orchestrator = OneShareCommissioningOrchestrator(
         run_id="boundary-persist-failure", adapter=adapter,
+        time_policy=TIME_POLICY,
         monotonic=clock.monotonic, sleep=clock.sleep,
         now_eastern=lambda: NOW, authorization_provider=provider,
         evidence_store=store, emergency_handoff=lambda payload: None,

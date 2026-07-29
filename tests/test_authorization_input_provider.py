@@ -9,15 +9,16 @@ from src.one_share_commissioning import (
     CommissioningError, EASTERN, ENTRY_AUTHORIZATION_PHRASE,
 )
 
-NOW = datetime(2026, 7, 28, 15, 35, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
 
 
 def request(tmp_path, run_id="fake-authorization-provider"):
     return launcher.LiveRunRequest(
         run_id=run_id, evidence_root=tmp_path,
-        execution_date=date(2026, 7, 28),
-        attended_start=time(15, 30), entry_cutoff=time(15, 45),
-        attended_end=time(15, 55), symbol="AAPL", quantity=Decimal("1"),
+        execution_date=date(2026, 7, 29),
+        attended_start=time(10, 35), entry_cutoff=time(11, 0),
+        mandatory_risk_off=time(11, 10),
+        verified_flat_deadline=time(11, 15), attended_end=time(11, 20), symbol="AAPL", quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"), acknowledges_loss_may_exceed_plan=True,
         operator_present=True, robinhood_ui_open=True, no_second_trade=True,
         real_session_flag=launcher.REAL_SESSION_RUNTIME_FLAG,

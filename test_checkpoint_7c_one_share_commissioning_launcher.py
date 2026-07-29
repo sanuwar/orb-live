@@ -1,5 +1,6 @@
+import argparse
 import asyncio
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 
 import checkpoint_7c_one_share_commissioning_launcher as launcher
 from src.canonical_source_hash import canonical_source_sha256
+from src.one_share_commissioning_orchestrator import CommissioningTimePolicy
 from src.one_share_commissioning import (
     CommissioningError,
     EASTERN,
@@ -18,7 +20,15 @@ from src.one_share_commissioning import (
 
 
 ROOT = Path(__file__).resolve().parent
-NOW = datetime(2026, 7, 28, 15, 35, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
+TIME_POLICY = CommissioningTimePolicy(
+    execution_date=date(2026, 7, 29),
+    entry_start=datetime(2026, 7, 29, 10, 35, tzinfo=EASTERN),
+    entry_cutoff=datetime(2026, 7, 29, 11, 0, tzinfo=EASTERN),
+    mandatory_risk_off=datetime(2026, 7, 29, 11, 10, tzinfo=EASTERN),
+    verified_flat_deadline=datetime(2026, 7, 29, 11, 15, tzinfo=EASTERN),
+    attended_end=datetime(2026, 7, 29, 11, 20, tzinfo=EASTERN),
+)
 
 
 def test_direct_launcher_is_inert_and_fail_closed(capsys):
@@ -148,6 +158,7 @@ def launcher_kwargs(tmp_path):
         authorization_provider=lambda stage: None,
         emergency_handoff=lambda payload: None,
         strategy_enabled=False,
+        time_policy=TIME_POLICY,
     )
 
 
@@ -219,12 +230,14 @@ def test_launcher_fake_mode_rejects_unmarked_session(tmp_path):
 
 def live_request(tmp_path, **changes):
     values = dict(
-        run_id="cp7c-live-aapl-one-share-20260728-01",
+        run_id="cp7c-live-aapl-one-share-20260729-test",
         evidence_root=tmp_path,
-        execution_date=date(2026, 7, 28),
-        attended_start=time(15, 30),
-        entry_cutoff=time(15, 45),
-        attended_end=time(15, 55),
+        execution_date=date(2026, 7, 29),
+        attended_start=time(10, 35),
+        entry_cutoff=time(11, 0),
+        mandatory_risk_off=time(11, 10),
+        verified_flat_deadline=time(11, 15),
+        attended_end=time(11, 20),
         symbol="AAPL",
         quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"),
@@ -240,15 +253,37 @@ def live_request(tmp_path, **changes):
 
 
 @pytest.mark.parametrize(
+    "field,value",
+    [
+        ("attended_start", time(10, 35, tzinfo=timezone.utc)),
+        ("entry_cutoff", time(11, 0, tzinfo=timezone.utc)),
+    ],
+)
+def test_live_request_rejects_offset_bearing_runtime_times(
+    tmp_path, field, value
+):
+    with pytest.raises(CommissioningError):
+        live_request(tmp_path, **{field: value}).time_policy()
+
+
+@pytest.mark.parametrize("value", ["bad", "10:35:00-04:00"])
+def test_runtime_time_parser_fails_closed(value):
+    with pytest.raises(argparse.ArgumentTypeError):
+        launcher._parse_time(value)
+
+
+@pytest.mark.parametrize(
     "changes",
     [
         {"real_session_flag": ""},
         {"live_checkpoint_flag": ""},
         {"run_id": "../bad"},
-        {"execution_date": date(2026, 7, 29)},
-        {"attended_start": time(11, 44)},
-        {"entry_cutoff": time(12, 6)},
-        {"attended_end": time(15, 56)},
+        {"execution_date": date(2026, 7, 30)},
+        {"attended_start": time(11, 0)},
+        {"entry_cutoff": time(10, 35)},
+        {"mandatory_risk_off": time(10, 59)},
+        {"verified_flat_deadline": time(11, 9)},
+        {"attended_end": time(11, 14)},
         {"symbol": "MSFT"},
         {"quantity": Decimal("2")},
         {"planned_risk_usd": Decimal("14")},
@@ -311,6 +346,7 @@ def test_real_session_execution_constructs_exactly_one_binding(
     )
     assert result.state is State.COMPLETE
     assert len(created) == 1
+    assert created[0]["time_policy"] == live_request(tmp_path).time_policy()
     output = capsys.readouterr().out
     assert "commissioning_state=COMPLETE" in output
     assert "account" not in output.lower()

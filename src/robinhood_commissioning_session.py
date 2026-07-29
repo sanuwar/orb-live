@@ -20,7 +20,7 @@ from src.one_share_commissioning import (
     persist_standalone_failure, sanitized_exception_type,
 )
 from src.one_share_commissioning_orchestrator import (
-    OneShareCommissioningOrchestrator,
+    CommissioningTimePolicy, OneShareCommissioningOrchestrator,
     OrchestrationResult,
 )
 from src.robinhood_client import (
@@ -226,6 +226,7 @@ class RobinhoodCommissioningSessionBinding:
     """Own exactly one session, adapter, orchestrator, and commissioning run."""
 
     run_id: str
+    time_policy: CommissioningTimePolicy
     session_factory: Callable[[], Any]
     commissioned_account_resolver: Callable[[Any], Any]
     monotonic: Callable[[], float]
@@ -274,6 +275,7 @@ class RobinhoodCommissioningSessionBinding:
                     emergency_handoff=self.emergency_handoff,
                     strategy_enabled=False,
                     regular_market_hours=True,
+                    time_policy=self.time_policy,
                 )
                 stage = "INTERNAL_INVARIANT"
                 result = await orchestrator.run()

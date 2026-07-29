@@ -40,10 +40,7 @@ from src.one_share_commissioning import (
     SYMBOL,
 )
 from src.one_share_commissioning_orchestrator import (
-    COMMISSIONING_EXECUTION_DATE,
-    ENTRY_CUTOFF_EXCLUSIVE,
-    ENTRY_WINDOW_START,
-    NOMINAL_ATTENDED_WINDOW_END,
+    CommissioningTimePolicy,
     OneShareCommissioningOrchestrator,
     OrchestrationResult,
     entry_arguments,
@@ -75,9 +72,9 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/robinhood_commissioning_adapter.py":
         "aa0349176141410898a08e464ba736a457e00dc450b94a7bce10fb35d34a92b8",
     "src/one_share_commissioning_orchestrator.py":
-        "0ef71806340869175c16e49cd2604e29da28f8ce38fe089a8c34ee8ba1422e13",
+        "fb815d67ddf218dd8fc14884f8665316171e4e74629758ab5a1a38050edd707c",
     "src/robinhood_commissioning_session.py":
-        "ddbd65700c675f9fbda365cee49202fd78e516df27b67372e267b1e3191e7cb0",
+        "a7e0367de955eb26695f6e61c99b0c99cfdab869c042cd9fcddf209b7065c4e1",
     "src/robinhood_client.py":
         "8e00f808dda3e8741a2fccc6ae5edb42deb4a3761af5eae39304c601cfa1f39e",
 }
@@ -189,6 +186,8 @@ class LiveRunRequest:
     execution_date: date
     attended_start: time
     entry_cutoff: time
+    mandatory_risk_off: time
+    verified_flat_deadline: time
     attended_end: time
     symbol: str
     quantity: Decimal
@@ -200,6 +199,23 @@ class LiveRunRequest:
     real_session_flag: str
     live_checkpoint_flag: str
 
+    def time_policy(self) -> CommissioningTimePolicy:
+        def combine(value: time) -> datetime:
+            if value.tzinfo is not None:
+                raise CommissioningError(
+                    'commissioning time values must not include an offset'
+                )
+            return datetime.combine(self.execution_date, value, tzinfo=EASTERN)
+
+        return CommissioningTimePolicy(
+            execution_date=self.execution_date,
+            entry_start=combine(self.attended_start),
+            entry_cutoff=combine(self.entry_cutoff),
+            mandatory_risk_off=combine(self.mandatory_risk_off),
+            verified_flat_deadline=combine(self.verified_flat_deadline),
+            attended_end=combine(self.attended_end),
+        )
+
 
 def validate_live_run_request(request: LiveRunRequest, *, now: datetime) -> None:
     if request.real_session_flag != REAL_SESSION_RUNTIME_FLAG:
@@ -210,14 +226,7 @@ def validate_live_run_request(request: LiveRunRequest, *, now: datetime) -> None
         raise CommissioningError("run ID is invalid")
     if request.run_id in RETIRED_LIVE_RUN_IDS:
         raise CommissioningError("run ID is permanently retired")
-    if request.execution_date != COMMISSIONING_EXECUTION_DATE:
-        raise CommissioningError("commissioning execution date mismatch")
-    if (
-        request.attended_start != ENTRY_WINDOW_START
-        or request.entry_cutoff != ENTRY_CUTOFF_EXCLUSIVE
-        or request.attended_end != NOMINAL_ATTENDED_WINDOW_END
-    ):
-        raise CommissioningError("commissioning attended window mismatch")
+    policy = request.time_policy()
     if (
         request.symbol != SYMBOL
         or request.quantity != QUANTITY
@@ -233,7 +242,7 @@ def validate_live_run_request(request: LiveRunRequest, *, now: datetime) -> None
         )
     ):
         raise CommissioningError("commissioning acknowledgments are incomplete")
-    validate_commissioning_entry_time(now)
+    validate_commissioning_entry_time(now, policy)
     store = AtomicEvidenceStore(request.evidence_root, request.run_id)
     if store.completed.exists() or store.partial.exists():
         raise CommissioningError("run ID has already been used")
@@ -253,7 +262,7 @@ class InteractiveAuthorizationProvider:
         if current.tzinfo != EASTERN or current.date() != self.request.execution_date:
             raise CommissioningError("runtime authorization date or timezone mismatch")
         if stage == "entry":
-            validate_commissioning_entry_time(current)
+            validate_commissioning_entry_time(current, self.request.time_policy())
             expected = ENTRY_AUTHORIZATION_PHRASE
             prompt = "Enter the exact single-use entry authorization phrase: "
         else:
@@ -277,7 +286,7 @@ class InteractiveAuthorizationProvider:
         if accepted_at.tzinfo != EASTERN or accepted_at.date() != self.request.execution_date:
             raise AuthorizationReaderError("AUTHORIZATION_INPUT_FAILED")
         if stage == "entry":
-            validate_commissioning_entry_time(accepted_at)
+            validate_commissioning_entry_time(accepted_at, self.request.time_policy())
             cutoff = datetime.combine(
                 self.request.execution_date,
                 self.request.entry_cutoff,
@@ -323,6 +332,7 @@ async def execute_commissioning(
     authorization_provider: Any,
     emergency_handoff: Any,
     strategy_enabled: bool,
+    time_policy: CommissioningTimePolicy,
     mode: str = "blocked",
     runtime_flag: str = "",
     real_session_authorized: bool = False,
@@ -358,6 +368,7 @@ async def execute_commissioning(
         emergency_handoff=emergency_handoff,
         strategy_enabled=strategy_enabled,
         regular_market_hours=True,
+        time_policy=time_policy,
     )
     result = await orchestrator.run()
     print(f"commissioning_state={result.state.value}")
@@ -394,6 +405,7 @@ async def execute_real_session(
     resolver = commissioned_account_resolver or CommissionedAccountResolver()
     binding = binding_factory(
         run_id=request.run_id,
+        time_policy=request.time_policy(),
         session_factory=session_factory,
         commissioned_account_resolver=resolver,
         monotonic=monotonic,
@@ -425,9 +437,14 @@ def _parse_date(value: str) -> date:
 
 def _parse_time(value: str) -> time:
     try:
-        return time.fromisoformat(value)
+        parsed = time.fromisoformat(value)
     except ValueError:
         raise argparse.ArgumentTypeError("time must use HH:MM[:SS]") from None
+    if parsed.tzinfo is not None:
+        raise argparse.ArgumentTypeError(
+            "time must use HH:MM[:SS] without an offset"
+        )
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -441,6 +458,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--execution-date", required=True, type=_parse_date)
     parser.add_argument("--attended-start", required=True, type=_parse_time)
     parser.add_argument("--entry-cutoff", required=True, type=_parse_time)
+    parser.add_argument("--mandatory-risk-off", required=True, type=_parse_time)
+    parser.add_argument("--verified-flat-deadline", required=True, type=_parse_time)
     parser.add_argument("--attended-end", required=True, type=_parse_time)
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--quantity", required=True, type=Decimal)
@@ -461,6 +480,8 @@ def request_from_namespace(value: argparse.Namespace) -> LiveRunRequest:
         execution_date=value.execution_date,
         attended_start=value.attended_start,
         entry_cutoff=value.entry_cutoff,
+        mandatory_risk_off=value.mandatory_risk_off,
+        verified_flat_deadline=value.verified_flat_deadline,
         attended_end=value.attended_end,
         symbol=value.symbol,
         quantity=value.quantity,

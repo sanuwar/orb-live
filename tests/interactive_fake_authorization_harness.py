@@ -28,10 +28,10 @@ from src.one_share_commissioning import (
     FLATTEN_AUTHORIZATION_PHRASE, State,
 )
 from src.one_share_commissioning_orchestrator import OneShareCommissioningOrchestrator
-from tests.test_one_share_commissioning_orchestrator import Clock, FakeAdapter
+from tests.test_one_share_commissioning_orchestrator import Clock, FakeAdapter, TIME_POLICY
 
 FAKE_AUTHORIZATION_PHRASE = "FAKE AUTHORIZATION ACCEPTED"
-NOW = datetime(2026, 7, 28, 15, 35, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
 FAKE_ACCOUNT = "OFFLINE-FAKE-COMMISSIONED-ACCOUNT"
 
 
@@ -56,9 +56,10 @@ class FakeSessionFactory:
 def fake_request(root: Path, run_id: str) -> launcher.LiveRunRequest:
     return launcher.LiveRunRequest(
         run_id=run_id, evidence_root=root,
-        execution_date=date(2026, 7, 28),
-        attended_start=time(15, 30), entry_cutoff=time(15, 45),
-        attended_end=time(15, 55), symbol="AAPL", quantity=Decimal("1"),
+        execution_date=date(2026, 7, 29),
+        attended_start=time(10, 35), entry_cutoff=time(11, 0),
+        mandatory_risk_off=time(11, 10),
+        verified_flat_deadline=time(11, 15), attended_end=time(11, 20), symbol="AAPL", quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"), acknowledges_loss_may_exceed_plan=True,
         operator_present=True, robinhood_ui_open=True, no_second_trade=True,
         real_session_flag="FAKE_ONLY_NO_REAL_SESSION",
@@ -127,6 +128,7 @@ async def run_case(case: str, root: Path, run_id: str) -> int:
             authorization_provider=authorization_provider,
             evidence_store=store, emergency_handoff=emergency_handoffs.append,
             strategy_enabled=False, regular_market_hours=True,
+            time_policy=TIME_POLICY,
         )
         result = await orchestrator.run()
     evidence_path = (

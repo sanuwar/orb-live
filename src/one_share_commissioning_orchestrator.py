@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
@@ -27,48 +27,72 @@ POLL_SECONDS = 1.0
 STOP_CANCEL_DEADLINE_SECONDS = 30
 EXIT_FILL_DEADLINE_SECONDS = 30
 FINAL_FLAT_DEADLINE_SECONDS = 15
-COMMISSIONING_EXECUTION_DATE = date(2026, 7, 28)
-ENTRY_WINDOW_START = time(15, 30)
-ENTRY_CUTOFF_EXCLUSIVE = time(15, 45)
-MANDATORY_RISK_OFF_TIME = time(15, 50)
-VERIFIED_FLAT_DEADLINE = time(15, 55)
-NOMINAL_ATTENDED_WINDOW_END = VERIFIED_FLAT_DEADLINE
+
+
+@dataclass(frozen=True)
+class CommissioningTimePolicy:
+    execution_date: date
+    entry_start: datetime
+    entry_cutoff: datetime
+    mandatory_risk_off: datetime
+    verified_flat_deadline: datetime
+    attended_end: datetime
+
+    def __post_init__(self) -> None:
+        values = (
+            self.entry_start, self.entry_cutoff, self.mandatory_risk_off,
+            self.verified_flat_deadline, self.attended_end,
+        )
+        if any(
+            value.tzinfo is None or value.utcoffset() is None
+            or value.tzinfo != EASTERN
+            for value in values
+        ):
+            raise EntryWindowError(
+                "commissioning policy must use America/New_York"
+            )
+        if any(value.date() != self.execution_date for value in values):
+            raise EntryWindowError(
+                "commissioning policy values must use the execution date"
+            )
+        if not (
+            self.entry_start < self.entry_cutoff < self.mandatory_risk_off
+            <= self.verified_flat_deadline <= self.attended_end
+        ):
+            raise EntryWindowError("commissioning policy ordering is invalid")
 
 
 class OperatorRequired(CommissioningError):
-    """Internal control-flow marker after durable emergency handoff."""
+    pass
 
-
-def validate_commissioning_entry_time(now: datetime) -> None:
-    """Require 2026-07-28 from 15:30 through strictly before 15:45 ET."""
-
-    if now.tzinfo is None or now.utcoffset() is None or now.tzinfo != EASTERN:
-        raise EntryWindowError(
-            "commissioning entry time must use America/New_York"
-        )
-    local_time = now.time().replace(tzinfo=None)
-    if now.date() != COMMISSIONING_EXECUTION_DATE:
-        raise EntryWindowError("commissioning execution date mismatch")
-    if not ENTRY_WINDOW_START <= local_time < ENTRY_CUTOFF_EXCLUSIVE:
-        raise EntryWindowError(
-            "entry authorization and placement require 15:30 <= time < 15:45 ET"
-        )
-
-
-def _validated_policy_time(now: datetime) -> time:
+def _validated_policy_time(
+    now: datetime, policy: CommissioningTimePolicy
+) -> datetime:
     if now.tzinfo is None or now.utcoffset() is None or now.tzinfo != EASTERN:
         raise EntryWindowError("commissioning runtime must use America/New_York")
-    if now.date() != COMMISSIONING_EXECUTION_DATE:
+    if now.date() != policy.execution_date:
         raise EntryWindowError("commissioning execution date mismatch")
-    return now.time().replace(tzinfo=None)
+    return now
 
 
-def mandatory_risk_off_due(now: datetime) -> bool:
-    return _validated_policy_time(now) >= MANDATORY_RISK_OFF_TIME
+def validate_commissioning_entry_time(
+    now: datetime, policy: CommissioningTimePolicy
+) -> None:
+    current = _validated_policy_time(now, policy)
+    if not policy.entry_start <= current < policy.entry_cutoff:
+        raise EntryWindowError("commissioning entry time is outside policy")
 
 
-def verified_flat_deadline_reached(now: datetime) -> bool:
-    return _validated_policy_time(now) >= VERIFIED_FLAT_DEADLINE
+def mandatory_risk_off_due(
+    now: datetime, policy: CommissioningTimePolicy
+) -> bool:
+    return _validated_policy_time(now, policy) >= policy.mandatory_risk_off
+
+
+def verified_flat_deadline_reached(
+    now: datetime, policy: CommissioningTimePolicy
+) -> bool:
+    return _validated_policy_time(now, policy) >= policy.verified_flat_deadline
 
 
 @dataclass(frozen=True)
@@ -127,6 +151,7 @@ class OneShareCommissioningOrchestrator:
     emergency_handoff: Callable[[EmergencyHandoff], Any]
     strategy_enabled: bool
     regular_market_hours: bool
+    time_policy: CommissioningTimePolicy
     machine: CommissioningMachine = field(init=False)
     _last_write: str | None = field(default=None, init=False)
     _stage: str = field(default="ORCHESTRATOR_INITIALIZATION", init=False)
@@ -224,7 +249,7 @@ class OneShareCommissioningOrchestrator:
         self, *, position: bool, stop: bool, action: str
     ) -> None:
         try:
-            expired = verified_flat_deadline_reached(self.now_eastern())
+            expired = verified_flat_deadline_reached(self.now_eastern(), self.time_policy)
         except EntryWindowError:
             await self._handoff(
                 "FINAL_FLAT_VERIFICATION_FAILED", position=position, stop=stop,
@@ -355,18 +380,18 @@ class OneShareCommissioningOrchestrator:
             await self._review("entry", entry_payload)
             self.machine.entry_reviewed(accepted=True)
             self._stage = "ENTRY_WINDOW_VALIDATION"
-            validate_commissioning_entry_time(self.now_eastern())
+            validate_commissioning_entry_time(self.now_eastern(), self.time_policy)
             self._stage = "ENTRY_AUTHORIZATION_INPUT"
             entry_authorization = await self._authorization("entry")
             self._stage = "ENTRY_AUTHORIZATION_CONSUMPTION"
             entry_authorization_time = self.now_eastern()
-            validate_commissioning_entry_time(entry_authorization_time)
+            validate_commissioning_entry_time(entry_authorization_time, self.time_policy)
             self.machine.authorize_entry(
                 entry_authorization,
                 now=entry_authorization_time,
             )
             self._stage = "ENTRY_WINDOW_VALIDATION"
-            validate_commissioning_entry_time(self.now_eastern())
+            validate_commissioning_entry_time(self.now_eastern(), self.time_policy)
             self._stage = "ENTRY_PLACE"
             entry_result = await self._place("entry", entry_payload)
             self._stage = "ENTRY_RECONCILIATION"
@@ -459,7 +484,7 @@ class OneShareCommissioningOrchestrator:
                 await self._handoff(self.machine.evidence.completion_or_failure_reason,
                                     position=True, stop=False,
                                     action="Inspect the entry and position; do not retry placement.")
-            if mandatory_risk_off_due(self.now_eastern()):
+            if mandatory_risk_off_due(self.now_eastern(), self.time_policy):
                 await self._handoff(
                     "MANDATORY_RISK_OFF_ENTRY_UNRESOLVED", position=True, stop=False,
                     action="Take immediate manual control; cancel or flatten safely.",
@@ -507,7 +532,7 @@ class OneShareCommissioningOrchestrator:
             )
             if result.provisional:
                 return
-            if mandatory_risk_off_due(self.now_eastern()):
+            if mandatory_risk_off_due(self.now_eastern(), self.time_policy):
                 await self._handoff(
                     "MANDATORY_RISK_OFF_PROTECTION_UNRESOLVED",
                     position=True, stop=True,

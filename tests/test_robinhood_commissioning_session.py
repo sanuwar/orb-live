@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.test_one_share_commissioning_orchestrator import TIME_POLICY
+
 from src.broker_snapshot import account_fingerprint
 from src.one_share_commissioning import CommissioningError, State
 from src.one_share_commissioning import CommissioningDiagnosticError
@@ -98,6 +100,7 @@ def binding(factory, resolver, *, orchestrator_failure=False):
 
     instance = RobinhoodCommissioningSessionBinding(
         run_id="offline-run",
+        time_policy=TIME_POLICY,
         session_factory=factory,
         commissioned_account_resolver=resolver,
         monotonic=lambda: 0.0,

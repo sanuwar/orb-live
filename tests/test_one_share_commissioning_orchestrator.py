@@ -10,7 +10,7 @@ from src.one_share_commissioning import (
     FLATTEN_AUTHORIZATION_PHRASE, RuntimeAuthorization, State,
 )
 from src.one_share_commissioning_orchestrator import (
-    OneShareCommissioningOrchestrator,
+    CommissioningTimePolicy, OneShareCommissioningOrchestrator,
     validate_commissioning_entry_time,
 )
 from src.robinhood_commissioning_adapter import (
@@ -19,7 +19,15 @@ from src.robinhood_commissioning_adapter import (
 )
 
 
-NOW = datetime(2026, 7, 28, 15, 35, tzinfo=EASTERN)
+NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
+TIME_POLICY = CommissioningTimePolicy(
+    execution_date=date(2026, 7, 29),
+    entry_start=datetime(2026, 7, 29, 10, 35, tzinfo=EASTERN),
+    entry_cutoff=datetime(2026, 7, 29, 11, 0, tzinfo=EASTERN),
+    mandatory_risk_off=datetime(2026, 7, 29, 11, 10, tzinfo=EASTERN),
+    verified_flat_deadline=datetime(2026, 7, 29, 11, 15, tzinfo=EASTERN),
+    attended_end=datetime(2026, 7, 29, 11, 20, tzinfo=EASTERN),
+)
 
 
 class Clock:
@@ -39,7 +47,7 @@ def authorization(run_id, stage):
     phrase = (ENTRY_AUTHORIZATION_PHRASE if stage == "entry"
               else FLATTEN_AUTHORIZATION_PHRASE)
     return RuntimeAuthorization(
-        run_id=run_id, eastern_date=date(2026, 7, 28),
+        run_id=run_id, eastern_date=date(2026, 7, 29),
         window_start=NOW - timedelta(minutes=5), window_end=NOW + timedelta(minutes=10),
         phrase=phrase, symbol="AAPL", quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"), acknowledges_loss_may_exceed_plan=True,
@@ -186,6 +194,7 @@ def make_orchestrator(
         evidence_store=AtomicEvidenceStore(tmp_path, run_id),
         emergency_handoff=handoffs.append, strategy_enabled=False,
         regular_market_hours=True,
+        time_policy=TIME_POLICY,
     )
     return instance, adapter, clock, handoffs
 
@@ -197,47 +206,57 @@ def run(instance):
 @pytest.mark.parametrize(
     "observed,permitted",
     [
-        (datetime(2026, 7, 28, 15, 29, 59, tzinfo=EASTERN), False),
-        (datetime(2026, 7, 28, 15, 30, 0, tzinfo=EASTERN), True),
-        (datetime(2026, 7, 28, 15, 44, 59, tzinfo=EASTERN), True),
-        (datetime(2026, 7, 28, 15, 45, 0, tzinfo=EASTERN), False),
-        (datetime(2026, 7, 28, 15, 55, 1, tzinfo=EASTERN), False),
+        (datetime(2026, 7, 29, 10, 34, 59, tzinfo=EASTERN), False),
+        (datetime(2026, 7, 29, 10, 35, 0, tzinfo=EASTERN), True),
+        (datetime(2026, 7, 29, 10, 59, 59, tzinfo=EASTERN), True),
+        (datetime(2026, 7, 29, 11, 0, 0, tzinfo=EASTERN), False),
+        (datetime(2026, 7, 29, 11, 15, 1, tzinfo=EASTERN), False),
     ],
 )
 def test_strict_entry_time_boundaries(observed, permitted):
     if permitted:
-        validate_commissioning_entry_time(observed)
+        validate_commissioning_entry_time(observed, TIME_POLICY)
     else:
         with pytest.raises(CommissioningError):
-            validate_commissioning_entry_time(observed)
+            validate_commissioning_entry_time(observed, TIME_POLICY)
 
 
 @pytest.mark.parametrize(
     "observed",
     [
-        datetime(2026, 7, 28, 15, 35),
-        datetime(2026, 7, 28, 15, 55, tzinfo=timezone.utc),
-        datetime(2026, 7, 29, 15, 35, tzinfo=EASTERN),
+        datetime(2026, 7, 29, 10, 40),
+        datetime(2026, 7, 29, 11, 15, tzinfo=timezone.utc),
+        datetime(2026, 7, 30, 10, 40, tzinfo=EASTERN),
     ],
 )
 def test_entry_time_requires_aware_eastern_clock_and_exact_date(observed):
     with pytest.raises(CommissioningError):
-        validate_commissioning_entry_time(observed)
+        validate_commissioning_entry_time(observed, TIME_POLICY)
 
 
 def test_entry_placement_is_rechecked_and_rejected_at_cutoff(tmp_path):
     values = iter(
         [
-            datetime(2026, 7, 28, 15, 44, 59, tzinfo=EASTERN),
-            datetime(2026, 7, 28, 15, 44, 59, tzinfo=EASTERN),
-            datetime(2026, 7, 28, 15, 45, 0, tzinfo=EASTERN),
+            datetime(2026, 7, 29, 10, 59, 59, tzinfo=EASTERN),
+            datetime(2026, 7, 29, 10, 59, 59, tzinfo=EASTERN),
+            datetime(2026, 7, 29, 11, 0, 0, tzinfo=EASTERN),
         ]
     )
     adapter = FakeAdapter()
+    entry_authorization = RuntimeAuthorization(
+        run_id="run-1", eastern_date=date(2026, 7, 29),
+        window_start=datetime(2026, 7, 29, 10, 45, tzinfo=EASTERN),
+        window_end=datetime(2026, 7, 29, 11, 0, tzinfo=EASTERN),
+        phrase=ENTRY_AUTHORIZATION_PHRASE, symbol="AAPL",
+        quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
+        acknowledges_loss_may_exceed_plan=True, operator_present=True,
+        robinhood_ui_available=True, no_second_trade=True,
+    )
     instance, adapter, _, handoffs = make_orchestrator(
         tmp_path,
         adapter,
         now_eastern=lambda: next(values),
+        authorization_provider=lambda stage: entry_authorization,
     )
     assert run(instance).state is State.FAILED_CLOSED
     assert adapter.write_roles == []
@@ -246,9 +265,9 @@ def test_entry_placement_is_rechecked_and_rejected_at_cutoff(tmp_path):
     assert instance.machine.evidence.write_boundary_reached is False
 
 
-def test_at_1550_protection_cancellation_and_flattening_continue(tmp_path):
+def test_at_1110_protection_cancellation_and_flattening_continue(tmp_path):
     current = {
-        "value": datetime(2026, 7, 28, 15, 44, 59, tzinfo=EASTERN)
+        "value": datetime(2026, 7, 29, 10, 59, 59, tzinfo=EASTERN)
     }
 
     class AdvanceAfterEntryAdapter(FakeAdapter):
@@ -256,25 +275,25 @@ def test_at_1550_protection_cancellation_and_flattening_continue(tmp_path):
             result = await super().place_equity_order(arguments, role=role)
             if role == "entry":
                 current["value"] = datetime(
-                    2026, 7, 28, 15, 50, 0, tzinfo=EASTERN
+                    2026, 7, 29, 11, 10, 0, tzinfo=EASTERN
                 )
             return result
 
     def provider(stage):
         if stage == "entry":
             return RuntimeAuthorization(
-                run_id="run-1", eastern_date=date(2026, 7, 28),
-                window_start=datetime(2026, 7, 28, 15, 35, tzinfo=EASTERN),
-                window_end=datetime(2026, 7, 28, 15, 45, tzinfo=EASTERN),
+                run_id="run-1", eastern_date=date(2026, 7, 29),
+                window_start=datetime(2026, 7, 29, 10, 45, tzinfo=EASTERN),
+                window_end=datetime(2026, 7, 29, 11, 0, tzinfo=EASTERN),
                 phrase=ENTRY_AUTHORIZATION_PHRASE, symbol="AAPL",
                 quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
                 acknowledges_loss_may_exceed_plan=True, operator_present=True,
                 robinhood_ui_available=True, no_second_trade=True,
             )
         return RuntimeAuthorization(
-            run_id="run-1", eastern_date=date(2026, 7, 28),
-            window_start=datetime(2026, 7, 28, 15, 50, tzinfo=EASTERN),
-            window_end=datetime(2026, 7, 28, 15, 55, tzinfo=EASTERN),
+            run_id="run-1", eastern_date=date(2026, 7, 29),
+            window_start=datetime(2026, 7, 29, 11, 10, tzinfo=EASTERN),
+            window_end=datetime(2026, 7, 29, 11, 15, tzinfo=EASTERN),
             phrase=FLATTEN_AUTHORIZATION_PHRASE, symbol="AAPL",
             quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
             acknowledges_loss_may_exceed_plan=True, operator_present=True,
@@ -462,14 +481,14 @@ def test_emergency_handoff_payload_is_sanitized(tmp_path):
         assert prohibited not in rendered
 
 def test_unresolved_entry_at_mandatory_risk_off_requires_operator(tmp_path):
-    current = {"value": datetime(2026, 7, 28, 15, 44, 59, tzinfo=EASTERN)}
+    current = {"value": datetime(2026, 7, 29, 10, 49, 59, tzinfo=EASTERN)}
 
     class AdvanceAtEntryAdapter(FakeAdapter):
         async def place_equity_order(self, arguments, *, role):
             result = await super().place_equity_order(arguments, role=role)
             if role == "entry":
                 current["value"] = datetime(
-                    2026, 7, 28, 15, 50, 0, tzinfo=EASTERN
+                    2026, 7, 29, 11, 10, 0, tzinfo=EASTERN
                 )
             return result
 
@@ -483,13 +502,13 @@ def test_unresolved_entry_at_mandatory_risk_off_requires_operator(tmp_path):
 
 
 def test_unresolved_cancel_at_flat_deadline_adds_no_exit_write(tmp_path):
-    current = {"value": datetime(2026, 7, 28, 15, 44, 59, tzinfo=EASTERN)}
+    current = {"value": datetime(2026, 7, 29, 10, 49, 59, tzinfo=EASTERN)}
 
     class AdvanceAtCancelAdapter(FakeAdapter):
         async def cancel_equity_order(self, arguments):
             result = await super().cancel_equity_order(arguments)
             current["value"] = datetime(
-                2026, 7, 28, 15, 55, 0, tzinfo=EASTERN
+                2026, 7, 29, 11, 15, 0, tzinfo=EASTERN
             )
             return result
 
