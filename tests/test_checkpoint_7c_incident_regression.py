@@ -300,10 +300,12 @@ def test_ambiguous_entry_is_one_write_and_operator_required(tmp_path):
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")
     assert result.state is State.OPERATOR_REQUIRED
-    assert evidence["failure_category"] == "ENTRY_PLACE_AMBIGUOUS"
+    assert evidence["failure_category"] == "ENTRY_RECONCILIATION_TIMEOUT"
     assert evidence["write_boundary_reached"] is True
     assert evidence["write_attempt_counters"]["entry_place"] == 1
     assert evidence["call_counts"]["place_equity_order"] == 1
+    assert evidence["call_counts"]["get_equity_orders"] > 1
+    assert evidence["call_counts"]["get_equity_positions"] > 1
     rendered = json.dumps(evidence)
     assert "entry-1" not in rendered
     assert FIXTURE_ACCOUNT not in rendered
@@ -414,11 +416,15 @@ def test_session_close_failure_is_sanitized(tmp_path):
     assert evidence["write_boundary_reached"] is False
 
 
-def test_retired_failed_run_id_is_never_reusable(tmp_path):
-    request = live_request(
-        tmp_path,
-        run_id="cp7c-live-aapl-one-share-20260728-05",
-    )
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "cp7c-live-aapl-one-share-20260728-05",
+        "cp7c-live-aapl-one-share-20260729-02",
+    ],
+)
+def test_retired_failed_run_id_is_never_reusable(tmp_path, run_id):
+    request = live_request(tmp_path, run_id=run_id)
     with pytest.raises(Exception, match="permanently retired"):
         launcher.validate_live_run_request(request, now=NOW)
 class FailOnceAtEntryBoundaryStore(AtomicEvidenceStore):

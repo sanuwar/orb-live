@@ -165,7 +165,12 @@ class FakeAdapter:
         if self.ambiguous_role == role:
             raise AmbiguousWriteError("ambiguous")
         self.phase = role
-        return SimpleNamespace(server_order_id=f"{role}-1")
+        state = (
+            "confirmed"
+            if role == "entry" and self.entry_mode == "pending"
+            else "filled"
+        )
+        return SimpleNamespace(server_order_id=f"{role}-1", state=state)
 
     async def cancel_equity_order(self, arguments):
         self._record("cancel_equity_order")
@@ -358,9 +363,12 @@ def test_ambiguous_write_handoffs_without_retry(tmp_path, role):
     tool = "cancel_equity_order" if role == "cancel" else "place_equity_order"
     expected = 1 if role != "stop" and role != "exit" else {"stop": 2, "exit": 3}[role]
     assert adapter.calls.count(tool) == expected
-    assert handoffs[-1].reason_code.startswith("AMBIGUOUS_")
+    if role == "entry":
+        assert handoffs[-1].reason_code == "ENTRY_RECONCILIATION_TIMEOUT"
+    else:
+        assert handoffs[-1].reason_code.startswith("AMBIGUOUS_")
     categories = {
-        "entry": "ENTRY_PLACE_AMBIGUOUS",
+        "entry": "ENTRY_RECONCILIATION_TIMEOUT",
         "stop": "STOP_PROTECTION_FAILED",
         "cancel": "CANCEL_RECONCILIATION_FAILED",
         "exit": "FLATTEN_FAILED",

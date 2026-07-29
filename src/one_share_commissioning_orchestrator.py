@@ -11,7 +11,8 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from src.live_order_state_model import OrderStateClass, classify_order_state
 from src.one_share_commissioning import (
-    AtomicEvidenceStore, CommissioningDiagnosticError, CommissioningError,
+    ALLOWED_FAILURE_CATEGORIES, AtomicEvidenceStore,
+    CommissioningDiagnosticError, CommissioningError,
     CommissioningMachine, EntryWindowError,
     EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
     RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
@@ -180,6 +181,8 @@ class OneShareCommissioningOrchestrator:
         raise OperatorRequired(reason)
 
     def _failure_category(self, reason: str | None = None) -> str:
+        if reason in ALLOWED_FAILURE_CATEGORIES:
+            return reason
         if reason in {"AMBIGUOUS_ENTRY_SUBMISSION", "AMBIGUOUS_ENTRY_PLACE"}:
             return "ENTRY_PLACE_AMBIGUOUS"
         mapping = {
@@ -285,10 +288,10 @@ class OneShareCommissioningOrchestrator:
         try:
             result = await self.adapter.place_equity_order(arguments, role=role)
         except AmbiguousWriteError:
-            disposition = WriteDisposition.AMBIGUOUS
             if role == "entry":
-                self.machine.entry_submitted(disposition)
-            elif role == "stop":
+                raise
+            disposition = WriteDisposition.AMBIGUOUS
+            if role == "stop":
                 self.machine.stop_submitted(disposition)
             else:
                 self.machine.exit_submitted(disposition, latest_position_quantity=Decimal("1"))
@@ -315,6 +318,129 @@ class OneShareCommissioningOrchestrator:
             self.machine.exit_submitted(WriteDisposition.ACCEPTED,
                                         latest_position_quantity=Decimal("1"))
         return result
+
+    @staticmethod
+    def _entry_identity_matches(order: CommissioningOrderRecord) -> bool:
+        return (
+            order.symbol == "AAPL"
+            and order.side == "buy"
+            and order.order_type == "market"
+            and order.requested_quantity == Decimal("1")
+            and order.time_in_force == "gfd"
+            and order.market_hours == "regular_hours"
+        )
+
+    async def _reconcile_ambiguous_entry(
+        self,
+        baseline_order_ids: frozenset[str],
+        ambiguity_category: str,
+    ) -> str:
+        self._stage = "ENTRY_RECONCILIATION"
+        if ambiguity_category not in {
+            "ENTRY_PLACE_RESPONSE_MALFORMED",
+            "ENTRY_PLACE_TRANSPORT_AMBIGUOUS",
+        }:
+            ambiguity_category = "ENTRY_PLACE_TRANSPORT_AMBIGUOUS"
+        self.machine.record_entry_reconciliation(ambiguity_category)
+        started = self.monotonic()
+        position_seen = False
+        inconsistent_seen = False
+        while True:
+            self.machine.record_entry_reconciliation_poll()
+            try:
+                orders = await self._read_orders()
+                position = self._aapl_position(await self._read_positions())
+            except CommissioningError:
+                orders = ()
+                position = Decimal("-1")
+                inconsistent_seen = True
+            candidates = [
+                row for row in orders
+                if row.server_order_id not in baseline_order_ids
+                and self._entry_identity_matches(row)
+            ]
+            if len(candidates) > 1:
+                self.machine.record_entry_reconciliation(
+                    "ENTRY_RECONCILIATION_MULTIPLE_MATCHES",
+                    attribution_unique=False,
+                    candidate_count=len(candidates),
+                )
+                self.machine.entry_submitted(WriteDisposition.AMBIGUOUS)
+                await self._handoff(
+                    "ENTRY_RECONCILIATION_MULTIPLE_MATCHES",
+                    position=True,
+                    stop=False,
+                    action="Inspect the entry and position; do not submit another buy.",
+                )
+            if len(candidates) == 1:
+                order = candidates[0]
+                classification = classify_order_state(order.state)
+                quantity_consistent = (
+                    order.cumulative_quantity in {Decimal("0"), Decimal("1")}
+                    and order.remaining_quantity in {Decimal("0"), Decimal("1")}
+                    and order.cumulative_quantity + order.remaining_quantity
+                    == Decimal("1")
+                )
+                active_consistent = (
+                    classification is OrderStateClass.ACTIVE_OR_WORKING
+                    and order.cumulative_quantity == Decimal("0")
+                    and order.remaining_quantity == Decimal("1")
+                    and position == Decimal("0")
+                )
+                filled_consistent = (
+                    classification is OrderStateClass.TERMINAL_FILLED
+                    and order.cumulative_quantity == Decimal("1")
+                    and order.remaining_quantity == Decimal("0")
+                    and order.average_fill_price is not None
+                    and position == Decimal("1")
+                )
+                if quantity_consistent and (active_consistent or filled_consistent):
+                    self.machine.record_entry_reconciliation(
+                        "ENTRY_RECONCILED_BY_ORDER",
+                        normalized_order_state=order.state.lower(),
+                        attribution_unique=True,
+                        candidate_count=1,
+                    )
+                    self.machine.persist_write_boundary("entry", "after")
+                    self.machine.entry_submitted(WriteDisposition.ACCEPTED)
+                    return order.server_order_id
+                inconsistent_seen = True
+            elif position == Decimal("1"):
+                if not position_seen:
+                    self.machine.record_entry_reconciliation(
+                        "ENTRY_RECONCILED_BY_POSITION",
+                        attribution_unique=False,
+                        candidate_count=0,
+                    )
+                    position_seen = True
+            elif position != Decimal("0"):
+                inconsistent_seen = True
+
+            elapsed = self.monotonic() - started
+            if elapsed >= ENTRY_FILL_DEADLINE_SECONDS:
+                terminal_category = (
+                    "ENTRY_RECONCILIATION_INCONSISTENT"
+                    if inconsistent_seen or position_seen
+                    else "ENTRY_RECONCILIATION_NOT_FOUND"
+                )
+                self.machine.record_entry_reconciliation(
+                    terminal_category,
+                    attribution_unique=False,
+                    candidate_count=len(candidates),
+                )
+                self.machine.record_entry_reconciliation(
+                    "ENTRY_RECONCILIATION_TIMEOUT",
+                    attribution_unique=False,
+                    candidate_count=len(candidates),
+                )
+                self.machine.entry_submitted(WriteDisposition.AMBIGUOUS)
+                await self._handoff(
+                    "ENTRY_RECONCILIATION_TIMEOUT",
+                    position=True,
+                    stop=False,
+                    action="Inspect the entry and position; do not submit another buy.",
+                )
+            await self.sleep(POLL_SECONDS)
 
     async def _cancel(self, stop_id: str) -> None:
         await self._require_before_flat_deadline(
@@ -368,6 +494,9 @@ class OneShareCommissioningOrchestrator:
             account = await self.adapter.get_accounts()
             positions = await self._read_positions()
             orders = await self._read_orders()
+            baseline_order_ids = frozenset(
+                row.server_order_id for row in orders
+            )
             self.machine.preflight_passed(
                 strategy_enabled=self.strategy_enabled,
                 commissioned_accounts=account.eligible_count if account.identity_match else 0,
@@ -393,9 +522,34 @@ class OneShareCommissioningOrchestrator:
             self._stage = "ENTRY_WINDOW_VALIDATION"
             validate_commissioning_entry_time(self.now_eastern(), self.time_policy)
             self._stage = "ENTRY_PLACE"
-            entry_result = await self._place("entry", entry_payload)
+            try:
+                entry_result = await self._place("entry", entry_payload)
+            except AmbiguousWriteError as error:
+                entry_id = await self._reconcile_ambiguous_entry(
+                    baseline_order_ids, error.category
+                )
+            else:
+                entry_class = classify_order_state(entry_result.state)
+                if entry_class is OrderStateClass.ACTIVE_OR_WORKING:
+                    category = "ENTRY_PLACE_ACCEPTED_PENDING"
+                elif entry_class is OrderStateClass.TERMINAL_FILLED:
+                    category = "ENTRY_PLACE_ACCEPTED_FILLED"
+                else:
+                    await self._handoff(
+                        "ENTRY_RECONCILIATION_INCONSISTENT",
+                        position=True,
+                        stop=False,
+                        action="Inspect the entry and position; do not submit another buy.",
+                    )
+                self.machine.record_entry_reconciliation(
+                    category,
+                    normalized_order_state=entry_result.state.lower(),
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
+                entry_id = entry_result.server_order_id
             self._stage = "ENTRY_RECONCILIATION"
-            await self._reconcile_entry(entry_result.server_order_id)
+            await self._reconcile_entry(entry_id)
             assert self.machine.expected_stop_price is not None
             stop_payload = stop_arguments(self.account_number,
                                           self.machine.expected_stop_price)

@@ -64,6 +64,10 @@ ALLOWED_FAILURE_CATEGORIES = frozenset({
     "ADAPTER_INITIALIZATION_FAILED", "ORCHESTRATOR_INITIALIZATION_FAILED",
     "AUTHORIZATION_INPUT_FAILED", "ENTRY_WINDOW_REJECTED",
     "ENTRY_REVIEW_FAILED_BEFORE_WRITE", "ENTRY_PLACE_AMBIGUOUS",
+    "ENTRY_PLACE_RESPONSE_MALFORMED", "ENTRY_PLACE_TRANSPORT_AMBIGUOUS",
+    "ENTRY_RECONCILIATION_MULTIPLE_MATCHES",
+    "ENTRY_RECONCILIATION_NOT_FOUND",
+    "ENTRY_RECONCILIATION_INCONSISTENT", "ENTRY_RECONCILIATION_TIMEOUT",
     "RECONCILIATION_FAILED", "STOP_PROTECTION_FAILED",
     "CANCEL_RECONCILIATION_FAILED", "FLATTEN_FAILED",
     "FINAL_FLAT_VERIFICATION_FAILED", "EVIDENCE_PERSISTENCE_FAILED",
@@ -500,6 +504,46 @@ class CommissioningMachine:
         self.evidence.call_counts[name] = self.evidence.call_counts.get(name, 0) + 1
         self.evidence_store.persist(self.evidence)
 
+    def record_entry_reconciliation(
+        self,
+        category: str,
+        *,
+        normalized_order_state: str | None = None,
+        attribution_unique: bool | None = None,
+        candidate_count: int | None = None,
+    ) -> None:
+        allowed = {
+            "ENTRY_PLACE_ACCEPTED_PENDING", "ENTRY_PLACE_ACCEPTED_FILLED",
+            "ENTRY_PLACE_RESPONSE_MALFORMED",
+            "ENTRY_PLACE_TRANSPORT_AMBIGUOUS",
+            "ENTRY_RECONCILED_BY_ORDER", "ENTRY_RECONCILED_BY_POSITION",
+            "ENTRY_RECONCILIATION_MULTIPLE_MATCHES",
+            "ENTRY_RECONCILIATION_NOT_FOUND",
+            "ENTRY_RECONCILIATION_INCONSISTENT",
+            "ENTRY_RECONCILIATION_TIMEOUT",
+        }
+        if category not in allowed:
+            raise CommissioningError("entry reconciliation category is invalid")
+        self.evidence.conservative_classifications.append(category)
+        if normalized_order_state is not None:
+            self.evidence.normalized_state_names.append(normalized_order_state)
+        if attribution_unique is not None:
+            self.evidence.boolean_validations[
+                "entry_attribution_unique"
+            ] = attribution_unique
+        if candidate_count is not None:
+            self.evidence.record_counts[
+                "entry_reconciliation_candidate_count"
+            ] = candidate_count
+        self.evidence_store.persist(self.evidence)
+
+    def record_entry_reconciliation_poll(self) -> None:
+        key = "entry_reconciliation_polls"
+        self.evidence.record_counts[key] = self.evidence.record_counts.get(
+            key, 0
+        ) + 1
+        self.evidence_store.persist(self.evidence)
+
     def persist_write_boundary(self, role: str, phase: str) -> None:
         if role not in {"entry", "stop", "cancel", "exit"} or phase not in {"before", "after"}:
             raise CommissioningError("invalid write boundary")
@@ -507,6 +551,7 @@ class CommissioningMachine:
         existed = key in self.evidence.boolean_validations
         previous = self.evidence.boolean_validations.get(key)
         self.evidence.boolean_validations[key] = True
+        self.evidence.write_attempt_counters = self.write_attempt_counts()
         try:
             self.evidence_store.persist(self.evidence)
         except Exception:
@@ -514,6 +559,7 @@ class CommissioningMachine:
                 self.evidence.boolean_validations[key] = previous
             else:
                 self.evidence.boolean_validations.pop(key, None)
+            self.evidence.write_attempt_counters = self.write_attempt_counts()
             raise
 
     def write_attempt_counts(self) -> dict[str, int]:
