@@ -684,21 +684,37 @@ class OneShareCommissioningOrchestrator:
         self._last_write = "cancel"
         try:
             result = await self.adapter.cancel_equity_order({"order_id": stop_id})
-        except AmbiguousWriteError:
+        except AmbiguousWriteError as error:
+            category = error.category
+            if category not in {
+                "STOP_CANCEL_TRANSPORT_AMBIGUOUS",
+                "STOP_CANCEL_RESPONSE_MALFORMED",
+            }:
+                category = "STOP_CANCEL_TRANSPORT_AMBIGUOUS"
             self.machine.stop_cancel_requested(WriteDisposition.AMBIGUOUS)
-            await self._handoff("AMBIGUOUS_STOP_CANCEL", position=True, stop=True,
-                                action="Inspect the stop and position in the Robinhood UI; do not retry cancel.")
+            self.machine.record_cancel_reconciliation(category)
+            return
         except BrokerRejectedError:
             self.machine.stop_cancel_requested(WriteDisposition.REJECTED)
-            await self._handoff("STOP_CANCEL_REJECTED", position=True, stop=True,
-                                action="Retain manual control; inspect the executable stop.")
+            await self._handoff(
+                "STOP_CANCEL_REJECTED", position=True, stop=True,
+                action="Retain manual control; inspect the executable stop.",
+            )
         self.machine.persist_write_boundary("cancel", "after")
-        disposition = (WriteDisposition.ACCEPTED if result.request_was_accepted
-                       else WriteDisposition.REJECTED)
+        disposition = (
+            WriteDisposition.ACCEPTED
+            if result.request_was_accepted
+            else WriteDisposition.REJECTED
+        )
         self.machine.stop_cancel_requested(disposition)
         if disposition is WriteDisposition.REJECTED:
-            await self._handoff("STOP_CANCEL_REJECTED", position=True, stop=True,
-                                action="Retain manual control; inspect the executable stop.")
+            await self._handoff(
+                "STOP_CANCEL_REJECTED", position=True, stop=True,
+                action="Retain manual control; inspect the executable stop.",
+            )
+        self.machine.record_cancel_reconciliation(
+            "STOP_CANCEL_REQUEST_ACCEPTED"
+        )
 
     async def run(self) -> OrchestrationResult:
         if self.evidence_store.partial.exists():
@@ -848,8 +864,41 @@ class OneShareCommissioningOrchestrator:
             self.machine.authorize_flatten(await self._authorization("flatten"),
                                            now=self.now_eastern())
             self._stage = "CANCEL_RECONCILIATION"
+            cancel_baseline_orders = await self._read_orders()
+            cancel_baseline_position = self._aapl_position(
+                await self._read_positions()
+            )
+            cancel_baseline_stop = self._exact_order(
+                cancel_baseline_orders, stop_id
+            )
+            cancel_baseline_class = classify_order_state(
+                cancel_baseline_stop.state
+            )
+            if cancel_baseline_position != Decimal("1"):
+                await self._handoff(
+                    "STOP_CANCEL_INCONSISTENT", position=True, stop=True,
+                    action="Inspect the stop and position before canceling.",
+                )
+            if cancel_baseline_class is not OrderStateClass.ACTIVE_OR_WORKING:
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_ALREADY_TERMINAL",
+                    normalized_order_state=cancel_baseline_stop.state.strip().lower(),
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
+                await self._handoff(
+                    "STOP_CANCEL_ALREADY_TERMINAL", position=True, stop=True,
+                    action="Inspect the already non-working stop before any exit.",
+                )
+            cancel_baseline_order_ids = frozenset(
+                row.server_order_id for row in cancel_baseline_orders
+            )
             await self._cancel(stop_id)
-            await self._reconcile_cancel(stop_id)
+            await self._reconcile_cancel(
+                stop_id,
+                baseline_order_ids=cancel_baseline_order_ids,
+                baseline_position=cancel_baseline_position,
+            )
             self._stage = "FLATTENING"
             return await self._finish_after_cancel(stop_id)
         except OperatorRequired:
@@ -1037,37 +1086,182 @@ class OneShareCommissioningOrchestrator:
                                 position=True, stop=True,
                                 action="Inspect and establish protection or flatten manually.")
 
-    async def _reconcile_cancel(self, stop_id: str) -> None:
+    async def _reconcile_cancel(
+        self,
+        stop_id: str,
+        *,
+        baseline_order_ids: frozenset[str],
+        baseline_position: Decimal,
+    ) -> None:
         self._stage = "CANCEL_RECONCILIATION"
+        if stop_id not in baseline_order_ids or baseline_position != Decimal("1"):
+            self.machine.record_cancel_reconciliation(
+                "STOP_CANCEL_INCONSISTENT",
+                attribution_unique=False,
+                candidate_count=0,
+            )
+            await self._handoff(
+                "STOP_CANCEL_INCONSISTENT", position=True, stop=True,
+                action="Inspect the stop and position; do not submit an exit.",
+            )
         started = self.monotonic()
         while True:
+            self.machine.record_cancel_reconciliation_read("orders")
             try:
-                stop = self._exact_order(await self._read_orders(), stop_id)
+                orders = await self._read_orders()
+            except CommissioningError:
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_INCONSISTENT",
+                    attribution_unique=False,
+                    candidate_count=0,
+                )
+                await self._handoff(
+                    "STOP_CANCEL_INCONSISTENT", position=True, stop=True,
+                    action="Inspect stop cancellation and position manually.",
+                )
+
+            matches = [
+                row for row in orders if row.server_order_id == stop_id
+            ]
+            new_related_sells = [
+                row for row in orders
+                if row.server_order_id not in baseline_order_ids
+                and row.symbol == "AAPL"
+                and row.side == "sell"
+                and not self._is_terminal_order(row)
+            ]
+            if len(matches) > 1 or new_related_sells:
+                candidate_count = len(matches) + len(new_related_sells)
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_MULTIPLE_MATCHES",
+                    attribution_unique=False,
+                    candidate_count=candidate_count,
+                )
+                await self._handoff(
+                    "STOP_CANCEL_MULTIPLE_MATCHES", position=True, stop=True,
+                    action="Inspect every related sell order; do not submit an exit.",
+                )
+
+            self.machine.record_cancel_reconciliation_read("positions")
+            try:
                 position = self._aapl_position(await self._read_positions())
             except CommissioningError:
-                await self._handoff("CANCEL_ORDER_RECONCILIATION_CONFLICT",
-                                    position=True, stop=True,
-                                    action="Inspect stop cancellation and position manually.")
-            self.machine.stop_cancel_observed(
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_INCONSISTENT",
+                    attribution_unique=False,
+                    candidate_count=len(matches),
+                )
+                await self._handoff(
+                    "STOP_CANCEL_INCONSISTENT", position=True, stop=True,
+                    action="Inspect stop cancellation and position manually.",
+                )
+
+            if not matches:
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_NOT_FOUND",
+                    attribution_unique=False,
+                    candidate_count=0,
+                )
+                if self.monotonic() - started >= STOP_CANCEL_DEADLINE_SECONDS:
+                    self.machine.record_cancel_reconciliation(
+                        "STOP_CANCEL_TIMEOUT",
+                        attribution_unique=False,
+                        candidate_count=0,
+                    )
+                    await self._handoff(
+                        "STOP_CANCEL_TIMEOUT", position=True, stop=True,
+                        action="Assume the stop may execute; reconcile in the UI.",
+                    )
+                await self.sleep(POLL_SECONDS)
+                continue
+
+            stop = matches[0]
+            normalized = stop.state.strip().lower()
+            expected_stop_price = self.machine.expected_stop_price
+            if (
+                stop.symbol != "AAPL"
+                or stop.side != "sell"
+                or stop.order_type not in {"stop", "stop_market"}
+                or stop.requested_quantity != Decimal("1")
+                or stop.stop_price != expected_stop_price
+                or stop.time_in_force != "gtc"
+                or stop.market_hours != "regular_hours"
+            ):
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_INCONSISTENT",
+                    normalized_order_state=normalized,
+                    attribution_unique=False,
+                    candidate_count=1,
+                )
+                await self._handoff(
+                    "STOP_CANCEL_INCONSISTENT", position=True, stop=True,
+                    action="Inspect the conflicting stop record; do not submit an exit.",
+                )
+            if normalized in {"partially_filled", "partially_filled_rest_cancelled"}:
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_PARTIAL_FILL",
+                    normalized_order_state=normalized,
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
+                await self._handoff(
+                    "STOP_CANCEL_PARTIAL_FILL", position=True, stop=True,
+                    action="Reconcile the partial fill manually; do not submit another sell.",
+                )
+
+            category = self.machine.stop_cancel_observed(
                 stop_state=stop.state,
                 cumulative_quantity=stop.cumulative_quantity,
                 remaining_quantity=stop.remaining_quantity,
                 position_quantity=position,
             )
-            if self.machine.state is State.VERIFIED_FLAT or self.machine.stop_cancel_resolved:
+            if self.machine.state is State.VERIFIED_FLAT:
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_RECONCILED_BY_ORDER",
+                    normalized_order_state=normalized,
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
+                return
+            if self.machine.stop_cancel_resolved:
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_RECONCILED_BY_ORDER",
+                    normalized_order_state=normalized,
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
                 return
             if self.machine.state is State.OPERATOR_REQUIRED:
-                await self._handoff(self.machine.evidence.completion_or_failure_reason,
-                                    position=True, stop=True,
-                                    action="Inspect stop cancellation and position manually.")
+                await self._handoff(
+                    category, position=True, stop=True,
+                    action="Inspect stop cancellation and position manually.",
+                )
+            if position != Decimal("1"):
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_INCONSISTENT",
+                    normalized_order_state=normalized,
+                    attribution_unique=False,
+                    candidate_count=1,
+                )
+                await self._handoff(
+                    "STOP_CANCEL_INCONSISTENT", position=True, stop=True,
+                    action="Inspect the stop and unexpected position; do not sell.",
+                )
             await self._require_before_flat_deadline(
                 position=True, stop=True,
                 action="Take immediate manual control; reconcile cancellation and flatten.",
             )
             if self.monotonic() - started >= STOP_CANCEL_DEADLINE_SECONDS:
-                await self._handoff("STOP_CANCEL_DEADLINE_EXCEEDED", position=True,
-                                    stop=True,
-                                    action="Assume the stop may execute; reconcile in the UI.")
+                self.machine.record_cancel_reconciliation(
+                    "STOP_CANCEL_TIMEOUT",
+                    normalized_order_state=normalized,
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
+                await self._handoff(
+                    "STOP_CANCEL_TIMEOUT", position=True, stop=True,
+                    action="Assume the stop may execute; reconcile in the UI.",
+                )
             await self.sleep(POLL_SECONDS)
 
     async def _finish_after_cancel(self, stop_id: str) -> OrchestrationResult:

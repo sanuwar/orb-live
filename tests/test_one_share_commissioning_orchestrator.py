@@ -329,6 +329,7 @@ def test_clean_complete_flow_and_exact_tool_order(tmp_path):
         "get_equity_orders", "get_equity_positions",
         "review_equity_order", "place_equity_order",
         "get_equity_orders", "get_equity_positions",
+        "get_equity_orders", "get_equity_positions",
         "cancel_equity_order",
         "get_equity_orders", "get_equity_positions",
         "get_equity_orders", "get_equity_positions",
@@ -368,12 +369,14 @@ def test_ambiguous_write_handoffs_without_retry(tmp_path, role):
         assert handoffs[-1].reason_code == "ENTRY_RECONCILIATION_TIMEOUT"
     elif role == "stop":
         assert handoffs[-1].reason_code == "STOP_RECONCILIATION_TIMEOUT"
+    elif role == "cancel":
+        assert handoffs[-1].reason_code == "STOP_CANCEL_TIMEOUT"
     else:
         assert handoffs[-1].reason_code.startswith("AMBIGUOUS_")
     categories = {
         "entry": "ENTRY_RECONCILIATION_TIMEOUT",
         "stop": "STOP_PROTECTION_FAILED",
-        "cancel": "CANCEL_RECONCILIATION_FAILED",
+        "cancel": "STOP_CANCEL_TIMEOUT",
         "exit": "FLATTEN_FAILED",
     }
     counter_names = {

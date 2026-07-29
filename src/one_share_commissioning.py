@@ -81,6 +81,12 @@ ALLOWED_FAILURE_CATEGORIES = frozenset({
     "STOP_RECONCILIATION_NOT_FOUND", "STOP_RECONCILIATION_INCONSISTENT",
     "STOP_RECONCILIATION_TIMEOUT", "STOP_PARTIALLY_FILLED",
     "STOP_CANCEL_PENDING", "STOP_CANCEL_CONFIRMED",
+    "STOP_CANCEL_REQUEST_ACCEPTED", "STOP_CANCEL_TRANSPORT_AMBIGUOUS",
+    "STOP_CANCEL_RESPONSE_MALFORMED", "STOP_CANCEL_RECONCILED_BY_ORDER",
+    "STOP_CANCEL_ALREADY_TERMINAL", "STOP_CANCEL_STOP_FILLED_POSITION_FLAT",
+    "STOP_CANCEL_PARTIAL_FILL", "STOP_CANCEL_STILL_ACTIVE",
+    "STOP_CANCEL_MULTIPLE_MATCHES", "STOP_CANCEL_INCONSISTENT",
+    "STOP_CANCEL_NOT_FOUND", "STOP_CANCEL_TIMEOUT",
     "CANCEL_RECONCILIATION_FAILED", "FLATTEN_FAILED",
     "FINAL_FLAT_VERIFICATION_FAILED", "EVIDENCE_PERSISTENCE_FAILED",
     "SESSION_CLOSE_FAILED", "INTERNAL_INVARIANT_FAILURE",
@@ -608,6 +614,56 @@ class CommissioningMachine:
         ) + 1
         self.evidence_store.persist(self.evidence)
 
+    def record_cancel_reconciliation(
+        self,
+        category: str,
+        *,
+        normalized_order_state: str | None = None,
+        attribution_unique: bool | None = None,
+        candidate_count: int | None = None,
+    ) -> None:
+        allowed = {
+            "STOP_CANCEL_REQUEST_ACCEPTED", "STOP_CANCEL_PENDING",
+            "STOP_CANCEL_CONFIRMED", "STOP_CANCEL_TRANSPORT_AMBIGUOUS",
+            "STOP_CANCEL_RESPONSE_MALFORMED",
+            "STOP_CANCEL_RECONCILED_BY_ORDER",
+            "STOP_CANCEL_ALREADY_TERMINAL",
+            "STOP_CANCEL_STOP_FILLED_POSITION_FLAT",
+            "STOP_CANCEL_PARTIAL_FILL", "STOP_CANCEL_STILL_ACTIVE",
+            "STOP_CANCEL_MULTIPLE_MATCHES", "STOP_CANCEL_INCONSISTENT",
+            "STOP_CANCEL_NOT_FOUND", "STOP_CANCEL_TIMEOUT",
+        }
+        if category not in allowed:
+            raise CommissioningError(
+                "cancel reconciliation category is invalid"
+            )
+        self.evidence.conservative_classifications.append(category)
+        if normalized_order_state is not None:
+            self.evidence.normalized_state_names.append(
+                normalized_order_state
+            )
+        if attribution_unique is not None:
+            self.evidence.boolean_validations[
+                "cancel_attribution_unique"
+            ] = attribution_unique
+        if candidate_count is not None:
+            self.evidence.record_counts[
+                "cancel_reconciliation_candidate_count"
+            ] = candidate_count
+        self.evidence.record_counts["stop_cancel_retries"] = 0
+        self.evidence_store.persist(self.evidence)
+
+    def record_cancel_reconciliation_read(self, kind: str) -> None:
+        if kind not in {"orders", "positions"}:
+            raise CommissioningError(
+                "cancel reconciliation read kind is invalid"
+            )
+        key = f"cancel_reconciliation_{kind}_reads"
+        self.evidence.record_counts[key] = self.evidence.record_counts.get(
+            key, 0
+        ) + 1
+        self.evidence_store.persist(self.evidence)
+
     def persist_write_boundary(self, role: str, phase: str) -> None:
         if role not in {"entry", "stop", "cancel", "exit"} or phase not in {"before", "after"}:
             raise CommissioningError("invalid write boundary")
@@ -869,20 +925,22 @@ class CommissioningMachine:
             self.operator_required("SECOND_CANCEL_ATTEMPT")
             raise CommissioningError("stop cancellation may occur only once")
         self.stop_cancel_attempted = True
-        if disposition is WriteDisposition.ACCEPTED:
+        if disposition in {
+            WriteDisposition.ACCEPTED,
+            WriteDisposition.AMBIGUOUS,
+        }:
             self._record_state(State.STOP_CANCEL_REQUESTED)
             self._record_state(State.STOP_CANCEL_RECONCILING)
-        elif disposition is WriteDisposition.AMBIGUOUS:
-            self.operator_required("AMBIGUOUS_STOP_CANCEL")
         else:
             self.operator_required("STOP_CANCEL_REJECTED")
 
     def stop_cancel_observed(self, *, stop_state: str,
                              cumulative_quantity: object,
                              remaining_quantity: object,
-                             position_quantity: object) -> None:
+                             position_quantity: object) -> str:
         self._require(State.STOP_CANCEL_RECONCILING)
         classification = classify_order_state(stop_state)
+        normalized = stop_state.strip().lower()
         cumulative = decimal_value(cumulative_quantity)
         remaining = decimal_value(remaining_quantity)
         position = decimal_value(position_quantity)
@@ -891,34 +949,80 @@ class CommissioningMachine:
                 or cumulative + remaining != QUANTITY
                 or position not in {Decimal("0"), QUANTITY}):
             self.operator_required("STOP_CANCEL_QUANTITY_INVALID")
-            return
+            return "STOP_CANCEL_INCONSISTENT"
         if classification is OrderStateClass.TERMINAL_FILLED:
             if cumulative == QUANTITY and remaining == 0 and position == 0:
+                category = "STOP_CANCEL_STOP_FILLED_POSITION_FLAT"
+                self.record_cancel_reconciliation(
+                    category,
+                    normalized_order_state=normalized,
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
                 self._record_state(State.VERIFIED_FLAT)
-            else:
-                self.operator_required("STOP_FILL_POSITION_MISMATCH")
-            return
-        if classification in {
-            OrderStateClass.ACTIVE_OR_WORKING,
-            OrderStateClass.CANCELLATION_PENDING,
-        }:
+                return category
+            self.operator_required("STOP_FILL_POSITION_MISMATCH")
+            return "STOP_CANCEL_INCONSISTENT"
+        if classification is OrderStateClass.PARTIAL_FILL_WITH_REMAINDER_CANCELLED:
+            self.record_cancel_reconciliation(
+                "STOP_CANCEL_PARTIAL_FILL",
+                normalized_order_state=normalized,
+                attribution_unique=True,
+                candidate_count=1,
+            )
+            self.operator_required("STOP_CANCEL_PARTIAL_FILL")
+            return "STOP_CANCEL_PARTIAL_FILL"
+        if classification is OrderStateClass.CANCELLATION_PENDING:
             if cumulative != 0 or remaining != QUANTITY:
                 self.operator_required("STOP_CANCEL_QUANTITY_INVALID")
-            return
+                return "STOP_CANCEL_INCONSISTENT"
+            category = "STOP_CANCEL_PENDING"
+            self.record_cancel_reconciliation(
+                category,
+                normalized_order_state=normalized,
+                attribution_unique=True,
+                candidate_count=1,
+            )
+            return category
+        if classification is OrderStateClass.ACTIVE_OR_WORKING:
+            if cumulative != 0 or remaining != QUANTITY:
+                self.operator_required("STOP_CANCEL_QUANTITY_INVALID")
+                return "STOP_CANCEL_INCONSISTENT"
+            category = "STOP_CANCEL_STILL_ACTIVE"
+            self.record_cancel_reconciliation(
+                category,
+                normalized_order_state=normalized,
+                attribution_unique=True,
+                candidate_count=1,
+            )
+            return category
         if classification not in {
             OrderStateClass.TERMINAL_CANCELLED,
             OrderStateClass.TERMINAL_REJECTED_OR_FAILED,
         }:
             self.operator_required("STOP_CANCEL_STATE_INDETERMINATE")
-            return
+            return "STOP_CANCEL_INCONSISTENT"
         if cumulative != 0 or remaining != QUANTITY:
             self.operator_required("STOP_CANCEL_QUANTITY_INVALID")
-            return
+            return "STOP_CANCEL_INCONSISTENT"
+        category = (
+            "STOP_CANCEL_CONFIRMED"
+            if classification is OrderStateClass.TERMINAL_CANCELLED
+            else "STOP_CANCEL_ALREADY_TERMINAL"
+        )
+        self.record_cancel_reconciliation(
+            category,
+            normalized_order_state=normalized,
+            attribution_unique=True,
+            candidate_count=1,
+        )
         self.stop_cancel_resolved = True
         if position == 0:
             self._record_state(State.VERIFIED_FLAT)
         elif position != QUANTITY:
             self.operator_required("POST_CANCEL_POSITION_INVALID")
+            return "STOP_CANCEL_INCONSISTENT"
+        return category
 
     def exit_submitted(self, disposition: WriteDisposition,
                        *, latest_position_quantity: object) -> None:

@@ -68,11 +68,11 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/config.py":
         "37669854c3e1dae3c282e787c0af22da9c89ce21fb790a482f4edb2e2db7f1c3",
     "src/one_share_commissioning.py":
-        "99084ac751bcfab6a93a13de0d3a738355a3b9917d28c67d333cf40880bca3b2",
+        "97247077e2e6ab484528e38c002368ab53cabb8977bf648b0b6223191e24cffd",
     "src/robinhood_commissioning_adapter.py":
-        "8a2630b154374709cc05308b32c0bf51e24e35c2e513e8169e4e200b2165feb2",
+        "94d6eebbee0ced6748ac85f8c7cb52ff26e9570fa7d2b219d8a5a3efe66c6c68",
     "src/one_share_commissioning_orchestrator.py":
-        "037994dc707d44479e982e01473e10bcc4bb52b053765e3cfb2e9d0b83478ab7",
+        "8603fe25027232ca866ca2a665d26a7af60328b3fc1aa03241fa1a0509740f83",
     "src/robinhood_commissioning_session.py":
         "a7e0367de955eb26695f6e61c99b0c99cfdab869c042cd9fcddf209b7065c4e1",
     "src/robinhood_client.py":
@@ -81,6 +81,7 @@ REVIEWED_HASHES: Mapping[str, str] = {
 REAL_SESSION_RUNTIME_FLAG = "ENABLE_ATTENDED_ONE_SHARE_COMMISSIONING"
 LIVE_CHECKPOINT_AUTHORIZATION_FLAG = "AUTHORIZE_CHECKPOINT_7C_LIVE"
 RETIRED_LIVE_RUN_IDS = frozenset({
+    "cp7c-live-aapl-one-share-20260729-04",
     "cp7c-live-aapl-one-share-20260729-03",
     "cp7c-live-aapl-one-share-20260729-02",
     "cp7c-live-aapl-one-share-20260728-03",
