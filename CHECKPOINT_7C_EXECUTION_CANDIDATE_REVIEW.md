@@ -118,6 +118,21 @@ above, permanent Run-ID retirement, and distinct sanitized ambiguity
 categories. A complete broker-free incident rehearsal reached `VERIFIED_FLAT`
 and `COMPLETE` with one write per role and no emergency handoff.
 
+Attempt `cp7c-live-aapl-one-share-20260729-03` reached the confirmed one-share
+entry fill, completed stop review, and crossed the stop-place write boundary
+once. The retained evidence records zero post-stop order reads and zero
+post-stop position reads. It cannot distinguish a transport exception from a
+malformed or policy-inconsistent response because the historical path collapsed
+those subtypes. The reviewed repair now classifies them separately and performs
+bounded baseline-differential read-only stop reconciliation without repeating
+the write. Only one exact, uniquely attributable, internally consistent stop
+may proceed. A uniquely confirmed filled stop with a flat position completes
+without a cancel or another sell; all multiple, missing, partial, cancellation-
+pending, conflicting, or timed-out outcomes require operator control. The
+failed wrapper and Run ID are permanently retired. Broker-free pending-stop and
+filled-stop rehearsals both reached `VERIFIED_FLAT` and `COMPLETE` with no
+emergency handoff.
+
 Another live attempt requires all of the following:
 
 - the reviewed repair merged to `main`;

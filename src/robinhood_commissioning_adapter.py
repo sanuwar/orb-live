@@ -164,7 +164,11 @@ class RobinhoodCommissioningAdapter:
                     category = (
                         "ENTRY_PLACE_TRANSPORT_AMBIGUOUS"
                         if write_key == "place:entry"
-                        else "WRITE_RESULT_AMBIGUOUS"
+                        else (
+                            "STOP_PLACE_TRANSPORT_AMBIGUOUS"
+                            if write_key == "place:stop"
+                            else "WRITE_RESULT_AMBIGUOUS"
+                        )
                     )
                     raise AmbiguousWriteError(category) from exc
                 raise CommissioningError("read operation failed") from exc
@@ -177,7 +181,11 @@ class RobinhoodCommissioningAdapter:
                     category = (
                         "ENTRY_PLACE_RESPONSE_MALFORMED"
                         if write_key == "place:entry"
-                        else "WRITE_RESULT_AMBIGUOUS"
+                        else (
+                            "STOP_PLACE_RESPONSE_MALFORMED"
+                            if write_key == "place:stop"
+                            else "WRITE_RESULT_AMBIGUOUS"
+                        )
                     )
                     raise AmbiguousWriteError(category) from exc
                 raise CommissioningError("read operation failed") from exc
@@ -297,7 +305,11 @@ class RobinhoodCommissioningAdapter:
             category = (
                 "ENTRY_PLACE_RESPONSE_MALFORMED"
                 if role == "entry"
-                else "WRITE_RESULT_AMBIGUOUS"
+                else (
+                    "STOP_PLACE_RESPONSE_MALFORMED"
+                    if role == "stop"
+                    else "WRITE_RESULT_AMBIGUOUS"
+                )
             )
             raise AmbiguousWriteError(category) from exc
         expected_side, expected_type, expected_duration = {
@@ -319,11 +331,15 @@ class RobinhoodCommissioningAdapter:
             category = (
                 "ENTRY_PLACE_RESPONSE_MALFORMED"
                 if role == "entry"
-                else "WRITE_RESULT_AMBIGUOUS"
+                else (
+                    "STOP_PLACE_RESPONSE_MALFORMED"
+                    if role == "stop"
+                    else "WRITE_RESULT_AMBIGUOUS"
+                )
             )
             raise AmbiguousWriteError(category)
         if role == "stop" and parsed.stop_price != _decimal_text(arguments["stop_price"]):
-            raise AmbiguousWriteError("place response stop mismatch; operator required")
+            raise AmbiguousWriteError("STOP_PLACE_RESPONSE_MALFORMED")
         return parsed
 
     async def cancel_equity_order(self, arguments: Mapping[str, Any]) -> Any:

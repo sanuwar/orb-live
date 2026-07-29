@@ -288,7 +288,7 @@ class OneShareCommissioningOrchestrator:
         try:
             result = await self.adapter.place_equity_order(arguments, role=role)
         except AmbiguousWriteError:
-            if role == "entry":
+            if role in {"entry", "stop"}:
                 raise
             disposition = WriteDisposition.AMBIGUOUS
             if role == "stop":
@@ -329,6 +329,238 @@ class OneShareCommissioningOrchestrator:
             and order.time_in_force == "gfd"
             and order.market_hours == "regular_hours"
         )
+
+    @staticmethod
+    def _stop_place_category(state: str) -> str:
+        normalized = state.strip().lower()
+        if normalized in {"new", "unconfirmed"}:
+            return "STOP_PLACE_ACCEPTED_PENDING"
+        if normalized in {"queued", "confirmed", "placed", "open", "accepted"}:
+            return "STOP_PLACE_ACCEPTED_OPEN"
+        if normalized == "triggered":
+            return "STOP_PLACE_ACCEPTED_TRIGGERED"
+        if normalized == "filled":
+            return "STOP_PLACE_ACCEPTED_FILLED"
+        if normalized == "partially_filled":
+            return "STOP_PARTIALLY_FILLED"
+        if normalized == "pending_cancelled":
+            return "STOP_CANCEL_PENDING"
+        if normalized == "cancelled":
+            return "STOP_CANCEL_CONFIRMED"
+        return "STOP_RECONCILIATION_INCONSISTENT"
+
+    @staticmethod
+    def _is_terminal_order(order: CommissioningOrderRecord) -> bool:
+        return classify_order_state(order.state) in {
+            OrderStateClass.TERMINAL_CANCELLED,
+            OrderStateClass.TERMINAL_FILLED,
+            OrderStateClass.TERMINAL_REJECTED_OR_FAILED,
+            OrderStateClass.PARTIAL_FILL_WITH_REMAINDER_CANCELLED,
+        }
+
+    async def _fail_ambiguous_stop_reconciliation(
+        self,
+        category: str,
+        *,
+        normalized_order_state: str | None = None,
+        candidate_count: int = 0,
+    ) -> None:
+        self.machine.record_stop_reconciliation(
+            category,
+            normalized_order_state=normalized_order_state,
+            attribution_unique=False,
+            candidate_count=candidate_count,
+        )
+        self.machine.stop_submitted(WriteDisposition.AMBIGUOUS)
+        await self._handoff(
+            category,
+            position=True,
+            stop=True,
+            action=(
+                "Inspect the exact position and sell orders in the Robinhood UI; "
+                "do not retry stop placement or submit an exit."
+            ),
+        )
+
+    async def _reconcile_ambiguous_stop(
+        self,
+        baseline_order_ids: frozenset[str],
+        expected_stop_price: Decimal,
+        ambiguity_category: str,
+    ) -> tuple[str, bool]:
+        self._stage = "STOP_PROTECTION"
+        if ambiguity_category not in {
+            "STOP_PLACE_RESPONSE_MALFORMED",
+            "STOP_PLACE_TRANSPORT_AMBIGUOUS",
+        }:
+            ambiguity_category = "STOP_PLACE_TRANSPORT_AMBIGUOUS"
+        self.machine.record_stop_reconciliation(ambiguity_category)
+        started = self.monotonic()
+        inconsistent_seen = False
+        while True:
+            try:
+                self.machine.record_stop_reconciliation_read("orders")
+                orders = await self._read_orders()
+                self.machine.record_stop_reconciliation_read("positions")
+                position = self._aapl_position(await self._read_positions())
+            except CommissioningError:
+                orders = ()
+                position = Decimal("-1")
+                inconsistent_seen = True
+
+            new_orders = [
+                row for row in orders
+                if row.server_order_id not in baseline_order_ids
+            ]
+            if len(new_orders) > 1:
+                await self._fail_ambiguous_stop_reconciliation(
+                    "STOP_RECONCILIATION_MULTIPLE_MATCHES",
+                    candidate_count=len(new_orders),
+                )
+            if len(new_orders) == 1:
+                order = new_orders[0]
+                normalized = order.state.strip().lower()
+                if order.symbol != "AAPL":
+                    await self._fail_ambiguous_stop_reconciliation(
+                        "STOP_RECONCILIATION_WRONG_SYMBOL",
+                        normalized_order_state=normalized,
+                        candidate_count=1,
+                    )
+                if order.side != "sell":
+                    await self._fail_ambiguous_stop_reconciliation(
+                        "STOP_RECONCILIATION_WRONG_SIDE",
+                        normalized_order_state=normalized,
+                        candidate_count=1,
+                    )
+                if (
+                    order.requested_quantity != Decimal("1")
+                    or order.cumulative_quantity not in {Decimal("0"), Decimal("1")}
+                    or order.remaining_quantity not in {Decimal("0"), Decimal("1")}
+                    or order.cumulative_quantity + order.remaining_quantity
+                    != Decimal("1")
+                ):
+                    category = (
+                        "STOP_PARTIALLY_FILLED"
+                        if normalized in {
+                            "partially_filled",
+                            "partially_filled_rest_cancelled",
+                        }
+                        or Decimal("0") < order.cumulative_quantity < Decimal("1")
+                        else "STOP_RECONCILIATION_WRONG_QUANTITY"
+                    )
+                    await self._fail_ambiguous_stop_reconciliation(
+                        category,
+                        normalized_order_state=normalized,
+                        candidate_count=1,
+                    )
+                if (
+                    order.order_type not in {"stop", "stop_market"}
+                    or order.stop_price != expected_stop_price
+                    or order.time_in_force != "gtc"
+                    or order.market_hours != "regular_hours"
+                ):
+                    await self._fail_ambiguous_stop_reconciliation(
+                        "STOP_RECONCILIATION_CONFLICTING_ORDER",
+                        normalized_order_state=normalized,
+                        candidate_count=1,
+                    )
+
+                classification = classify_order_state(order.state)
+                if (
+                    classification is OrderStateClass.ACTIVE_OR_WORKING
+                    and normalized != "partially_filled"
+                    and order.cumulative_quantity == Decimal("0")
+                    and order.remaining_quantity == Decimal("1")
+                    and position == Decimal("1")
+                ):
+                    self.machine.record_stop_reconciliation(
+                        self._stop_place_category(order.state),
+                        normalized_order_state=normalized,
+                        attribution_unique=True,
+                        candidate_count=1,
+                    )
+                    self.machine.record_stop_reconciliation(
+                        "STOP_RECONCILED_BY_ORDER",
+                        normalized_order_state=normalized,
+                        attribution_unique=True,
+                        candidate_count=1,
+                    )
+                    self.machine.persist_write_boundary("stop", "after")
+                    self.machine.stop_submitted(WriteDisposition.ACCEPTED)
+                    return order.server_order_id, False
+                if classification is OrderStateClass.TERMINAL_FILLED:
+                    if (
+                        order.cumulative_quantity == Decimal("1")
+                        and order.remaining_quantity == Decimal("0")
+                        and position == Decimal("0")
+                    ):
+                        self.machine.record_stop_reconciliation(
+                            "STOP_PLACE_ACCEPTED_FILLED",
+                            normalized_order_state=normalized,
+                            attribution_unique=True,
+                            candidate_count=1,
+                        )
+                        self.machine.record_stop_reconciliation(
+                            "STOP_RECONCILED_BY_POSITION_AND_ORDER",
+                            normalized_order_state=normalized,
+                            attribution_unique=True,
+                            candidate_count=1,
+                        )
+                        self.machine.record_stop_reconciliation(
+                            "STOP_ALREADY_FILLED_POSITION_FLAT",
+                            normalized_order_state=normalized,
+                            attribution_unique=True,
+                            candidate_count=1,
+                        )
+                        self.machine.persist_write_boundary("stop", "after")
+                        self.machine.stop_submitted(WriteDisposition.ACCEPTED)
+                        self.machine.stop_filled_before_protection(
+                            cumulative_quantity=order.cumulative_quantity,
+                            remaining_quantity=order.remaining_quantity,
+                            position_quantity=position,
+                        )
+                        return order.server_order_id, True
+                    inconsistent_seen = True
+                elif classification is OrderStateClass.CANCELLATION_PENDING:
+                    await self._fail_ambiguous_stop_reconciliation(
+                        "STOP_CANCEL_PENDING",
+                        normalized_order_state=normalized,
+                        candidate_count=1,
+                    )
+                elif classification is OrderStateClass.PARTIAL_FILL_WITH_REMAINDER_CANCELLED:
+                    await self._fail_ambiguous_stop_reconciliation(
+                        "STOP_PARTIALLY_FILLED",
+                        normalized_order_state=normalized,
+                        candidate_count=1,
+                    )
+                elif classification is OrderStateClass.TERMINAL_CANCELLED:
+                    await self._fail_ambiguous_stop_reconciliation(
+                        "STOP_CANCEL_CONFIRMED",
+                        normalized_order_state=normalized,
+                        candidate_count=1,
+                    )
+                else:
+                    inconsistent_seen = True
+            elif position != Decimal("1"):
+                inconsistent_seen = True
+
+            elapsed = self.monotonic() - started
+            if elapsed >= STOP_OBSERVATION_DEADLINE_SECONDS:
+                terminal_category = (
+                    "STOP_RECONCILIATION_INCONSISTENT"
+                    if inconsistent_seen
+                    else "STOP_RECONCILIATION_NOT_FOUND"
+                )
+                self.machine.record_stop_reconciliation(
+                    terminal_category,
+                    attribution_unique=False,
+                    candidate_count=len(new_orders),
+                )
+                await self._fail_ambiguous_stop_reconciliation(
+                    "STOP_RECONCILIATION_TIMEOUT",
+                    candidate_count=len(new_orders),
+                )
+            await self.sleep(POLL_SECONDS)
 
     async def _reconcile_ambiguous_entry(
         self,
@@ -555,22 +787,71 @@ class OneShareCommissioningOrchestrator:
                                           self.machine.expected_stop_price)
 
             self._stage = "STOP_PROTECTION"
+            stop_baseline_orders = await self._read_orders()
+            stop_baseline_position = self._aapl_position(
+                await self._read_positions()
+            )
+            competing_baseline_sells = sum(
+                1 for row in stop_baseline_orders
+                if row.symbol == "AAPL"
+                and row.side == "sell"
+                and not self._is_terminal_order(row)
+            )
+            if stop_baseline_position != Decimal("1"):
+                await self._handoff(
+                    "STOP_RECONCILIATION_INCONSISTENT",
+                    position=True,
+                    stop=False,
+                    action="Inspect the position before submitting protection.",
+                )
+            if competing_baseline_sells:
+                await self._handoff(
+                    "STOP_RECONCILIATION_CONFLICTING_ORDER",
+                    position=True,
+                    stop=True,
+                    action=(
+                        "Do not place another sell while an existing sell order "
+                        "may execute."
+                    ),
+                )
+            stop_baseline_order_ids = frozenset(
+                row.server_order_id for row in stop_baseline_orders
+            )
             stop_review_started = self.monotonic()
             await self._review("stop", stop_payload)
             self.machine.stop_reviewed(
                 accepted=True,
                 construction_seconds=self.monotonic() - stop_review_started,
             )
-            stop_result = await self._place("stop", stop_payload)
-            await self._reconcile_stop(stop_result.server_order_id)
+            try:
+                stop_result = await self._place("stop", stop_payload)
+            except AmbiguousWriteError as error:
+                stop_id, stop_filled = await self._reconcile_ambiguous_stop(
+                    stop_baseline_order_ids,
+                    self.machine.expected_stop_price,
+                    error.category,
+                )
+            else:
+                self.machine.record_stop_reconciliation(
+                    self._stop_place_category(stop_result.state),
+                    normalized_order_state=stop_result.state.strip().lower(),
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
+                stop_id = stop_result.server_order_id
+                stop_filled = False
+            if not stop_filled:
+                stop_filled = await self._reconcile_stop(stop_id)
+            if stop_filled:
+                return await self._finalize_flat()
             self._stage = "FLATTENING"
             self.machine.authorize_flatten(await self._authorization("flatten"),
                                            now=self.now_eastern())
             self._stage = "CANCEL_RECONCILIATION"
-            await self._cancel(stop_result.server_order_id)
-            await self._reconcile_cancel(stop_result.server_order_id)
+            await self._cancel(stop_id)
+            await self._reconcile_cancel(stop_id)
             self._stage = "FLATTENING"
-            return await self._finish_after_cancel(stop_result.server_order_id)
+            return await self._finish_after_cancel(stop_id)
         except OperatorRequired:
             return OrchestrationResult(State.OPERATOR_REQUIRED,
                 self.evidence_store.partial / "commissioning_evidence.json")
@@ -649,7 +930,7 @@ class OneShareCommissioningOrchestrator:
                                     action="Inspect and control the entry manually; do not retry.")
             await self.sleep(POLL_SECONDS)
 
-    async def _reconcile_stop(self, stop_id: str) -> None:
+    async def _reconcile_stop(self, stop_id: str) -> bool:
         self._stage = "STOP_PROTECTION"
         started = self.monotonic()
         while True:
@@ -662,15 +943,75 @@ class OneShareCommissioningOrchestrator:
                                     position=True, stop=True,
                                     action="Inspect the position and protective stop manually.")
             elapsed = self.monotonic() - started
+            normalized = order.state.strip().lower()
+            classification = classify_order_state(order.state)
+            if normalized == "partially_filled" or classification is (
+                OrderStateClass.PARTIAL_FILL_WITH_REMAINDER_CANCELLED
+            ):
+                self.machine.record_stop_reconciliation(
+                    "STOP_PARTIALLY_FILLED",
+                    normalized_order_state=normalized,
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
+                await self._handoff(
+                    "STOP_PARTIALLY_FILLED",
+                    position=True,
+                    stop=True,
+                    action=(
+                        "Take manual control; do not cancel or sell until the "
+                        "partial stop state and position are reconciled."
+                    ),
+                )
+            if classification is OrderStateClass.CANCELLATION_PENDING:
+                self.machine.record_stop_reconciliation(
+                    "STOP_CANCEL_PENDING",
+                    normalized_order_state=normalized,
+                    attribution_unique=True,
+                    candidate_count=1,
+                )
+                await self._handoff(
+                    "STOP_CANCEL_PENDING",
+                    position=True,
+                    stop=True,
+                    action="Reconcile the pending cancellation manually; do not sell.",
+                )
+            if classification is OrderStateClass.TERMINAL_FILLED:
+                if (
+                    order.requested_quantity == Decimal("1")
+                    and order.cumulative_quantity == Decimal("1")
+                    and order.remaining_quantity == Decimal("0")
+                    and position == Decimal("0")
+                ):
+                    self.machine.record_stop_reconciliation(
+                        "STOP_ALREADY_FILLED_POSITION_FLAT",
+                        normalized_order_state=normalized,
+                        attribution_unique=True,
+                        candidate_count=1,
+                    )
+                    self.machine.stop_filled_before_protection(
+                        cumulative_quantity=order.cumulative_quantity,
+                        remaining_quantity=order.remaining_quantity,
+                        position_quantity=position,
+                    )
+                    return True
+                self.machine.record_stop_reconciliation(
+                    "STOP_RECONCILIATION_INCONSISTENT",
+                    normalized_order_state=normalized,
+                    attribution_unique=False,
+                    candidate_count=1,
+                )
+                await self._handoff(
+                    "STOP_RECONCILIATION_INCONSISTENT",
+                    position=True,
+                    stop=True,
+                    action="Reconcile the filled stop and position manually.",
+                )
             competitors = sum(
                 1 for row in orders
                 if row.server_order_id != stop_id and row.symbol == "AAPL"
                 and row.side == "sell"
-                and classify_order_state(row.state) not in {
-                    OrderStateClass.TERMINAL_CANCELLED, OrderStateClass.TERMINAL_FILLED,
-                    OrderStateClass.TERMINAL_REJECTED_OR_FAILED,
-                    OrderStateClass.PARTIAL_FILL_WITH_REMAINDER_CANCELLED,
-                }
+                and not self._is_terminal_order(row)
             )
             result = self.machine.protection_observed(
                 order=OrderObservation(
@@ -685,7 +1026,7 @@ class OneShareCommissioningOrchestrator:
                 observation_seconds=elapsed, unprotected_seconds=elapsed,
             )
             if result.provisional:
-                return
+                return False
             if mandatory_risk_off_due(self.now_eastern(), self.time_policy):
                 await self._handoff(
                     "MANDATORY_RISK_OFF_PROTECTION_UNRESOLVED",

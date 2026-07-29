@@ -326,6 +326,7 @@ def test_clean_complete_flow_and_exact_tool_order(tmp_path):
         "get_accounts", "get_equity_positions", "get_equity_orders",
         "review_equity_order", "place_equity_order",
         "get_equity_orders", "get_equity_positions",
+        "get_equity_orders", "get_equity_positions",
         "review_equity_order", "place_equity_order",
         "get_equity_orders", "get_equity_positions",
         "cancel_equity_order",
@@ -365,6 +366,8 @@ def test_ambiguous_write_handoffs_without_retry(tmp_path, role):
     assert adapter.calls.count(tool) == expected
     if role == "entry":
         assert handoffs[-1].reason_code == "ENTRY_RECONCILIATION_TIMEOUT"
+    elif role == "stop":
+        assert handoffs[-1].reason_code == "STOP_RECONCILIATION_TIMEOUT"
     else:
         assert handoffs[-1].reason_code.startswith("AMBIGUOUS_")
     categories = {
@@ -377,7 +380,12 @@ def test_ambiguous_write_handoffs_without_retry(tmp_path, role):
         "entry": "entry_place", "stop": "stop_place",
         "cancel": "stop_cancel", "exit": "exit_place",
     }
-    assert instance.machine.evidence.failure_category == categories[role]
+    if role == "stop":
+        assert "STOP_RECONCILIATION_TIMEOUT" in (
+            instance.machine.evidence.conservative_classifications
+        )
+    else:
+        assert instance.machine.evidence.failure_category == categories[role]
     assert instance.machine.evidence.write_boundary_reached is True
     assert instance.machine.evidence.write_attempt_counters[counter_names[role]] == 1
 
