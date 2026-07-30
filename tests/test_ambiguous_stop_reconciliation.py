@@ -14,8 +14,6 @@ from checkpoint_7c_one_share_commissioning_launcher import RETIRED_LIVE_RUN_IDS
 from src.one_share_commissioning import (
     AtomicEvidenceStore,
     EASTERN,
-    ENTRY_AUTHORIZATION_PHRASE,
-    FLATTEN_AUTHORIZATION_PHRASE,
     RuntimeAuthorization,
     State,
     validate_sanitized_evidence,
@@ -65,11 +63,7 @@ def authorization(run_id: str, stage: str) -> RuntimeAuthorization:
         eastern_date=date(2026, 7, 29),
         window_start=NOW - timedelta(minutes=5),
         window_end=NOW + timedelta(minutes=10),
-        phrase=(
-            ENTRY_AUTHORIZATION_PHRASE
-            if stage == "entry"
-            else FLATTEN_AUTHORIZATION_PHRASE
-        ),
+        stage=stage,
         symbol="AAPL",
         quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"),
@@ -544,8 +538,6 @@ def test_repaired_stop_evidence_is_sanitized(tmp_path):
         "entry-fixture",
         "stop-fixture",
         "exit-fixture",
-        ENTRY_AUTHORIZATION_PHRASE,
-        FLATTEN_AUTHORIZATION_PHRASE,
         format(EXPECTED_STOP, "f"),
     ):
         assert prohibited not in rendered

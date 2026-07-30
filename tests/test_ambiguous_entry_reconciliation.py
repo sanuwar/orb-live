@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.one_share_commissioning import ENTRY_AUTHORIZATION_PHRASE, State
+from src.one_share_commissioning import ENTRY_AUTHORIZATION_STAGE, State
 from src.robinhood_commissioning_adapter import (
     AmbiguousWriteError,
     RobinhoodCommissioningAdapter,
@@ -340,7 +340,6 @@ def test_repaired_evidence_is_sanitized(tmp_path):
         "raw_response",
     ):
         assert prohibited not in rendered
-    assert ENTRY_AUTHORIZATION_PHRASE.lower() not in rendered
     parsed = json.loads(rendered)
     assert parsed["write_attempt_counters"] == {
         "entry_place": 1,

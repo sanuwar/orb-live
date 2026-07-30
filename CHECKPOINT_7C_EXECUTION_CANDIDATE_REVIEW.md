@@ -50,14 +50,22 @@ attribution, inconsistency, or timeout require operator control.
 
 ## Runtime controls and recovery
 
-Two separate, non-reusable authorizations are required:
+Two separate, non-reusable operator confirmations are required:
 
-- `AUTHORIZE ORB LIVE AAPL ONE SHARE ENTRY PLANNED RISK 15`
-- `AUTHORIZE ORB LIVE AAPL ONE SHARE CONTROLLED FLATTEN`
+- entry: `Authorize this one-share entry? [y/N]`
+- flatten: `Authorize controlled flatten? [y/N]`
 
-Each binds the safe run ID, current Eastern date, narrow window, AAPL, one whole
+Only exact `y` or `Y` approves; No is the default for empty, `n`/`N`, other
+text, EOF, interruption, or unavailable input. Each prompt is presented at most
+once. Entry approval and flatten approval are distinct, one-time, stage-scoped,
+Run-ID-scoped grants and cannot authorize each other or a later process or run.
+
+Each approval also binds the current Eastern date, narrow window, AAPL, one whole
 share, `planned_risk_usd=15`, acknowledgment that actual loss may exceed planned
-risk, continuous attendance, Robinhood UI availability, and no second trade.
+risk, continuous attendance, Robinhood UI availability, and no second trade. No
+raw terminal response is logged or persisted. This UX change does not alter
+reconciliation, deadlines, state transitions after approval, or the one-attempt
+entry, stop, cancel, and exit write limits.
 
 The reviewed Python path fixes the execution date at 2026-07-28. Entry
 authorization and placement are permitted from 15:30:00 ET through strictly

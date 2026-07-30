@@ -27,12 +27,8 @@ ENTRY_FILL_DEADLINE_SECONDS = 30
 STOP_REVIEW_DEADLINE_SECONDS = 10
 STOP_OBSERVATION_DEADLINE_SECONDS = 30
 MAX_UNPROTECTED_SECONDS = 45
-ENTRY_AUTHORIZATION_PHRASE = (
-    "AUTHORIZE ORB LIVE AAPL ONE SHARE ENTRY PLANNED RISK 15"
-)
-FLATTEN_AUTHORIZATION_PHRASE = (
-    "AUTHORIZE ORB LIVE AAPL ONE SHARE CONTROLLED FLATTEN"
-)
+ENTRY_AUTHORIZATION_STAGE = "entry"
+FLATTEN_AUTHORIZATION_STAGE = "flatten"
 EASTERN = ZoneInfo("America/New_York")
 MAX_AUTHORIZATION_WINDOW_SECONDS = 15 * 60
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
@@ -45,13 +41,17 @@ class CommissioningError(RuntimeError):
 class AuthorizationInputError(CommissioningError):
     """Interactive authorization failed without retaining supplied input."""
 
+    def __init__(self, category: str) -> None:
+        self.category = category
+        super().__init__(category)
 
-class AuthorizationPhraseMismatchError(AuthorizationInputError):
-    """The supplied authorization did not exactly match the expected phrase."""
+
+class AuthorizationDeclinedError(AuthorizationInputError):
+    """The operator did not explicitly approve the requested stage."""
 
 
-class AuthorizationReaderError(AuthorizationInputError):
-    """The terminal authorization reader failed or reached EOF."""
+class AuthorizationInterruptedError(AuthorizationInputError):
+    """The terminal authorization reader was interrupted or unavailable."""
 
 
 class EntryWindowError(CommissioningError):
@@ -62,7 +62,11 @@ ALLOWED_FAILURE_CATEGORIES = frozenset({
     "SESSION_INITIALIZATION_FAILED", "SILENT_AUTH_FAILED",
     "ACCOUNT_RESOLUTION_FAILED", "ACCOUNT_IDENTITY_MISMATCH",
     "ADAPTER_INITIALIZATION_FAILED", "ORCHESTRATOR_INITIALIZATION_FAILED",
-    "AUTHORIZATION_INPUT_FAILED", "ENTRY_WINDOW_REJECTED",
+    "AUTHORIZATION_INPUT_FAILED",
+    "ENTRY_AUTHORIZATION_APPROVED", "ENTRY_AUTHORIZATION_DECLINED",
+    "ENTRY_AUTHORIZATION_INTERRUPTED",
+    "FLATTEN_AUTHORIZATION_APPROVED", "FLATTEN_AUTHORIZATION_DECLINED",
+    "FLATTEN_AUTHORIZATION_INTERRUPTED", "ENTRY_WINDOW_REJECTED",
     "ENTRY_REVIEW_FAILED_BEFORE_WRITE", "ENTRY_PLACE_AMBIGUOUS",
     "ENTRY_PLACE_RESPONSE_MALFORMED", "ENTRY_PLACE_TRANSPORT_AMBIGUOUS",
     "ENTRY_RECONCILIATION_MULTIPLE_MATCHES",
@@ -97,6 +101,7 @@ ALLOWED_FAILURE_STAGES = frozenset({
     "ADAPTER_INITIALIZATION", "ORCHESTRATOR_INITIALIZATION",
     "EVIDENCE_INITIALIZATION", "PREFLIGHT_RECONCILIATION", "ENTRY_REVIEW",
     "ENTRY_AUTHORIZATION_INPUT", "ENTRY_AUTHORIZATION_CONSUMPTION",
+    "FLATTEN_AUTHORIZATION_INPUT", "FLATTEN_AUTHORIZATION_CONSUMPTION",
     "ENTRY_WINDOW_VALIDATION", "ENTRY_PLACE", "ENTRY_RECONCILIATION",
     "STOP_PROTECTION", "CANCEL_RECONCILIATION", "FLATTENING",
     "FINAL_FLAT_VERIFICATION", "EVIDENCE_PERSISTENCE", "SESSION_CLOSE",
@@ -105,8 +110,8 @@ ALLOWED_FAILURE_STAGES = frozenset({
 
 SAFE_EXCEPTION_TYPES = frozenset({
     "AccountIdentityMismatchError", "AccountResolutionError",
-    "AuthorizationInputError", "AuthorizationPhraseMismatchError",
-    "AuthorizationReaderError", "BrowserAuthenticationRequestError",
+    "AuthorizationDeclinedError", "AuthorizationInputError",
+    "AuthorizationInterruptedError", "BrowserAuthenticationRequestError",
     "CommissioningError", "CommissioningSessionBindingError",
     "EntryWindowError", "SilentAuthenticationError",
     "TimeoutError", "TypeError", "ValueError", "OSError", "RuntimeError",
@@ -187,7 +192,7 @@ class RuntimeAuthorization:
     eastern_date: date
     window_start: datetime
     window_end: datetime
-    phrase: str
+    stage: str
     symbol: str
     quantity: Decimal
     planned_risk_usd: Decimal
@@ -197,10 +202,18 @@ class RuntimeAuthorization:
     no_second_trade: bool
     used: bool = False
 
-    def consume(self, *, now: datetime, expected_phrase: str, run_id: str) -> None:
+    def consume(self, *, now: datetime, expected_stage: str, run_id: str) -> None:
         if self.used:
             raise CommissioningError("authorization is not reusable")
-        if self.run_id != run_id or self.phrase != expected_phrase:
+        self.used = True
+        if (
+            self.run_id != run_id
+            or self.stage != expected_stage
+            or self.stage not in {
+                ENTRY_AUTHORIZATION_STAGE,
+                FLATTEN_AUTHORIZATION_STAGE,
+            }
+        ):
             raise CommissioningError("authorization scope mismatch")
         times = (now, self.window_start, self.window_end)
         if any(value.tzinfo is None or value.utcoffset() is None for value in times):
@@ -225,9 +238,6 @@ class RuntimeAuthorization:
             )
         ):
             raise CommissioningError("attended authorization acknowledgments incomplete")
-        self.used = True
-
-
 @dataclass(frozen=True)
 class OrderObservation:
     commissioned_account: bool
@@ -752,11 +762,14 @@ class CommissioningMachine:
                         *, now: datetime) -> None:
         self._require(State.ENTRY_REVIEWED)
         try:
-            authorization.consume(now=now, expected_phrase=ENTRY_AUTHORIZATION_PHRASE,
+            authorization.consume(now=now, expected_stage=ENTRY_AUTHORIZATION_STAGE,
                                   run_id=self.run_id)
         except CommissioningError:
             self.failed_closed("ENTRY_AUTHORIZATION_REJECTED")
             raise
+        self.evidence.conservative_classifications.append(
+            "ENTRY_AUTHORIZATION_APPROVED"
+        )
         self._record_state(State.ENTRY_AUTHORIZED)
 
     def entry_submitted(self, disposition: WriteDisposition) -> None:
@@ -909,11 +922,14 @@ class CommissioningMachine:
                           *, now: datetime) -> None:
         self._require(State.EXIT_AUTHORIZATION_REQUIRED)
         try:
-            authorization.consume(now=now, expected_phrase=FLATTEN_AUTHORIZATION_PHRASE,
+            authorization.consume(now=now, expected_stage=FLATTEN_AUTHORIZATION_STAGE,
                                   run_id=self.run_id)
         except CommissioningError:
             self.operator_required("FLATTEN_AUTHORIZATION_REJECTED")
             raise
+        self.evidence.conservative_classifications.append(
+            "FLATTEN_AUTHORIZATION_APPROVED"
+        )
         self.flatten_authorized = True
 
     def stop_cancel_requested(self, disposition: WriteDisposition) -> None:

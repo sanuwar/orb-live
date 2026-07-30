@@ -14,8 +14,8 @@ from src.one_share_commissioning import (
     AuthorizationInputError,
     CommissioningDiagnosticError,
     EASTERN,
-    ENTRY_AUTHORIZATION_PHRASE,
-    FLATTEN_AUTHORIZATION_PHRASE,
+    ENTRY_AUTHORIZATION_STAGE,
+    FLATTEN_AUTHORIZATION_STAGE,
     State,
 )
 from src.one_share_commissioning_orchestrator import (
@@ -144,7 +144,7 @@ def test_exact_incident_regression_is_authorization_input_before_write(tmp_path)
         "PREFLIGHT", "ENTRY_REVIEWED", "FAILED_CLOSED"
     ]
     assert evidence["failure_stage"] == "ENTRY_AUTHORIZATION_INPUT"
-    assert evidence["failure_category"] == "AUTHORIZATION_INPUT_FAILED"
+    assert evidence["failure_category"] == "ENTRY_AUTHORIZATION_DECLINED"
     assert evidence["write_boundary_reached"] is False
     assert evidence["write_attempt_counters"] == {
         "entry_place": 0,
@@ -159,10 +159,7 @@ def test_exact_incident_regression_is_authorization_input_before_write(tmp_path)
 
 
 def test_faithful_offline_binding_reproduction_completes_after_repair(tmp_path):
-    supplied = iter([
-        ENTRY_AUTHORIZATION_PHRASE,
-        FLATTEN_AUTHORIZATION_PHRASE,
-    ])
+    supplied = iter(["y", "Y"])
     binding, factory, counts, store = actual_binding(
         tmp_path,
         secret_reader=lambda prompt: next(supplied),
@@ -182,7 +179,7 @@ def test_authorization_window_is_narrow_and_cutoff_bounded(tmp_path):
     provider = launcher.InteractiveAuthorizationProvider(
         live_request(tmp_path),
         now_eastern=lambda: NOW,
-        secret_reader=lambda prompt: ENTRY_AUTHORIZATION_PHRASE,
+        secret_reader=lambda prompt: "y",
     )
     authorization = provider("entry")
     seconds = (
@@ -208,9 +205,7 @@ def test_raw_authorization_exception_is_sanitized(tmp_path):
     assert result.state is State.FAILED_CLOSED
     assert private_text not in rendered
     assert FIXTURE_ACCOUNT not in rendered
-    assert ENTRY_AUTHORIZATION_PHRASE not in rendered
-    assert FLATTEN_AUTHORIZATION_PHRASE not in rendered
-    assert "AUTHORIZATION_INPUT_FAILED" in rendered
+    assert "ENTRY_AUTHORIZATION_INTERRUPTED" in rendered
 
 
 class ReviewFailureAdapter(FakeAdapter):
@@ -272,10 +267,7 @@ def test_failure_during_entry_review_is_classified_without_write(tmp_path):
 
 
 def test_ambiguous_entry_is_one_write_and_operator_required(tmp_path):
-    supplied = iter([
-        ENTRY_AUTHORIZATION_PHRASE,
-        FLATTEN_AUTHORIZATION_PHRASE,
-    ])
+    supplied = iter(["y", "Y"])
     request = live_request(tmp_path, run_id="ambiguous-entry")
     provider = launcher.InteractiveAuthorizationProvider(
         request,
@@ -445,7 +437,7 @@ class FailOnceAtEntryBoundaryStore(AtomicEvidenceStore):
 def test_failed_before_write_marker_does_not_claim_a_write(tmp_path):
     clock = Clock()
     store = FailOnceAtEntryBoundaryStore(tmp_path, "boundary-persist-failure")
-    supplied = iter([ENTRY_AUTHORIZATION_PHRASE])
+    supplied = iter(["y"])
     provider = launcher.InteractiveAuthorizationProvider(
         live_request(tmp_path, run_id="boundary-persist-failure"),
         now_eastern=lambda: NOW,
