@@ -81,6 +81,7 @@ REVIEWED_HASHES: Mapping[str, str] = {
 REAL_SESSION_RUNTIME_FLAG = "ENABLE_ATTENDED_ONE_SHARE_COMMISSIONING"
 LIVE_CHECKPOINT_AUTHORIZATION_FLAG = "AUTHORIZE_CHECKPOINT_7C_LIVE"
 RETIRED_LIVE_RUN_IDS = frozenset({
+    'cp7c-live-aapl-one-share-20260730-04',
     "cp7c-live-aapl-one-share-20260729-04",
     "cp7c-live-aapl-one-share-20260729-03",
     "cp7c-live-aapl-one-share-20260729-02",
