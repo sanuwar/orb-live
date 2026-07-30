@@ -14,6 +14,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -112,7 +113,7 @@ SAFE_EXCEPTION_TYPES = frozenset({
     "AccountIdentityMismatchError", "AccountResolutionError",
     "AuthorizationDeclinedError", "AuthorizationInputError",
     "AuthorizationInterruptedError", "BrowserAuthenticationRequestError",
-    "CommissioningError", "CommissioningSessionBindingError",
+    "CancelledError", "CommissioningError", "CommissioningSessionBindingError",
     "EntryWindowError", "SilentAuthenticationError",
     "TimeoutError", "TypeError", "ValueError", "OSError", "RuntimeError",
 })
@@ -337,6 +338,46 @@ def normalize_explicit_price(value: object) -> Decimal:
     return result
 
 
+_TRUTH_VALUES = frozenset({"true", "false", "unknown"})
+_DURATION_BUCKETS = frozenset({
+    "under_1_second", "1_to_5_seconds", "5_to_15_seconds", "over_15_seconds",
+    "unknown",
+})
+ALLOWED_CANCEL_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
+    "cancel_call_started": _TRUTH_VALUES,
+    "cancel_call_returned": _TRUTH_VALUES,
+    "cancel_task_cancelled": _TRUTH_VALUES,
+    "session_healthy_after_cancel": _TRUTH_VALUES,
+    "cancel_response_contained_accepted": _TRUTH_VALUES,
+    "cancel_accepted_value": _TRUTH_VALUES,
+    "cancel_elapsed_duration_bucket": _DURATION_BUCKETS,
+    "cancel_timeout_layer": frozenset({
+        "none", "reconciliation_deadline", "transport", "unknown",
+    }),
+    "cancel_transport_classification": frozenset(
+        SAFE_EXCEPTION_TYPES | {"UNKNOWN_EXCEPTION", "NONE"}
+    ),
+    "cancel_response_shape_classification": frozenset({
+        "documented_envelope", "empty_result", "malformed_envelope",
+        "not_reached", "unknown",
+    }),
+})
+
+
+def coarse_duration_bucket(seconds: float | None) -> str:
+    """Bucket an elapsed duration; exact broker timings never reach evidence."""
+
+    if seconds is None or seconds != seconds or seconds < 0:
+        return "unknown"
+    if seconds < 1:
+        return "under_1_second"
+    if seconds < 5:
+        return "1_to_5_seconds"
+    if seconds <= 15:
+        return "5_to_15_seconds"
+    return "over_15_seconds"
+
+
 PROHIBITED_EVIDENCE_TERMS = (
     "account_number",
     "fingerprint",
@@ -384,6 +425,7 @@ class SanitizedEvidence:
     timing_durations_ms: dict[str, int] = field(default_factory=dict)
     expected_vs_observed_json_types: dict[str, str] = field(default_factory=dict)
     record_counts: dict[str, int] = field(default_factory=dict)
+    cancel_diagnostics: dict[str, str] = field(default_factory=dict)
     completion_or_failure_reason: str = "IN_PROGRESS"
     planned_risk_usd: int = 15
     sanitized_exception_type: str = "NONE"
@@ -661,6 +703,16 @@ class CommissioningMachine:
                 "cancel_reconciliation_candidate_count"
             ] = candidate_count
         self.evidence.record_counts["stop_cancel_retries"] = 0
+        self.evidence_store.persist(self.evidence)
+
+    def record_cancel_diagnostic(self, key: str, value: str) -> None:
+        """Record one allowlisted cancel observation; values are never free text."""
+        allowed = ALLOWED_CANCEL_DIAGNOSTICS.get(key)
+        if allowed is None:
+            raise CommissioningError("cancel diagnostic key is invalid")
+        if not isinstance(value, str) or value not in allowed:
+            raise CommissioningError("cancel diagnostic value is invalid")
+        self.evidence.cancel_diagnostics[key] = value
         self.evidence_store.persist(self.evidence)
 
     def record_cancel_reconciliation_read(self, kind: str) -> None:
