@@ -80,4 +80,3 @@ The later live flat state and absence of open orders do not recover who caused
 the terminal cancellation or final exit. Any later attended attempt requires a
 merged reviewed incident record, a new date/window, a new wrapper, a new unused
 Run ID, and separate attended authorization. `strategy.enabled` remains false.
-
