@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from src.one_share_commissioning import (
-    AtomicEvidenceStore, CommissioningError, EASTERN, ENTRY_AUTHORIZATION_PHRASE,
-    FLATTEN_AUTHORIZATION_PHRASE, RuntimeAuthorization, State,
+    AtomicEvidenceStore, CommissioningError, EASTERN, ENTRY_AUTHORIZATION_STAGE,
+    FLATTEN_AUTHORIZATION_STAGE, RuntimeAuthorization, State,
 )
 from src.one_share_commissioning_orchestrator import (
     CommissioningTimePolicy, OneShareCommissioningOrchestrator,
@@ -44,12 +44,11 @@ class Clock:
 
 
 def authorization(run_id, stage):
-    phrase = (ENTRY_AUTHORIZATION_PHRASE if stage == "entry"
-              else FLATTEN_AUTHORIZATION_PHRASE)
+    authorization_stage = stage
     return RuntimeAuthorization(
         run_id=run_id, eastern_date=date(2026, 7, 29),
         window_start=NOW - timedelta(minutes=5), window_end=NOW + timedelta(minutes=10),
-        phrase=phrase, symbol="AAPL", quantity=Decimal("1"),
+        stage=authorization_stage, symbol="AAPL", quantity=Decimal("1"),
         planned_risk_usd=Decimal("15"), acknowledges_loss_may_exceed_plan=True,
         operator_present=True, robinhood_ui_available=True, no_second_trade=True,
     )
@@ -252,7 +251,7 @@ def test_entry_placement_is_rechecked_and_rejected_at_cutoff(tmp_path):
         run_id="run-1", eastern_date=date(2026, 7, 29),
         window_start=datetime(2026, 7, 29, 10, 45, tzinfo=EASTERN),
         window_end=datetime(2026, 7, 29, 11, 0, tzinfo=EASTERN),
-        phrase=ENTRY_AUTHORIZATION_PHRASE, symbol="AAPL",
+        stage=ENTRY_AUTHORIZATION_STAGE, symbol="AAPL",
         quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
         acknowledges_loss_may_exceed_plan=True, operator_present=True,
         robinhood_ui_available=True, no_second_trade=True,
@@ -290,7 +289,7 @@ def test_at_1110_protection_cancellation_and_flattening_continue(tmp_path):
                 run_id="run-1", eastern_date=date(2026, 7, 29),
                 window_start=datetime(2026, 7, 29, 10, 45, tzinfo=EASTERN),
                 window_end=datetime(2026, 7, 29, 11, 0, tzinfo=EASTERN),
-                phrase=ENTRY_AUTHORIZATION_PHRASE, symbol="AAPL",
+                stage=ENTRY_AUTHORIZATION_STAGE, symbol="AAPL",
                 quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
                 acknowledges_loss_may_exceed_plan=True, operator_present=True,
                 robinhood_ui_available=True, no_second_trade=True,
@@ -299,7 +298,7 @@ def test_at_1110_protection_cancellation_and_flattening_continue(tmp_path):
             run_id="run-1", eastern_date=date(2026, 7, 29),
             window_start=datetime(2026, 7, 29, 11, 10, tzinfo=EASTERN),
             window_end=datetime(2026, 7, 29, 11, 15, tzinfo=EASTERN),
-            phrase=FLATTEN_AUTHORIZATION_PHRASE, symbol="AAPL",
+            stage=FLATTEN_AUTHORIZATION_STAGE, symbol="AAPL",
             quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
             acknowledges_loss_may_exceed_plan=True, operator_present=True,
             robinhood_ui_available=True, no_second_trade=True,

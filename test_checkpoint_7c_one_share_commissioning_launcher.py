@@ -13,8 +13,8 @@ from src.one_share_commissioning_orchestrator import CommissioningTimePolicy
 from src.one_share_commissioning import (
     CommissioningError,
     EASTERN,
-    ENTRY_AUTHORIZATION_PHRASE,
-    FLATTEN_AUTHORIZATION_PHRASE,
+    ENTRY_AUTHORIZATION_STAGE,
+    FLATTEN_AUTHORIZATION_STAGE,
     State,
 )
 
@@ -306,7 +306,7 @@ def test_used_run_id_fails_before_session_creation(tmp_path):
 
 
 def test_entry_and_flatten_authorizations_are_separate_and_single_use(tmp_path):
-    supplied = iter([ENTRY_AUTHORIZATION_PHRASE, FLATTEN_AUTHORIZATION_PHRASE])
+    supplied = iter(["y", "Y"])
     provider = launcher.InteractiveAuthorizationProvider(
         live_request(tmp_path),
         now_eastern=lambda: NOW,
@@ -314,7 +314,8 @@ def test_entry_and_flatten_authorizations_are_separate_and_single_use(tmp_path):
     )
     entry = provider("entry")
     flatten = provider("flatten")
-    assert entry.phrase != flatten.phrase
+    assert entry.stage == ENTRY_AUTHORIZATION_STAGE
+    assert flatten.stage == FLATTEN_AUTHORIZATION_STAGE
     with pytest.raises(CommissioningError, match="reusable"):
         provider("entry")
 

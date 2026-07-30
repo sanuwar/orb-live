@@ -7,7 +7,7 @@ import pytest
 
 from src.one_share_commissioning import (
     AtomicEvidenceStore, CommissioningError, CommissioningMachine,
-    EASTERN, ENTRY_AUTHORIZATION_PHRASE, FLATTEN_AUTHORIZATION_PHRASE,
+    EASTERN, ENTRY_AUTHORIZATION_STAGE, FLATTEN_AUTHORIZATION_STAGE,
     EntryFillObservation, OrderObservation, RuntimeAuthorization, State, WriteDisposition,
     assess_provisional_protection, normalize_stop_price, validate_sanitized_evidence,
 )
@@ -16,11 +16,11 @@ from src.one_share_commissioning import (
 NOW = datetime(2026, 7, 27, 11, 5, tzinfo=EASTERN)
 
 
-def auth(run_id, phrase, **changes):
+def auth(run_id, stage, **changes):
     values = dict(
         run_id=run_id, eastern_date=date(2026, 7, 27),
         window_start=NOW - timedelta(minutes=5),
-        window_end=NOW + timedelta(minutes=5), phrase=phrase,
+        window_end=NOW + timedelta(minutes=5), stage=stage,
         symbol="AAPL", quantity=Decimal("1"), planned_risk_usd=Decimal("15"),
         acknowledges_loss_may_exceed_plan=True, operator_present=True,
         robinhood_ui_available=True, no_second_trade=True,
@@ -39,7 +39,7 @@ def to_entry_reconciling(value):
     value.preflight_passed(strategy_enabled=False, commissioned_accounts=1,
         aapl_position_quantity=0, related_open_orders=0, regular_market_hours=True)
     value.entry_reviewed(accepted=True)
-    value.authorize_entry(auth(value.run_id, ENTRY_AUTHORIZATION_PHRASE), now=NOW)
+    value.authorize_entry(auth(value.run_id, ENTRY_AUTHORIZATION_STAGE), now=NOW)
     value.entry_submitted(WriteDisposition.ACCEPTED)
 
 
@@ -92,7 +92,7 @@ def test_entry_placement_rejection_or_ambiguity_has_no_retry(tmp_path, dispositi
     value.preflight_passed(strategy_enabled=False, commissioned_accounts=1,
         aapl_position_quantity=0, related_open_orders=0, regular_market_hours=True)
     value.entry_reviewed(accepted=True)
-    value.authorize_entry(auth(value.run_id, ENTRY_AUTHORIZATION_PHRASE), now=NOW)
+    value.authorize_entry(auth(value.run_id, ENTRY_AUTHORIZATION_STAGE), now=NOW)
     value.entry_submitted(disposition)
     assert value.state is state
     assert value.entry_place_attempted
@@ -175,7 +175,7 @@ def to_exit_authorization(value):
     to_stop_reconciling(value)
     value.protection_observed(order=good_order(), position_quantity=1,
         competing_sell_orders=0, observation_seconds=2, unprotected_seconds=3)
-    value.authorize_flatten(auth(value.run_id, FLATTEN_AUTHORIZATION_PHRASE), now=NOW)
+    value.authorize_flatten(auth(value.run_id, FLATTEN_AUTHORIZATION_STAGE), now=NOW)
 
 
 def test_stop_cancel_pending_then_stop_fills(tmp_path):
@@ -255,32 +255,32 @@ def test_authorization_rejections(tmp_path, changes):
     value.preflight_passed(strategy_enabled=False, commissioned_accounts=1,
         aapl_position_quantity=0, related_open_orders=0, regular_market_hours=True)
     value.entry_reviewed(accepted=True)
-    authorization = auth(value.run_id, ENTRY_AUTHORIZATION_PHRASE, **changes)
+    authorization = auth(value.run_id, ENTRY_AUTHORIZATION_STAGE, **changes)
     with pytest.raises(CommissioningError):
         value.authorize_entry(authorization, now=NOW)
     assert value.state is State.FAILED_CLOSED
 
 
 def test_authorization_and_run_id_are_not_reusable(tmp_path):
-    authorization = auth("run-1", ENTRY_AUTHORIZATION_PHRASE)
-    authorization.consume(now=NOW, expected_phrase=ENTRY_AUTHORIZATION_PHRASE, run_id="run-1")
+    authorization = auth("run-1", ENTRY_AUTHORIZATION_STAGE)
+    authorization.consume(now=NOW, expected_stage=ENTRY_AUTHORIZATION_STAGE, run_id="run-1")
     with pytest.raises(CommissioningError):
-        authorization.consume(now=NOW, expected_phrase=ENTRY_AUTHORIZATION_PHRASE, run_id="run-1")
+        authorization.consume(now=NOW, expected_stage=ENTRY_AUTHORIZATION_STAGE, run_id="run-1")
     value = machine(tmp_path)
     with pytest.raises(CommissioningError):
         machine(tmp_path)
 
 
 def test_authorization_requires_eastern_narrow_window(tmp_path):
-    naive = auth("run-1", ENTRY_AUTHORIZATION_PHRASE)
+    naive = auth("run-1", ENTRY_AUTHORIZATION_STAGE)
     naive.window_start = naive.window_start.replace(tzinfo=None)
     with pytest.raises(CommissioningError):
-        naive.consume(now=NOW, expected_phrase=ENTRY_AUTHORIZATION_PHRASE, run_id="run-1")
-    wide = auth("run-2", ENTRY_AUTHORIZATION_PHRASE,
+        naive.consume(now=NOW, expected_stage=ENTRY_AUTHORIZATION_STAGE, run_id="run-1")
+    wide = auth("run-2", ENTRY_AUTHORIZATION_STAGE,
                 window_start=NOW - timedelta(minutes=8),
                 window_end=NOW + timedelta(minutes=8))
     with pytest.raises(CommissioningError):
-        wide.consume(now=NOW, expected_phrase=ENTRY_AUTHORIZATION_PHRASE, run_id="run-2")
+        wide.consume(now=NOW, expected_stage=ENTRY_AUTHORIZATION_STAGE, run_id="run-2")
 
 
 @pytest.mark.parametrize("run_id", ["", ".", "..", "../escape", "bad/name", "bad\\name"])

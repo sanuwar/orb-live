@@ -12,8 +12,6 @@ import pytest
 from checkpoint_7c_one_share_commissioning_launcher import RETIRED_LIVE_RUN_IDS
 from src.one_share_commissioning import (
     AtomicEvidenceStore,
-    ENTRY_AUTHORIZATION_PHRASE,
-    FLATTEN_AUTHORIZATION_PHRASE,
     State,
     validate_sanitized_evidence,
 )
@@ -367,8 +365,6 @@ def test_cancel_evidence_is_sanitized(tmp_path):
         "entry-fixture",
         "stop-fixture",
         "exit-fixture",
-        ENTRY_AUTHORIZATION_PHRASE,
-        FLATTEN_AUTHORIZATION_PHRASE,
         format(EXPECTED_STOP, "f"),
     ):
         assert prohibited not in rendered

@@ -14,21 +14,21 @@ def run_harness(tmp_path, case, run_id, supplied=None):
 
 
 def test_invalid_stdin_fails_before_write_and_closes_session(tmp_path):
-    result = run_harness(tmp_path, "invalid", "fake-harness-invalid", "incorrect\n")
+    result = run_harness(tmp_path, "invalid", "fake-harness-invalid", "PRIVATE_FAKE_INPUT_SENTINEL\n")
     assert result.returncode == 0
-    assert "failure_category=AUTHORIZATION_INPUT_FAILED" in result.stdout
-    assert "sanitized_exception_type=AuthorizationPhraseMismatchError" in result.stdout
+    assert "failure_category=ENTRY_AUTHORIZATION_DECLINED" in result.stdout
+    assert "sanitized_exception_type=AuthorizationDeclinedError" in result.stdout
     assert "write_boundary_reached=false" in result.stdout
     assert "entry_place_attempts=0" in result.stdout
     assert "session_closed=1" in result.stdout
-    assert "authorization_phrase_leakage=0" in result.stdout
+    assert "authorization_input_leakage=0" in result.stdout
 
 
 def test_eof_fails_before_write_and_closes_session(tmp_path):
     result = run_harness(tmp_path, "eof", "fake-harness-eof", "")
     assert result.returncode == 0
-    assert "failure_category=AUTHORIZATION_INPUT_FAILED" in result.stdout
-    assert "sanitized_exception_type=AuthorizationReaderError" in result.stdout
+    assert "failure_category=ENTRY_AUTHORIZATION_INTERRUPTED" in result.stdout
+    assert "sanitized_exception_type=AuthorizationInterruptedError" in result.stdout
     assert "write_boundary_reached=false" in result.stdout
     assert "entry_place_attempts=0" in result.stdout
     assert "session_closed=1" in result.stdout
@@ -36,7 +36,7 @@ def test_eof_fails_before_write_and_closes_session(tmp_path):
 
 def test_valid_stdin_completes_once_and_run_id_cannot_be_reused(tmp_path):
     run_id = "fake-harness-valid"
-    result = run_harness(tmp_path, "valid", run_id, "FAKE AUTHORIZATION ACCEPTED\n")
+    result = run_harness(tmp_path, "valid", run_id, "y\n")
     assert result.returncode == 0
     assert "fake_state=COMPLETE" in result.stdout
     assert "verified_flat=true" in result.stdout
@@ -46,7 +46,7 @@ def test_valid_stdin_completes_once_and_run_id_cannot_be_reused(tmp_path):
     assert "exit_place_attempts=1" in result.stdout
     assert "authorization_consumed=1" in result.stdout
     assert "emergency_handoffs=0" in result.stdout
-    assert "authorization_phrase_leakage=0" in result.stdout
+    assert "authorization_input_leakage=0" in result.stdout
 
     reused = run_harness(tmp_path, "reuse", run_id)
     assert reused.returncode == 0

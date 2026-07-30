@@ -11,7 +11,7 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from src.live_order_state_model import OrderStateClass, classify_order_state
 from src.one_share_commissioning import (
-    ALLOWED_FAILURE_CATEGORIES, AtomicEvidenceStore,
+    ALLOWED_FAILURE_CATEGORIES, AtomicEvidenceStore, AuthorizationInputError,
     CommissioningDiagnosticError, CommissioningError,
     CommissioningMachine, EntryWindowError,
     EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
@@ -186,8 +186,10 @@ class OneShareCommissioningOrchestrator:
         if reason in {"AMBIGUOUS_ENTRY_SUBMISSION", "AMBIGUOUS_ENTRY_PLACE"}:
             return "ENTRY_PLACE_AMBIGUOUS"
         mapping = {
-            "ENTRY_AUTHORIZATION_INPUT": "AUTHORIZATION_INPUT_FAILED",
-            "ENTRY_AUTHORIZATION_CONSUMPTION": "AUTHORIZATION_INPUT_FAILED",
+            "ENTRY_AUTHORIZATION_INPUT": "ENTRY_AUTHORIZATION_INTERRUPTED",
+            "ENTRY_AUTHORIZATION_CONSUMPTION": "ENTRY_AUTHORIZATION_INTERRUPTED",
+            "FLATTEN_AUTHORIZATION_INPUT": "FLATTEN_AUTHORIZATION_INTERRUPTED",
+            "FLATTEN_AUTHORIZATION_CONSUMPTION": "FLATTEN_AUTHORIZATION_INTERRUPTED",
             "ENTRY_WINDOW_VALIDATION": "ENTRY_WINDOW_REJECTED",
             "ENTRY_REVIEW": "ENTRY_REVIEW_FAILED_BEFORE_WRITE",
             "ENTRY_PLACE": "ENTRY_PLACE_AMBIGUOUS",
@@ -860,9 +862,12 @@ class OneShareCommissioningOrchestrator:
                 stop_filled = await self._reconcile_stop(stop_id)
             if stop_filled:
                 return await self._finalize_flat()
-            self._stage = "FLATTENING"
-            self.machine.authorize_flatten(await self._authorization("flatten"),
-                                           now=self.now_eastern())
+            self._stage = "FLATTEN_AUTHORIZATION_INPUT"
+            flatten_authorization = await self._authorization("flatten")
+            self._stage = "FLATTEN_AUTHORIZATION_CONSUMPTION"
+            self.machine.authorize_flatten(
+                flatten_authorization, now=self.now_eastern()
+            )
             self._stage = "CANCEL_RECONCILIATION"
             cancel_baseline_orders = await self._read_orders()
             cancel_baseline_position = self._aapl_position(
@@ -910,6 +915,8 @@ class OneShareCommissioningOrchestrator:
             category = (
                 "ENTRY_WINDOW_REJECTED"
                 if isinstance(error, EntryWindowError)
+                else error.category
+                if isinstance(error, AuthorizationInputError)
                 else self._failure_category()
             )
             action = (

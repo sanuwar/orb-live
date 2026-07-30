@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
-import hmac
 import subprocess
 import sys
 import time as runtime_time
@@ -27,11 +26,11 @@ from src.canonical_source_hash import (
 )
 from src.config import load_config
 from src.one_share_commissioning import (
-    AtomicEvidenceStore, AuthorizationPhraseMismatchError,
-    AuthorizationReaderError, CommissioningDiagnosticError, CommissioningError,
+    AtomicEvidenceStore, AuthorizationDeclinedError,
+    AuthorizationInterruptedError, CommissioningDiagnosticError, CommissioningError,
     EASTERN,
-    ENTRY_AUTHORIZATION_PHRASE,
-    FLATTEN_AUTHORIZATION_PHRASE,
+    ENTRY_AUTHORIZATION_STAGE,
+    FLATTEN_AUTHORIZATION_STAGE,
     MAX_AUTHORIZATION_WINDOW_SECONDS, PLANNED_RISK_USD,
     QUANTITY,
     RUN_ID_PATTERN,
@@ -68,11 +67,11 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/config.py":
         "37669854c3e1dae3c282e787c0af22da9c89ce21fb790a482f4edb2e2db7f1c3",
     "src/one_share_commissioning.py":
-        "97247077e2e6ab484528e38c002368ab53cabb8977bf648b0b6223191e24cffd",
+        "a839594fecfc5e5ac0101cb67d180dc00a7d0add6742b3491ba82f3e27d92cb4",
     "src/robinhood_commissioning_adapter.py":
         "94d6eebbee0ced6748ac85f8c7cb52ff26e9570fa7d2b219d8a5a3efe66c6c68",
     "src/one_share_commissioning_orchestrator.py":
-        "8603fe25027232ca866ca2a665d26a7af60328b3fc1aa03241fa1a0509740f83",
+        "532bbb8e6d6f5d9a6326445d816b3ca5fce2effba219985f2ccec2e1a3eb0e30",
     "src/robinhood_commissioning_session.py":
         "a7e0367de955eb26695f6e61c99b0c99cfdab869c042cd9fcddf209b7065c4e1",
     "src/robinhood_client.py":
@@ -80,6 +79,8 @@ REVIEWED_HASHES: Mapping[str, str] = {
 }
 REAL_SESSION_RUNTIME_FLAG = "ENABLE_ATTENDED_ONE_SHARE_COMMISSIONING"
 LIVE_CHECKPOINT_AUTHORIZATION_FLAG = "AUTHORIZE_CHECKPOINT_7C_LIVE"
+ENTRY_AUTHORIZATION_PROMPT = "Authorize this one-share entry? [y/N] "
+FLATTEN_AUTHORIZATION_PROMPT = "Authorize controlled flatten? [y/N] "
 RETIRED_LIVE_RUN_IDS = frozenset({
     'cp7c-live-aapl-one-share-20260730-04',
     "cp7c-live-aapl-one-share-20260729-04",
@@ -260,36 +261,43 @@ class InteractiveAuthorizationProvider:
     _used: set[str] = field(default_factory=set, init=False)
 
     def __call__(self, stage: str) -> RuntimeAuthorization:
-        if stage not in {"entry", "flatten"} or stage in self._used:
+        if stage not in {ENTRY_AUTHORIZATION_STAGE, FLATTEN_AUTHORIZATION_STAGE}:
+            raise CommissioningError("runtime authorization stage is invalid")
+        if stage in self._used:
             raise CommissioningError("runtime authorization is not reusable")
         current = self.now_eastern()
         if current.tzinfo != EASTERN or current.date() != self.request.execution_date:
             raise CommissioningError("runtime authorization date or timezone mismatch")
-        if stage == "entry":
+        if stage == ENTRY_AUTHORIZATION_STAGE:
             validate_commissioning_entry_time(current, self.request.time_policy())
-            expected = ENTRY_AUTHORIZATION_PHRASE
-            prompt = "Enter the exact single-use entry authorization phrase: "
+            prompt = ENTRY_AUTHORIZATION_PROMPT
         else:
-            expected = FLATTEN_AUTHORIZATION_PHRASE
-            prompt = "Enter the exact separate flatten authorization phrase: "
+            prompt = FLATTEN_AUTHORIZATION_PROMPT
+        self._used.add(stage)
         try:
             supplied = self.secret_reader(prompt)
-            accepted = isinstance(supplied, str) and hmac.compare_digest(
-                supplied, expected
-            )
+            accepted = isinstance(supplied, str) and supplied in {"y", "Y"}
+        except (EOFError, KeyboardInterrupt):
+            raise AuthorizationInterruptedError(
+                f"{stage.upper()}_AUTHORIZATION_INTERRUPTED"
+            ) from None
         except Exception:
-            raise AuthorizationReaderError("AUTHORIZATION_INPUT_FAILED") from None
+            raise AuthorizationInterruptedError(
+                f"{stage.upper()}_AUTHORIZATION_INTERRUPTED"
+            ) from None
         finally:
             if "supplied" in locals():
                 supplied = ""
         if not accepted:
-            raise AuthorizationPhraseMismatchError(
-                "AUTHORIZATION_INPUT_FAILED"
+            raise AuthorizationDeclinedError(
+                f"{stage.upper()}_AUTHORIZATION_DECLINED"
             )
         accepted_at = self.now_eastern()
         if accepted_at.tzinfo != EASTERN or accepted_at.date() != self.request.execution_date:
-            raise AuthorizationReaderError("AUTHORIZATION_INPUT_FAILED")
-        if stage == "entry":
+            raise AuthorizationInterruptedError(
+                f"{stage.upper()}_AUTHORIZATION_INTERRUPTED"
+            )
+        if stage == ENTRY_AUTHORIZATION_STAGE:
             validate_commissioning_entry_time(accepted_at, self.request.time_policy())
             cutoff = datetime.combine(
                 self.request.execution_date,
@@ -304,13 +312,12 @@ class InteractiveAuthorizationProvider:
         else:
             start = accepted_at
             end = accepted_at + timedelta(seconds=MAX_AUTHORIZATION_WINDOW_SECONDS)
-        self._used.add(stage)
         return RuntimeAuthorization(
             run_id=self.request.run_id,
             eastern_date=self.request.execution_date,
             window_start=start,
             window_end=end,
-            phrase=expected,
+            stage=stage,
             symbol=self.request.symbol,
             quantity=self.request.quantity,
             planned_risk_usd=self.request.planned_risk_usd,

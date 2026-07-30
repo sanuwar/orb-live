@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import hmac
 import json
 import sys
 from contextlib import asynccontextmanager
@@ -24,13 +23,13 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 import checkpoint_7c_one_share_commissioning_launcher as launcher
 from src.one_share_commissioning import (
-    AtomicEvidenceStore, EASTERN, ENTRY_AUTHORIZATION_PHRASE,
-    FLATTEN_AUTHORIZATION_PHRASE, State,
+    AtomicEvidenceStore, EASTERN, ENTRY_AUTHORIZATION_STAGE,
+    FLATTEN_AUTHORIZATION_STAGE, State,
 )
 from src.one_share_commissioning_orchestrator import OneShareCommissioningOrchestrator
 from tests.test_one_share_commissioning_orchestrator import Clock, FakeAdapter, TIME_POLICY
 
-FAKE_AUTHORIZATION_PHRASE = "FAKE AUTHORIZATION ACCEPTED"
+PRIVATE_FAKE_INPUT = "PRIVATE_FAKE_INPUT_SENTINEL"
 NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
 FAKE_ACCOUNT = "OFFLINE-FAKE-COMMISSIONED-ACCOUNT"
 
@@ -71,10 +70,7 @@ def read_fake_terminal(_prompt: str) -> str:
     supplied = sys.stdin.readline()
     if supplied == "":
         raise EOFError
-    supplied = supplied.rstrip("\r\n")
-    accepted = hmac.compare_digest(supplied, FAKE_AUTHORIZATION_PHRASE)
-    supplied = ""
-    return ENTRY_AUTHORIZATION_PHRASE if accepted else "FAKE_INPUT_REJECTED"
+    return supplied.rstrip("\r\n")
 
 
 async def run_case(case: str, root: Path, run_id: str) -> int:
@@ -95,7 +91,7 @@ async def run_case(case: str, root: Path, run_id: str) -> int:
     )
     flatten_provider = launcher.InteractiveAuthorizationProvider(
         request=request, now_eastern=lambda: NOW,
-        secret_reader=lambda _prompt: FLATTEN_AUTHORIZATION_PHRASE,
+        secret_reader=lambda _prompt: "y",
     )
     entry_consumptions = 0
 
@@ -165,10 +161,9 @@ async def run_case(case: str, root: Path, run_id: str) -> int:
     print(f"verified_flat={str(evidence.get('boolean_validations', {}).get('verified_flat', False)).lower()}")
     print(f"unresolved_orders={evidence.get('record_counts', {}).get('final_related_orders', 0)}")
     leakage = sum(value in rendered for value in (
-        FAKE_AUTHORIZATION_PHRASE, ENTRY_AUTHORIZATION_PHRASE,
-        FLATTEN_AUTHORIZATION_PHRASE, FAKE_ACCOUNT,
+        PRIVATE_FAKE_INPUT, FAKE_ACCOUNT,
     ))
-    print(f"authorization_phrase_leakage={leakage}")
+    print(f"authorization_input_leakage={leakage}")
     print(f"evidence_sha256={hashlib.sha256(evidence_bytes).hexdigest()}")
     print(f"evidence_bytes={len(evidence_bytes)}")
     print(f"evidence_lines={len(evidence_bytes.splitlines())}")
