@@ -379,4 +379,5 @@ def test_cancel_evidence_is_sanitized(tmp_path):
 
 def test_failed_live_run_id_is_permanently_retired():
     assert 'cp7c-live-aapl-one-share-20260730-04' in RETIRED_LIVE_RUN_IDS
+    assert "cp7c-live-aapl-one-share-20260730-05" in RETIRED_LIVE_RUN_IDS
     assert "cp7c-live-aapl-one-share-20260729-04" in RETIRED_LIVE_RUN_IDS

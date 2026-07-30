@@ -17,6 +17,12 @@ reused.
 Both hashes were re-verified against the on-disk partial evidence before
 analysis. Both wrappers remain untracked.
 
+Both Run IDs are enforced in code: each appears in `RETIRED_LIVE_RUN_IDS` in
+`checkpoint_7c_one_share_commissioning_launcher.py`, so
+`validate_live_run_request` rejects either one before any session is opened.
+Retirement therefore does not depend on the operator supplying a fresh
+evidence root.
+
 ## Repeated reason code
 
 `STOP_CANCEL_TIMEOUT`, failure stage `CANCEL_RECONCILIATION`, in both runs.

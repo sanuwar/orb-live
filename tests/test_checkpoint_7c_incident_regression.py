@@ -417,6 +417,7 @@ def test_session_close_failure_is_sanitized(tmp_path):
     [
         "cp7c-live-aapl-one-share-20260728-05",
         "cp7c-live-aapl-one-share-20260729-02",
+        "cp7c-live-aapl-one-share-20260730-05",
     ],
 )
 def test_retired_failed_run_id_is_never_reusable(tmp_path, run_id):

@@ -83,6 +83,7 @@ ENTRY_AUTHORIZATION_PROMPT = "Authorize this one-share entry? [y/N] "
 FLATTEN_AUTHORIZATION_PROMPT = "Authorize controlled flatten? [y/N] "
 RETIRED_LIVE_RUN_IDS = frozenset({
     'cp7c-live-aapl-one-share-20260730-04',
+    "cp7c-live-aapl-one-share-20260730-05",
     "cp7c-live-aapl-one-share-20260729-04",
     "cp7c-live-aapl-one-share-20260729-03",
     "cp7c-live-aapl-one-share-20260729-02",
