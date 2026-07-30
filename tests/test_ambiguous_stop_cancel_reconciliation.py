@@ -276,6 +276,52 @@ def test_unresolved_cancel_reconciliation_is_bounded(
     assert instance.machine.evidence.record_counts["stop_cancel_retries"] == 0
 
 
+def test_attempt_20260730_04_transport_ambiguity_stays_active_until_timeout(
+    tmp_path,
+):
+    run_id = 'cp7c-live-aapl-one-share-20260730-04'
+    instance, adapter, clock, handoffs = make_orchestrator(
+        tmp_path,
+        'still_active',
+        cancel_result='transport',
+        run_id=run_id,
+    )
+
+    result = run(instance)
+
+    assert result.state is State.OPERATOR_REQUIRED
+    assert handoffs[-1].reason_code == 'STOP_CANCEL_TIMEOUT'
+    assert adapter.write_roles == ['entry', 'stop', 'cancel']
+    assert adapter.write_roles.count('cancel') == 1
+    assert 'exit' not in adapter.write_roles
+    evidence = instance.machine.evidence
+    assert evidence.write_attempt_counters == {
+        'entry_place': 1,
+        'stop_place': 1,
+        'stop_cancel': 1,
+        'exit_place': 0,
+    }
+    assert evidence.record_counts['stop_cancel_retries'] == 0
+    assert evidence.record_counts[
+        'cancel_reconciliation_orders_reads'
+    ] == evidence.record_counts['cancel_reconciliation_positions_reads']
+    assert evidence.record_counts['cancel_reconciliation_orders_reads'] > 1
+    assert evidence.boolean_validations['cancel_attribution_unique'] is True
+    assert 'STOP_CANCEL_TRANSPORT_AMBIGUOUS' in (
+        evidence.conservative_classifications
+    )
+    assert 'STOP_CANCEL_STILL_ACTIVE' in (
+        evidence.conservative_classifications
+    )
+    assert evidence.conservative_classifications[-2:] == [
+        'STOP_CANCEL_TIMEOUT',
+        'OPERATOR_REQUIRED',
+    ]
+    assert len(clock.sleeps) == 30
+    payload = json.loads(result.evidence_path.read_text(encoding='utf-8'))
+    validate_sanitized_evidence(payload)
+
+
 def test_stop_fill_during_cancel_reconciliation_finishes_without_sell(tmp_path):
     instance, adapter, _, handoffs = make_orchestrator(tmp_path, "filled_flat")
     assert run(instance).state is State.COMPLETE
@@ -336,4 +382,5 @@ def test_cancel_evidence_is_sanitized(tmp_path):
 
 
 def test_failed_live_run_id_is_permanently_retired():
+    assert 'cp7c-live-aapl-one-share-20260730-04' in RETIRED_LIVE_RUN_IDS
     assert "cp7c-live-aapl-one-share-20260729-04" in RETIRED_LIVE_RUN_IDS

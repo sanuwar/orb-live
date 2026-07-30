@@ -148,6 +148,21 @@ causes no exit. The broker-free repaired-cancel rehearsal reached
 unresolved orders, and no emergency handoff. A separate filled-stop scenario
 completed with no exit. The failed wrapper and Run ID are permanently retired.
 
+Attempt `cp7c-live-aapl-one-share-20260730-04` uniquely reconciled one filled
+entry and one active protective stop, consumed flatten authorization, and
+crossed the stop-cancel write boundary exactly once. The cancel transport
+result was ambiguous. Bounded read-only reconciliation then made 24 exact-order
+reads and 24 position reads; every observation uniquely found the stop in
+normalized `confirmed` state with the one-share position still long. It never
+proved terminal cancellation before the deadline, so it correctly stopped as
+`OPERATOR_REQUIRED` with `STOP_CANCEL_TIMEOUT`, zero cancel retries, and zero
+exit attempts. The operator later reported a flat account with no open AAPL
+orders, but the terminal exit initiator remains unproven. No runtime relaxation
+is evidence-supported. The Run ID is permanently retired, and a faithful
+broker-free regression preserves the fail-closed behavior. A successful fake
+alternative later observed terminal cancellation and completed
+`VERIFIED_FLAT`; a stop-filled alternative completed flat with no exit.
+
 Another live attempt requires all of the following:
 
 - the reviewed repair merged to `main`;
