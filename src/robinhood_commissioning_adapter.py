@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from src.live_order_contract import parse_cancel_response, parse_order_status, parse_place_response
-from src.one_share_commissioning import CommissioningError
+from src.one_share_commissioning import CommissioningError, sanitized_exception_type
 
 
 ALLOWED_COMMISSIONING_TOOLS = frozenset({
@@ -26,8 +26,19 @@ WRITE_TOOLS = frozenset({"place_equity_order", "cancel_equity_order"})
 class AmbiguousWriteError(CommissioningError):
     """A write did not produce a schema-valid result; operator control is required."""
 
-    def __init__(self, category: str = "WRITE_RESULT_AMBIGUOUS") -> None:
+    def __init__(
+        self,
+        category: str = "WRITE_RESULT_AMBIGUOUS",
+        *,
+        transport_classification: str = "NONE",
+        response_shape: str = "unknown",
+        call_returned: bool = False,
+    ) -> None:
         self.category = category
+        # Allowlisted class name only; exception text is never retained.
+        self.transport_classification = transport_classification
+        self.response_shape = response_shape
+        self.call_returned = call_returned
         super().__init__(category)
 
 
@@ -174,7 +185,12 @@ class RobinhoodCommissioningAdapter:
                             )
                         )
                     )
-                    raise AmbiguousWriteError(category) from exc
+                    raise AmbiguousWriteError(
+                        category,
+                        transport_classification=sanitized_exception_type(exc),
+                        response_shape="not_reached",
+                        call_returned=False,
+                    ) from exc
                 raise CommissioningError("read operation failed") from exc
             try:
                 return _data(result)
@@ -195,7 +211,16 @@ class RobinhoodCommissioningAdapter:
                             )
                         )
                     )
-                    raise AmbiguousWriteError(category) from exc
+                    raise AmbiguousWriteError(
+                        category,
+                        transport_classification=sanitized_exception_type(exc),
+                        response_shape=(
+                            "empty_result"
+                            if result is None
+                            else "malformed_envelope"
+                        ),
+                        call_returned=True,
+                    ) from exc
                 raise CommissioningError("read operation failed") from exc
 
         if allowed in WRITE_TOOLS:
@@ -356,8 +381,22 @@ class RobinhoodCommissioningAdapter:
         order_id = arguments.get("order_id")
         if not isinstance(order_id, str) or not order_id.strip():
             raise CommissioningError("cancel requires one transient broker order ID")
-        data = await self._call("cancel_equity_order", arguments, write_key="cancel:stop")
+        # The advertised cancel_equity_order inputSchema requires BOTH
+        # account_number and order_id with additionalProperties=false. The
+        # account is supplied here from the already verified commissioned
+        # identity rather than by the caller, so a cancel can never be
+        # addressed to an account this adapter did not resolve.
+        payload = {
+            "account_number": self.commissioned_account_number,
+            "order_id": order_id,
+        }
+        data = await self._call("cancel_equity_order", payload, write_key="cancel:stop")
         try:
             return parse_cancel_response({"data": data, "guide": "commissioning response"})
         except Exception as exc:
-            raise AmbiguousWriteError("STOP_CANCEL_RESPONSE_MALFORMED") from exc
+            raise AmbiguousWriteError(
+                "STOP_CANCEL_RESPONSE_MALFORMED",
+                transport_classification=sanitized_exception_type(exc),
+                response_shape="malformed_envelope",
+                call_returned=True,
+            ) from exc

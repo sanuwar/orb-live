@@ -88,6 +88,7 @@ def actual_binding(
     secret_reader,
     run_id="offline-incident-reproduction",
     session_factory=None,
+    adapter=None,
 ):
     request = live_request(tmp_path, run_id=run_id)
     provider = launcher.InteractiveAuthorizationProvider(
@@ -104,20 +105,23 @@ def actual_binding(
 
     def adapter_factory(_session, _account):
         counts["adapter"] += 1
-        return FakeAdapter()
+        return adapter if adapter is not None else FakeAdapter()
 
     def orchestrator_factory(**kwargs):
         counts["orchestrator"] += 1
         return OneShareCommissioningOrchestrator(**kwargs)
 
     store = AtomicEvidenceStore(tmp_path, run_id)
+    # One clock: monotonic and sleep must share state, otherwise a fake sleep
+    # never advances a deadline and any bounded wait loops forever.
+    clock = Clock()
     binding = RobinhoodCommissioningSessionBinding(
         run_id=run_id,
         time_policy=TIME_POLICY,
         session_factory=factory,
         commissioned_account_resolver=resolver,
-        monotonic=Clock().monotonic,
-        sleep=Clock().sleep,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
         now_eastern=lambda: NOW,
         authorization_provider=provider,
         evidence_store=store,
@@ -413,6 +417,7 @@ def test_session_close_failure_is_sanitized(tmp_path):
     [
         "cp7c-live-aapl-one-share-20260728-05",
         "cp7c-live-aapl-one-share-20260729-02",
+        "cp7c-live-aapl-one-share-20260730-05",
     ],
 )
 def test_retired_failed_run_id_is_never_reusable(tmp_path, run_id):

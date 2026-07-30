@@ -16,7 +16,7 @@ from src.one_share_commissioning import (
     CommissioningMachine, EntryWindowError,
     EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
     RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
-    WriteDisposition,
+    WriteDisposition, coarse_duration_bucket, sanitized_exception_type,
 )
 from src.robinhood_commissioning_adapter import (
     AmbiguousWriteError, BrokerRejectedError, CommissioningOrderRecord,
@@ -676,6 +676,47 @@ class OneShareCommissioningOrchestrator:
                 )
             await self.sleep(POLL_SECONDS)
 
+    def _record_cancel_call_outcome(
+        self,
+        started: float,
+        *,
+        returned: bool,
+        classification: str,
+        response_shape: str,
+        accepted_present: str,
+        accepted_value: str,
+    ) -> None:
+        """Persist allowlisted cancel-call observations; no raw values."""
+        self.machine.record_cancel_diagnostic(
+            "cancel_call_returned", "true" if returned else "false"
+        )
+        self.machine.record_cancel_diagnostic(
+            "cancel_elapsed_duration_bucket",
+            coarse_duration_bucket(self.monotonic() - started),
+        )
+        self.machine.record_cancel_diagnostic(
+            "cancel_transport_classification", classification
+        )
+        self.machine.record_cancel_diagnostic(
+            "cancel_response_shape_classification", response_shape
+        )
+        self.machine.record_cancel_diagnostic(
+            "cancel_response_contained_accepted", accepted_present
+        )
+        self.machine.record_cancel_diagnostic(
+            "cancel_accepted_value", accepted_value
+        )
+        self.machine.record_cancel_diagnostic(
+            "cancel_task_cancelled",
+            "true" if classification == "CancelledError" else "false",
+        )
+        self.machine.record_cancel_diagnostic(
+            "cancel_timeout_layer", "none" if returned else "transport"
+        )
+        self.machine.record_cancel_diagnostic(
+            "session_healthy_after_cancel", "true" if returned else "unknown"
+        )
+
     async def _cancel(self, stop_id: str) -> None:
         await self._require_before_flat_deadline(
             position=True, stop=True,
@@ -684,9 +725,21 @@ class OneShareCommissioningOrchestrator:
         self.machine.record_tool_call("cancel_equity_order")
         self.machine.persist_write_boundary("cancel", "before")
         self._last_write = "cancel"
+        self.machine.record_cancel_diagnostic("cancel_call_started", "true")
+        cancel_started = self.monotonic()
         try:
             result = await self.adapter.cancel_equity_order({"order_id": stop_id})
         except AmbiguousWriteError as error:
+            self._record_cancel_call_outcome(
+                cancel_started,
+                returned=getattr(error, "call_returned", False),
+                classification=getattr(
+                    error, "transport_classification", "UNKNOWN_EXCEPTION"
+                ),
+                response_shape=getattr(error, "response_shape", "unknown"),
+                accepted_present="unknown",
+                accepted_value="unknown",
+            )
             category = error.category
             if category not in {
                 "STOP_CANCEL_TRANSPORT_AMBIGUOUS",
@@ -696,16 +749,29 @@ class OneShareCommissioningOrchestrator:
             self.machine.stop_cancel_requested(WriteDisposition.AMBIGUOUS)
             self.machine.record_cancel_reconciliation(category)
             return
-        except BrokerRejectedError:
+        except BrokerRejectedError as error:
+            self._record_cancel_call_outcome(
+                cancel_started, returned=True,
+                classification=sanitized_exception_type(error),
+                response_shape="documented_envelope",
+                accepted_present="unknown", accepted_value="unknown",
+            )
             self.machine.stop_cancel_requested(WriteDisposition.REJECTED)
             await self._handoff(
                 "STOP_CANCEL_REJECTED", position=True, stop=True,
                 action="Retain manual control; inspect the executable stop.",
             )
+        accepted = bool(result.request_was_accepted)
+        self._record_cancel_call_outcome(
+            cancel_started, returned=True, classification="NONE",
+            response_shape="documented_envelope",
+            accepted_present="true",
+            accepted_value="true" if accepted else "false",
+        )
         self.machine.persist_write_boundary("cancel", "after")
         disposition = (
             WriteDisposition.ACCEPTED
-            if result.request_was_accepted
+            if accepted
             else WriteDisposition.REJECTED
         )
         self.machine.stop_cancel_requested(disposition)
@@ -1170,6 +1236,9 @@ class OneShareCommissioningOrchestrator:
                     candidate_count=0,
                 )
                 if self.monotonic() - started >= STOP_CANCEL_DEADLINE_SECONDS:
+                    self.machine.record_cancel_diagnostic(
+                        "cancel_timeout_layer", "reconciliation_deadline"
+                    )
                     self.machine.record_cancel_reconciliation(
                         "STOP_CANCEL_TIMEOUT",
                         attribution_unique=False,
@@ -1259,6 +1328,9 @@ class OneShareCommissioningOrchestrator:
                 action="Take immediate manual control; reconcile cancellation and flatten.",
             )
             if self.monotonic() - started >= STOP_CANCEL_DEADLINE_SECONDS:
+                self.machine.record_cancel_diagnostic(
+                    "cancel_timeout_layer", "reconciliation_deadline"
+                )
                 self.machine.record_cancel_reconciliation(
                     "STOP_CANCEL_TIMEOUT",
                     normalized_order_state=normalized,

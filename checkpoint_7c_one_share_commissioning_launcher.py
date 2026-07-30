@@ -67,11 +67,11 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/config.py":
         "37669854c3e1dae3c282e787c0af22da9c89ce21fb790a482f4edb2e2db7f1c3",
     "src/one_share_commissioning.py":
-        "a839594fecfc5e5ac0101cb67d180dc00a7d0add6742b3491ba82f3e27d92cb4",
+        "4319e84414e714fdcc46a091e207b19725903e288fa5ce68e2e0e83907e23eae",
     "src/robinhood_commissioning_adapter.py":
-        "94d6eebbee0ced6748ac85f8c7cb52ff26e9570fa7d2b219d8a5a3efe66c6c68",
+        "13fa0552f835ed0516251efbc923a73293385152616306a3d20c14af01e3a0ef",
     "src/one_share_commissioning_orchestrator.py":
-        "532bbb8e6d6f5d9a6326445d816b3ca5fce2effba219985f2ccec2e1a3eb0e30",
+        "db6efa3aeb67cbc9ac14fff680347c5f63435c67e52aca2445b37fc651ccd7cd",
     "src/robinhood_commissioning_session.py":
         "a7e0367de955eb26695f6e61c99b0c99cfdab869c042cd9fcddf209b7065c4e1",
     "src/robinhood_client.py":
@@ -83,6 +83,7 @@ ENTRY_AUTHORIZATION_PROMPT = "Authorize this one-share entry? [y/N] "
 FLATTEN_AUTHORIZATION_PROMPT = "Authorize controlled flatten? [y/N] "
 RETIRED_LIVE_RUN_IDS = frozenset({
     'cp7c-live-aapl-one-share-20260730-04',
+    "cp7c-live-aapl-one-share-20260730-05",
     "cp7c-live-aapl-one-share-20260729-04",
     "cp7c-live-aapl-one-share-20260729-03",
     "cp7c-live-aapl-one-share-20260729-02",
