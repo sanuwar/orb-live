@@ -1,4 +1,4 @@
-﻿export const navigation = [
+export const navigation = [
   { slug: 'overview', label: 'Overview', shortLabel: '01' },
   { slug: 'strategy', label: 'Strategy', shortLabel: '02' },
   { slug: 'system-flow', label: 'System Flow', shortLabel: '03' },
@@ -13,6 +13,10 @@
     label: 'Architecture & Glossary',
     shortLabel: '06',
   },
+  { slug: 'journal', label: 'Trade Journal', shortLabel: '07' },
+  { slug: 'journal-records', label: 'Trades & Events', shortLabel: '08' },
+  { slug: 'manual-record', label: 'Add Manual Record', shortLabel: '09' },
+  { slug: 'evidence-import', label: 'Import Evidence', shortLabel: '10' },
 ]
 
 export const journeyStages = [

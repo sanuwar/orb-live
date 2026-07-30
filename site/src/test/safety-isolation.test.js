@@ -1,4 +1,4 @@
-﻿import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,6 +37,8 @@ describe('safety isolation', () => {
       /\bMCPClient\b/,
       /\bfrom\s+['"](?:\.\.\/)*src\b/,
       /\bimport\s+src\b/,
+      /node:child_process/,
+      /\b(?:exec|execFile|spawn|fork)\s*\(/,
     ]
 
     prohibited.forEach((pattern) => expect(source).not.toMatch(pattern))

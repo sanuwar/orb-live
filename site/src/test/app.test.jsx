@@ -1,10 +1,10 @@
-﻿import { render, screen, within } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import App from '../App'
 
 describe('documentation dashboard', () => {
-  it('renders all six navigation destinations', () => {
+  it('renders all ten navigation destinations', () => {
     render(<App />)
 
     const labels = [
@@ -14,6 +14,10 @@ describe('documentation dashboard', () => {
       'Safety',
       'Development Journey',
       'Architecture & Glossary',
+      'Trade Journal',
+      'Trades & Events',
+      'Add Manual Record',
+      'Import Evidence',
     ]
 
     labels.forEach((label) => {
