@@ -109,14 +109,23 @@ ALLOWED_FAILURE_STAGES = frozenset({
     "INTERNAL_INVARIANT",
 })
 
+# "CancelledError" is deliberately absent: asyncio.CancelledError derives from
+# BaseException, nothing here catches BaseException, and structured
+# cancellation is propagated rather than classified. An entry for it could
+# never be produced and would only imply an observation this code cannot make.
 SAFE_EXCEPTION_TYPES = frozenset({
     "AccountIdentityMismatchError", "AccountResolutionError",
     "AuthorizationDeclinedError", "AuthorizationInputError",
-    "AuthorizationInterruptedError", "BrowserAuthenticationRequestError",
-    "CancelledError", "CommissioningError", "CommissioningSessionBindingError",
+    "AuthorizationInterruptedError", "BrokerRejectedError",
+    "BrowserAuthenticationRequestError",
+    "CommissioningError", "CommissioningSessionBindingError",
     "EntryWindowError", "SilentAuthenticationError",
     "TimeoutError", "TypeError", "ValueError", "OSError", "RuntimeError",
 })
+
+# Exception classifications that genuinely denote a timeout. Anything else that
+# raises is a transport or contract failure, not a deadline expiry.
+RECOGNIZED_TIMEOUT_CLASSIFICATIONS = frozenset({"TimeoutError"})
 
 
 def sanitized_exception_type(error: BaseException) -> str:
@@ -343,16 +352,20 @@ _DURATION_BUCKETS = frozenset({
     "under_1_second", "1_to_5_seconds", "5_to_15_seconds", "over_15_seconds",
     "unknown",
 })
+# "cancel_task_cancelled" is deliberately absent. A cancelled task raises
+# asyncio.CancelledError, which propagates past every handler here, so no
+# evidence write can follow it. The key could only ever have recorded "false",
+# which states an observation this code is structurally unable to make.
 ALLOWED_CANCEL_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
     "cancel_call_started": _TRUTH_VALUES,
     "cancel_call_returned": _TRUTH_VALUES,
-    "cancel_task_cancelled": _TRUTH_VALUES,
     "session_healthy_after_cancel": _TRUTH_VALUES,
     "cancel_response_contained_accepted": _TRUTH_VALUES,
     "cancel_accepted_value": _TRUTH_VALUES,
     "cancel_elapsed_duration_bucket": _DURATION_BUCKETS,
     "cancel_timeout_layer": frozenset({
-        "none", "reconciliation_deadline", "transport", "unknown",
+        "none", "not_applicable", "reconciliation_deadline", "transport",
+        "unknown",
     }),
     "cancel_transport_classification": frozenset(
         SAFE_EXCEPTION_TYPES | {"UNKNOWN_EXCEPTION", "NONE"}
@@ -362,6 +375,21 @@ ALLOWED_CANCEL_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
         "not_reached", "unknown",
     }),
 })
+
+
+def cancel_timeout_layer(*, returned: bool, classification: str) -> str:
+    """Name the layer that timed out, or disclaim a timeout that never occurred.
+
+    A cancel call that raised did not necessarily time out. An argument-contract
+    rejection, a transport error, and a deadline expiry are different failures,
+    and only the last of them may claim a timeout layer.
+    """
+
+    if returned:
+        return "none"
+    if classification in RECOGNIZED_TIMEOUT_CLASSIFICATIONS:
+        return "transport"
+    return "not_applicable"
 
 
 def coarse_duration_bucket(seconds: float | None) -> str:

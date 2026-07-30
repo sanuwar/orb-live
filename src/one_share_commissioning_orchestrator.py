@@ -16,7 +16,8 @@ from src.one_share_commissioning import (
     CommissioningMachine, EntryWindowError,
     EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
     RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
-    WriteDisposition, coarse_duration_bucket, sanitized_exception_type,
+    WriteDisposition, cancel_timeout_layer, coarse_duration_bucket,
+    sanitized_exception_type,
 )
 from src.robinhood_commissioning_adapter import (
     AmbiguousWriteError, BrokerRejectedError, CommissioningOrderRecord,
@@ -707,11 +708,8 @@ class OneShareCommissioningOrchestrator:
             "cancel_accepted_value", accepted_value
         )
         self.machine.record_cancel_diagnostic(
-            "cancel_task_cancelled",
-            "true" if classification == "CancelledError" else "false",
-        )
-        self.machine.record_cancel_diagnostic(
-            "cancel_timeout_layer", "none" if returned else "transport"
+            "cancel_timeout_layer",
+            cancel_timeout_layer(returned=returned, classification=classification),
         )
         self.machine.record_cancel_diagnostic(
             "session_healthy_after_cancel", "true" if returned else "unknown"

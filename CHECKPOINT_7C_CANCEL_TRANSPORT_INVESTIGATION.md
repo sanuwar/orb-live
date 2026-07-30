@@ -138,6 +138,16 @@ transport verdict; the name is easy to misread and the new
 `asyncio.CancelledError` derives from `BaseException` and is deliberately **not**
 converted into a write ambiguity: it propagates, so structured cancellation is
 never swallowed and a cancelled task is never mistaken for a completed write.
+Because it propagates past every handler, no evidence write can follow it, so
+there is deliberately no `cancel_task_cancelled` diagnostic and no
+`CancelledError` entry in the classification allowlist — either would imply an
+observation this code is structurally unable to make.
+
+`cancel_timeout_layer` names a layer only for a recognized timeout. A cancel
+call that raised did not necessarily time out: an argument-contract rejection is
+recorded `not_applicable`, not `transport`. Only `TimeoutError` claims the
+transport layer, and only the reconciliation deadline claims
+`reconciliation_deadline`.
 
 ## Response-contract findings
 
@@ -167,12 +177,11 @@ being written, so free text cannot reach evidence by construction.
 | --- | --- |
 | `cancel_call_started` | `true` / `false` / `unknown` |
 | `cancel_call_returned` | `true` / `false` / `unknown` |
-| `cancel_task_cancelled` | `true` / `false` / `unknown` |
 | `session_healthy_after_cancel` | `true` / `false` / `unknown` |
 | `cancel_response_contained_accepted` | `true` / `false` / `unknown` |
 | `cancel_accepted_value` | `true` / `false` / `unknown` |
 | `cancel_elapsed_duration_bucket` | `under_1_second` / `1_to_5_seconds` / `5_to_15_seconds` / `over_15_seconds` / `unknown` |
-| `cancel_timeout_layer` | `none` / `reconciliation_deadline` / `transport` / `unknown` |
+| `cancel_timeout_layer` | `none` / `not_applicable` / `reconciliation_deadline` / `transport` / `unknown` |
 | `cancel_transport_classification` | allowlisted exception class names, `UNKNOWN_EXCEPTION`, or `NONE` |
 | `cancel_response_shape_classification` | `documented_envelope` / `empty_result` / `malformed_envelope` / `not_reached` / `unknown` |
 
@@ -233,7 +242,9 @@ retries 0, exit place 1.
 3. `cancel_transport_classification` will read `UNKNOWN_EXCEPTION` for MCP SDK
    exception types, since only a fixed allowlist of class names may be
    persisted. That still distinguishes "raised" from "returned", which is the
-   distinction the incidents lacked.
+   distinction the incidents lacked. `BrokerRejectedError` is allowlisted
+   explicitly, so an outright broker refusal is no longer flattened into
+   `UNKNOWN_EXCEPTION`.
 4. If the cancel now succeeds, the run will exercise the exit-place path live for
    the first time. That path has offline coverage only.
 5. A fill that races the cancel remains possible and is handled as a
