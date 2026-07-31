@@ -95,6 +95,15 @@ ALLOWED_FAILURE_CATEGORIES = frozenset({
     # An explicit refusal of the cancel request. Terminal on its own: bounded
     # reconciliation never starts, so it is not a reconciliation failure.
     "STOP_CANCEL_REJECTED",
+    # The exit write and its bounded read-only reconciliation. An ambiguous
+    # exit submission is not a conclusion: the sell may already be filled, so
+    # the outcome must be read back rather than assumed either way.
+    "EXIT_PLACE_RESPONSE_MALFORMED", "EXIT_PLACE_TRANSPORT_AMBIGUOUS",
+    "EXIT_PLACE_ACCEPTED_PENDING", "EXIT_PLACE_ACCEPTED_FILLED",
+    "EXIT_RECONCILED_BY_ORDER", "EXIT_RECONCILED_BY_FLAT_POSITION",
+    "EXIT_STILL_WORKING", "EXIT_RECONCILIATION_MULTIPLE_MATCHES",
+    "EXIT_RECONCILIATION_NOT_FOUND", "EXIT_RECONCILIATION_INCONSISTENT",
+    "EXIT_RECONCILIATION_CONFLICTING_ORDER", "EXIT_RECONCILIATION_TIMEOUT",
     "CANCEL_RECONCILIATION_FAILED", "FLATTEN_FAILED",
     "FINAL_FLAT_VERIFICATION_FAILED", "EVIDENCE_PERSISTENCE_FAILED",
     "SESSION_CLOSE_FAILED", "INTERNAL_INVARIANT_FAILURE",
@@ -110,6 +119,8 @@ ALLOWED_FAILURE_STAGES = frozenset({
     # The cancel write itself, distinct from the bounded reconciliation that
     # may follow it. A failure here means no reconciliation read ever ran.
     "STOP_PROTECTION", "STOP_CANCEL_SUBMISSION", "CANCEL_RECONCILIATION",
+    # The exit write, distinct from the bounded reconciliation that follows it.
+    "EXIT_SUBMISSION", "EXIT_RECONCILIATION",
     "FLATTENING",
     "FINAL_FLAT_VERIFICATION", "EVIDENCE_PERSISTENCE", "SESSION_CLOSE",
     "INTERNAL_INVARIANT",
@@ -387,6 +398,31 @@ ALLOWED_CANCEL_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
 })
 
 
+ALLOWED_EXIT_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
+    "exit_call_started": _TRUTH_VALUES,
+    "exit_call_returned": _TRUTH_VALUES,
+    "exit_uniquely_attributed": _TRUTH_VALUES,
+    "position_flat_observed": _TRUTH_VALUES,
+    "exit_timeout_layer": frozenset({
+        "none", "not_applicable", "reconciliation_deadline", "transport",
+        "unknown",
+    }),
+    "exit_transport_classification": frozenset(
+        SAFE_EXCEPTION_TYPES | {"UNKNOWN_EXCEPTION", "NONE"}
+    ),
+    "exit_response_shape_classification": frozenset({
+        "broker_rejected", "documented_envelope", "empty_result",
+        "malformed_envelope", "not_reached", "unknown",
+    }),
+    # How the sell itself finally read. "not_observed" means no attributable
+    # order was seen at all, which is never on its own a reason to conclude.
+    "exit_state_classification": frozenset({
+        "filled", "working", "cancellation_pending", "cancelled",
+        "rejected_or_failed", "partial_fill", "not_observed", "unknown",
+    }),
+})
+
+
 def cancel_timeout_layer(*, returned: bool, classification: str) -> str:
     """Name the layer that timed out, or disclaim a timeout that never occurred.
 
@@ -470,6 +506,7 @@ class SanitizedEvidence:
     expected_vs_observed_json_types: dict[str, str] = field(default_factory=dict)
     record_counts: dict[str, int] = field(default_factory=dict)
     cancel_diagnostics: dict[str, str] = field(default_factory=dict)
+    exit_diagnostics: dict[str, str] = field(default_factory=dict)
     completion_or_failure_reason: str = "IN_PROGRESS"
     planned_risk_usd: int = 15
     sanitized_exception_type: str = "NONE"
@@ -757,6 +794,60 @@ class CommissioningMachine:
         if not isinstance(value, str) or value not in allowed:
             raise CommissioningError("cancel diagnostic value is invalid")
         self.evidence.cancel_diagnostics[key] = value
+        self.evidence_store.persist(self.evidence)
+
+    def record_exit_diagnostic(self, key: str, value: str) -> None:
+        """Record one allowlisted exit observation; values are never free text."""
+        allowed = ALLOWED_EXIT_DIAGNOSTICS.get(key)
+        if allowed is None:
+            raise CommissioningError("exit diagnostic key is invalid")
+        if not isinstance(value, str) or value not in allowed:
+            raise CommissioningError("exit diagnostic value is invalid")
+        self.evidence.exit_diagnostics[key] = value
+        self.evidence_store.persist(self.evidence)
+
+    def record_exit_reconciliation(
+        self,
+        category: str,
+        *,
+        normalized_order_state: str | None = None,
+        attribution_unique: bool | None = None,
+        candidate_count: int | None = None,
+    ) -> None:
+        allowed = {
+            "EXIT_PLACE_RESPONSE_MALFORMED", "EXIT_PLACE_TRANSPORT_AMBIGUOUS",
+            "EXIT_PLACE_ACCEPTED_PENDING", "EXIT_PLACE_ACCEPTED_FILLED",
+            "EXIT_RECONCILED_BY_ORDER", "EXIT_RECONCILED_BY_FLAT_POSITION",
+            "EXIT_STILL_WORKING", "EXIT_RECONCILIATION_MULTIPLE_MATCHES",
+            "EXIT_RECONCILIATION_NOT_FOUND",
+            "EXIT_RECONCILIATION_INCONSISTENT",
+            "EXIT_RECONCILIATION_CONFLICTING_ORDER",
+            "EXIT_RECONCILIATION_TIMEOUT",
+        }
+        if category not in allowed:
+            raise CommissioningError("exit reconciliation category is invalid")
+        self.evidence.conservative_classifications.append(category)
+        if normalized_order_state is not None:
+            self.evidence.normalized_state_names.append(normalized_order_state)
+        if attribution_unique is not None:
+            self.evidence.boolean_validations[
+                "exit_attribution_unique"
+            ] = attribution_unique
+        if candidate_count is not None:
+            self.evidence.record_counts[
+                "exit_reconciliation_candidate_count"
+            ] = candidate_count
+        self.evidence_store.persist(self.evidence)
+
+    def record_exit_reconciliation_read(self, kind: str) -> None:
+        if kind not in {"orders", "positions"}:
+            raise CommissioningError(
+                "exit reconciliation read kind is invalid"
+            )
+        key = f"exit_reconciliation_{kind}_reads"
+        self.evidence.record_counts[key] = self.evidence.record_counts.get(
+            key, 0
+        ) + 1
         self.evidence_store.persist(self.evidence)
 
     def record_cancel_reconciliation_read(self, kind: str) -> None:
@@ -1153,11 +1244,16 @@ class CommissioningMachine:
             self.operator_required("SECOND_EXIT_ATTEMPT")
             raise CommissioningError("exit placement may occur only once")
         self.exit_place_attempted = True
-        if disposition is WriteDisposition.ACCEPTED:
+        # An ambiguous submission is treated exactly like an accepted one for
+        # STATE purposes only, so that bounded read-only reconciliation can run.
+        # It is not a conclusion: the sell may already be filled at the broker,
+        # and refusing to look leaves a filled exit unrecognized. The write is
+        # already spent -- exit_place_attempted is set above and the adapter
+        # holds a one-shot reservation -- so no second exit can follow, and
+        # reconciliation must still prove flatness or hand off.
+        if disposition in {WriteDisposition.ACCEPTED, WriteDisposition.AMBIGUOUS}:
             self._record_state(State.EXIT_SUBMITTED)
             self._record_state(State.EXIT_RECONCILING)
-        elif disposition is WriteDisposition.AMBIGUOUS:
-            self.operator_required("AMBIGUOUS_EXIT_SUBMISSION")
         else:
             self.operator_required("EXIT_SUBMISSION_REJECTED")
 

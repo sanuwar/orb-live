@@ -221,12 +221,29 @@ def test_unresolved_stop_prevents_exit(tmp_path):
     assert value.state is State.OPERATOR_REQUIRED and not value.exit_place_attempted
 
 
-def test_ambiguous_exit_has_no_retry(tmp_path):
+def test_ambiguous_exit_reconciles_and_never_writes_again(tmp_path):
+    """An ambiguous exit is read back, not concluded, and never rewritten.
+
+    The write is spent the moment it is attempted, so the state machine moves
+    to reconciliation rather than to a verdict: the sell may already be filled.
+    """
     value = machine(tmp_path); to_exit_authorization(value)
     value.stop_cancel_requested(WriteDisposition.ACCEPTED)
     value.stop_cancel_observed(stop_state="cancelled", cumulative_quantity=0,
                                remaining_quantity=1, position_quantity=1)
     value.exit_submitted(WriteDisposition.AMBIGUOUS, latest_position_quantity=1)
+    assert value.state is State.EXIT_RECONCILING
+    assert value.exit_place_attempted
+    with pytest.raises(CommissioningError):
+        value.exit_submitted(WriteDisposition.ACCEPTED, latest_position_quantity=1)
+
+
+def test_rejected_exit_is_terminal_and_never_retried(tmp_path):
+    value = machine(tmp_path); to_exit_authorization(value)
+    value.stop_cancel_requested(WriteDisposition.ACCEPTED)
+    value.stop_cancel_observed(stop_state="cancelled", cumulative_quantity=0,
+                               remaining_quantity=1, position_quantity=1)
+    value.exit_submitted(WriteDisposition.REJECTED, latest_position_quantity=1)
     assert value.state is State.OPERATOR_REQUIRED and value.exit_place_attempted
 
 
