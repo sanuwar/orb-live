@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from src.live_order_contract import (
+    classify_place_order_object_violation,
     classify_place_response_shape,
     parse_cancel_response,
     parse_order_status,
@@ -48,6 +49,12 @@ class AmbiguousWriteError(CommissioningError):
         # Structural booleans plus one fixed classification, or None. Never
         # any part of a response body.
         self.place_shape = dict(place_shape) if place_shape else {}
+        # Set only when an order-object contract violation was identified.
+        # They stay None for transport failures and explicit rejections, so a
+        # caller can never mistake "not inspected" for "no violation found".
+        self.safe_contract_scope: str | None = None
+        self.safe_field_alias: str | None = None
+        self.safe_violation_kind: str | None = None
         super().__init__(category)
 
 
@@ -353,14 +360,36 @@ class RobinhoodCommissioningAdapter:
                     else "EXIT_PLACE_RESPONSE_MALFORMED"
                 )
             )
-            raise AmbiguousWriteError(
+            # Structural facts only; neither carries part of the response body.
+            # The violation inspector is read-only and cannot change what the
+            # parser above accepted or rejected.
+            shape = dict(classify_place_response_shape(data))
+            violation = classify_place_order_object_violation(data)
+            if violation:
+                # Recorded under role-prefixed diagnostic names; the exception
+                # keeps the safe_* properties for direct programmatic use.
+                shape["contract_scope"] = violation["safe_contract_scope"]
+                shape["contract_field_alias"] = violation["safe_field_alias"]
+                shape["contract_violation_kind"] = violation[
+                    "safe_violation_kind"
+                ]
+            error = AmbiguousWriteError(
                 category,
                 transport_classification=sanitized_exception_type(exc),
                 response_shape="malformed_envelope",
                 call_returned=True,
-                # Structural facts only; carries no part of the response body.
-                place_shape=classify_place_response_shape(data),
-            ) from exc
+                place_shape=shape,
+            )
+            error.safe_contract_scope = (
+                violation["safe_contract_scope"] if violation else None
+            )
+            error.safe_field_alias = (
+                violation["safe_field_alias"] if violation else None
+            )
+            error.safe_violation_kind = (
+                violation["safe_violation_kind"] if violation else None
+            )
+            raise error from exc
         expected_side, expected_type, expected_duration = {
             "entry": ("buy", "market", "gfd"),
             "stop": ("sell", "stop_market", "gtc"),

@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Mapping
 
 try:
@@ -77,7 +78,24 @@ class ResponseContractViolationError(LiveOrderContractError):
     The message names the offending FIELD only. Values, guide text,
     reject reasons, and raw payloads are never included: an exception
     message is an ordinary log surface.
+
+    The three ``safe_*`` properties carry the same fact in a
+    machine-readable form so no caller ever has to parse the message.
+    They are drawn from fixed vocabularies and never hold a value.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        safe_contract_scope: str | None = None,
+        safe_field_alias: str | None = None,
+        safe_violation_kind: str | None = None,
+    ) -> None:
+        self.safe_contract_scope = safe_contract_scope
+        self.safe_field_alias = safe_field_alias
+        self.safe_violation_kind = safe_violation_kind
+        super().__init__(message)
 
 
 # --------------------------------------------------------------------------
@@ -794,6 +812,163 @@ def require_response_contract(tool_name: str) -> None:
 # --------------------------------------------------------------------------
 # Strict place-response parsing.
 # --------------------------------------------------------------------------
+
+PLACE_ORDER_OBJECT_SCOPE = "place_order_object"
+
+# Canonical schema field -> privacy-safe alias. Only "stop_price" collides
+# with the evidence sanitizer's prohibited terms; everything else keeps its
+# advertised name so the alias stays readable against the schema.
+PLACE_ORDER_FIELD_ALIASES: Mapping[str, str] = MappingProxyType({
+    name: ("stop_trigger_price" if name == "stop_price" else name)
+    for name in sorted(ORDER_REQUIRED_FIELDS | ORDER_OPTIONAL_FIELDS)
+})
+
+# Aliases that do not name one advertised field.
+_STRUCTURAL_ALIASES = frozenset({"order_object", "unexpected_field"})
+
+PLACE_ORDER_FIELD_ALIAS_VALUES: frozenset[str] = frozenset(
+    set(PLACE_ORDER_FIELD_ALIASES.values()) | _STRUCTURAL_ALIASES
+)
+
+CONTRACT_VIOLATION_KINDS: frozenset[str] = frozenset({
+    "absent", "null", "wrong_type", "empty_text", "invalid_decimal",
+    "invalid_enum", "invalid_format", "unexpected_field",
+    "contradictory_fields", "unknown",
+})
+
+_REQUIRED_DECIMAL_FIELDS = ("cumulative_quantity", "fees")
+_OPTIONAL_DECIMAL_FIELDS = ("quantity", "price", "stop_price", "average_price")
+_POSITIVE_DECIMAL_FIELDS = frozenset({"price", "stop_price", "average_price"})
+
+
+def _text_violation_kind(value: Any) -> str | None:
+    if value is None:
+        return "null"
+    if isinstance(value, bool) or not isinstance(value, str):
+        return "wrong_type"
+    if not value.strip():
+        return "empty_text"
+    return None
+
+
+def _decimal_violation_kind(value: Any, *, positive: bool) -> str | None:
+    if value is None:
+        return "null"
+    if isinstance(value, float) or isinstance(value, bool):
+        return "wrong_type"
+    if not isinstance(value, str):
+        return "wrong_type"
+    if not value.strip():
+        return "empty_text"
+    try:
+        parsed = _strict_decimal(value, "field")
+    except Exception:
+        return "invalid_decimal"
+    if positive and parsed <= 0:
+        return "invalid_format"
+    return None
+
+
+def classify_place_order_object_violation(data: Any) -> dict[str, str] | None:
+    """Name the FIRST order-object contract violation, or None.
+
+    This is a read-only diagnostic pass. It never parses on behalf of the
+    runtime, never decides whether a write succeeded, and cannot change what
+    ``parse_place_response`` accepts. It mirrors that function's field order
+    so the violation it names is the one the parser actually hit.
+
+    Returns fixed-vocabulary strings only. A field VALUE is never returned,
+    and ``None`` means the order object satisfies this contract, so the
+    rejection lay somewhere else.
+    """
+
+    def result(alias: str, kind: str) -> dict[str, str]:
+        return {
+            "safe_contract_scope": PLACE_ORDER_OBJECT_SCOPE,
+            "safe_field_alias": alias,
+            "safe_violation_kind": kind,
+        }
+
+    if not isinstance(data, Mapping) or "order" not in data:
+        return None
+    order = data.get("order")
+    if order is None:
+        return None
+    if not isinstance(order, Mapping):
+        return result("order_object", "wrong_type")
+
+    keys = {str(key) for key in order}
+    missing = ORDER_REQUIRED_FIELDS - keys
+    if missing:
+        return result(PLACE_ORDER_FIELD_ALIASES[sorted(missing)[0]], "absent")
+    unexpected = keys - ORDER_ALLOWED_FIELDS
+    if unexpected:
+        return result("unexpected_field", "unexpected_field")
+
+    for name in sorted(_ORDER_REQUIRED_TEXT_FIELDS):
+        kind = _text_violation_kind(order.get(name))
+        if kind is not None:
+            return result(PLACE_ORDER_FIELD_ALIASES[name], kind)
+
+    if "reject_reason" in order:
+        kind = _text_violation_kind(order.get("reject_reason"))
+        if kind is not None:
+            return result(PLACE_ORDER_FIELD_ALIASES["reject_reason"], kind)
+
+    try:
+        _validate_dollar_based_amount(order.get("dollar_based_amount"))
+    except Exception:
+        return result(
+            PLACE_ORDER_FIELD_ALIASES["dollar_based_amount"], "wrong_type"
+        )
+    try:
+        _validate_executions(order.get("executions"))
+    except Exception:
+        return result(PLACE_ORDER_FIELD_ALIASES["executions"], "wrong_type")
+
+    for name in _REQUIRED_DECIMAL_FIELDS:
+        kind = _decimal_violation_kind(order.get(name), positive=False)
+        if kind is not None:
+            return result(PLACE_ORDER_FIELD_ALIASES[name], kind)
+    if _strict_decimal(str(order.get("cumulative_quantity")), "f") < 0:
+        return result(
+            PLACE_ORDER_FIELD_ALIASES["cumulative_quantity"], "invalid_format"
+        )
+
+    for name in _OPTIONAL_DECIMAL_FIELDS:
+        value = order.get(name)
+        if value is None:
+            continue
+        kind = _decimal_violation_kind(
+            value, positive=name in _POSITIVE_DECIMAL_FIELDS
+        )
+        if kind is not None:
+            return result(PLACE_ORDER_FIELD_ALIASES[name], kind)
+
+    submitted = order.get("quantity")
+    if submitted is not None:
+        parsed = _strict_decimal(str(submitted), "f")
+        if parsed < 0:
+            return result(
+                PLACE_ORDER_FIELD_ALIASES["quantity"], "invalid_format"
+            )
+        try:
+            derive_quantities(
+                parsed, _strict_decimal(str(order.get("cumulative_quantity")), "f")
+            )
+        except QuantityDerivationError:
+            return result(
+                PLACE_ORDER_FIELD_ALIASES["cumulative_quantity"],
+                "contradictory_fields",
+            )
+
+    kind = _text_violation_kind(order.get("last_transaction_at"))
+    if kind is not None and order.get("last_transaction_at") is not None:
+        return result(
+            PLACE_ORDER_FIELD_ALIASES["last_transaction_at"], kind
+        )
+    return None
+
 
 def classify_place_response_shape(data: Any) -> dict[str, str]:
     """Describe a place-response payload STRUCTURALLY. Reads no values.
