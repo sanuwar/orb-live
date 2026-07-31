@@ -109,6 +109,17 @@ ALLOWED_FAILURE_CATEGORIES = frozenset({
     "EXIT_STILL_WORKING", "EXIT_RECONCILIATION_MULTIPLE_MATCHES",
     "EXIT_RECONCILIATION_NOT_FOUND", "EXIT_RECONCILIATION_INCONSISTENT",
     "EXIT_RECONCILIATION_CONFLICTING_ORDER", "EXIT_RECONCILIATION_TIMEOUT",
+    # A creation response that parsed cleanly but carried the symbol blank.
+    # Neither a rejection nor a transport failure: the write landed, and
+    # bounded read-only reconciliation must prove the symbol from a status
+    # read before the placement is treated as identified.
+    "ENTRY_PLACE_SYMBOL_PENDING", "STOP_PLACE_SYMBOL_PENDING",
+    "EXIT_PLACE_SYMBOL_PENDING",
+    # A response naming a DIFFERENT, non-blank symbol. Terminal: it is never
+    # reconciled, because reconciliation cannot resolve a positive
+    # identification of another instrument.
+    "ENTRY_PLACE_SYMBOL_MISMATCH", "STOP_PLACE_SYMBOL_MISMATCH",
+    "EXIT_PLACE_SYMBOL_MISMATCH",
     "CANCEL_RECONCILIATION_FAILED", "FLATTEN_FAILED",
     "FINAL_FLAT_VERIFICATION_FAILED", "EVIDENCE_PERSISTENCE_FAILED",
     "SESSION_CLOSE_FAILED", "INTERNAL_INVARIANT_FAILURE",
@@ -730,6 +741,7 @@ class CommissioningMachine:
             "ENTRY_PLACE_ACCEPTED_PENDING", "ENTRY_PLACE_ACCEPTED_FILLED",
             "ENTRY_PLACE_RESPONSE_MALFORMED",
             "ENTRY_PLACE_TRANSPORT_AMBIGUOUS",
+            "ENTRY_PLACE_SYMBOL_PENDING",
             "ENTRY_RECONCILED_BY_ORDER", "ENTRY_RECONCILED_BY_POSITION",
             "ENTRY_RECONCILIATION_MULTIPLE_MATCHES",
             "ENTRY_RECONCILIATION_NOT_FOUND",
@@ -771,6 +783,7 @@ class CommissioningMachine:
             "STOP_PLACE_ACCEPTED_TRIGGERED", "STOP_PLACE_ACCEPTED_FILLED",
             "STOP_PLACE_RESPONSE_MALFORMED",
             "STOP_PLACE_TRANSPORT_AMBIGUOUS",
+            "STOP_PLACE_SYMBOL_PENDING",
             "STOP_RECONCILED_BY_ORDER",
             "STOP_RECONCILED_BY_POSITION_AND_ORDER",
             "STOP_ALREADY_FILLED_POSITION_FLAT",
@@ -894,6 +907,7 @@ class CommissioningMachine:
     ) -> None:
         allowed = {
             "EXIT_PLACE_RESPONSE_MALFORMED", "EXIT_PLACE_TRANSPORT_AMBIGUOUS",
+            "EXIT_PLACE_SYMBOL_PENDING",
             "EXIT_PLACE_ACCEPTED_PENDING", "EXIT_PLACE_ACCEPTED_FILLED",
             "EXIT_RECONCILED_BY_ORDER", "EXIT_RECONCILED_BY_FLAT_POSITION",
             "EXIT_STILL_WORKING", "EXIT_RECONCILIATION_MULTIPLE_MATCHES",

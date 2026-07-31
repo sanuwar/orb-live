@@ -159,6 +159,14 @@ TEXT_FIELDS = sorted({
     "value,kind", [(123, "wrong_type"), ("", "empty_text"), ("   ", "empty_text")]
 )
 def test_text_field_type_and_emptiness_are_named(field, value, kind):
+    if field == "symbol" and kind == "empty_text":
+        # The creation parser now accepts a blank symbol, so the inspector
+        # must not accuse it. Naming a field the parser did not reject would
+        # send the next investigation after the wrong thing.
+        order = order_object(symbol=value)
+        assert not parser_rejects(order)
+        assert violation_of(order) is None
+        return
     order = order_object(**{field: value})
     result = violation_of(order)
 
