@@ -127,6 +127,10 @@ SAFE_EXCEPTION_TYPES = frozenset({
 # raises is a transport or contract failure, not a deadline expiry.
 RECOGNIZED_TIMEOUT_CLASSIFICATIONS = frozenset({"TimeoutError"})
 
+# Classifications that are already a terminal, explicit broker verdict. No
+# deadline governs them and no reconciliation follows, so no layer may be named.
+TERMINAL_REJECTION_CLASSIFICATIONS = frozenset({"BrokerRejectedError"})
+
 
 def sanitized_exception_type(error: BaseException) -> str:
     """Return an allowlisted class name without retaining exception text."""
@@ -371,8 +375,8 @@ ALLOWED_CANCEL_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
         SAFE_EXCEPTION_TYPES | {"UNKNOWN_EXCEPTION", "NONE"}
     ),
     "cancel_response_shape_classification": frozenset({
-        "documented_envelope", "empty_result", "malformed_envelope",
-        "not_reached", "unknown",
+        "broker_rejected", "documented_envelope", "empty_result",
+        "malformed_envelope", "not_reached", "unknown",
     }),
 })
 
@@ -383,8 +387,14 @@ def cancel_timeout_layer(*, returned: bool, classification: str) -> str:
     A cancel call that raised did not necessarily time out. An argument-contract
     rejection, a transport error, and a deadline expiry are different failures,
     and only the last of them may claim a timeout layer.
+
+    An explicit broker rejection is terminal: no deadline governed it and no
+    reconciliation follows it, so it reports "not_applicable" rather than the
+    "none" used on the success path, where a later deadline may still expire.
     """
 
+    if classification in TERMINAL_REJECTION_CLASSIFICATIONS:
+        return "not_applicable"
     if returned:
         return "none"
     if classification in RECOGNIZED_TIMEOUT_CLASSIFICATIONS:

@@ -22,6 +22,7 @@ from src.one_share_commissioning import (
     ALLOWED_CANCEL_DIAGNOSTICS,
     RECOGNIZED_TIMEOUT_CLASSIFICATIONS,
     SAFE_EXCEPTION_TYPES,
+    TERMINAL_REJECTION_CLASSIFICATIONS,
     CommissioningError,
     State,
     cancel_timeout_layer,
@@ -254,6 +255,123 @@ def test_rejected_cancel_records_broker_rejected_not_unknown(tmp_path):
     assert evidence["record_counts"].get("stop_cancel_retries", 0) == 0
     assert adapter_used.write_roles.count("cancel") == 1
     assert "exit" not in adapter_used.write_roles
+
+
+def test_rejected_cancel_has_its_own_response_shape(tmp_path):
+    """An explicit rejection is not a documented envelope.
+
+    The adapter detects the rejection from the error flag on the result, before
+    any payload field is read, so no cancel envelope is ever parsed. Recording
+    ``documented_envelope`` would claim a well-formed cancel response arrived
+    when none did; ``malformed_envelope`` would claim one arrived and failed
+    parsing; ``not_reached`` would deny that the transport returned at all.
+    """
+    instance, _, _, _ = make_orchestrator(
+        tmp_path,
+        adapter=RejectedCancelAdapter(cancel_mode="still_active"),
+        run_id="fidelity-rejected-shape",
+    )
+    diagnostics = evidence_of(asyncio.run(instance.run()))["cancel_diagnostics"]
+
+    assert diagnostics["cancel_response_shape_classification"] == "broker_rejected"
+    assert diagnostics["cancel_response_shape_classification"] not in {
+        "documented_envelope", "malformed_envelope", "not_reached", "unknown",
+        "empty_result",
+    }
+    # The transport did return; only the content was a refusal.
+    assert diagnostics["cancel_call_started"] == "true"
+    assert diagnostics["cancel_call_returned"] == "true"
+    assert diagnostics["session_healthy_after_cancel"] == "true"
+
+
+def test_rejected_cancel_is_not_a_timeout_at_any_layer(tmp_path):
+    instance, _, _, _ = make_orchestrator(
+        tmp_path,
+        adapter=RejectedCancelAdapter(cancel_mode="still_active"),
+        run_id="fidelity-rejected-timeout-layer",
+    )
+    diagnostics = evidence_of(asyncio.run(instance.run()))["cancel_diagnostics"]
+
+    assert diagnostics["cancel_timeout_layer"] == "not_applicable"
+    assert diagnostics["cancel_timeout_layer"] not in {
+        "transport", "reconciliation_deadline",
+    }
+
+
+def test_terminal_rejection_never_names_a_timeout_layer():
+    """A rejection is terminal whichever way the call is described: no deadline
+    governed it and no reconciliation follows, so "none" - which on the success
+    path means "no timeout yet" - would be the wrong frame."""
+    assert TERMINAL_REJECTION_CLASSIFICATIONS == frozenset({"BrokerRejectedError"})
+    for returned in (True, False):
+        assert cancel_timeout_layer(
+            returned=returned, classification="BrokerRejectedError"
+        ) == "not_applicable"
+
+
+def test_rejected_cancel_claims_no_accepted_field_it_did_not_observe(tmp_path):
+    """The rejection short-circuits before the payload is inspected, so whether
+    an ``accepted`` field was present is genuinely unobserved. "false" would
+    assert the response was read and lacked the field; only "unknown" is
+    truthful, and no accepted value may be reported either way."""
+    instance, _, _, _ = make_orchestrator(
+        tmp_path,
+        adapter=RejectedCancelAdapter(cancel_mode="still_active"),
+        run_id="fidelity-rejected-accepted",
+    )
+    diagnostics = evidence_of(asyncio.run(instance.run()))["cancel_diagnostics"]
+
+    assert diagnostics["cancel_response_contained_accepted"] == "unknown"
+    assert diagnostics["cancel_accepted_value"] == "unknown"
+    assert diagnostics["cancel_accepted_value"] != "true"
+
+
+def test_rejected_cancel_starts_no_reconciliation_and_no_exit(tmp_path):
+    """An explicit rejection is terminal, so bounded cancel reconciliation is
+    never entered, the stop is left executable, and no sell follows."""
+    instance, adapter_used, _, handoffs = make_orchestrator(
+        tmp_path,
+        adapter=RejectedCancelAdapter(cancel_mode="still_active"),
+        run_id="fidelity-rejected-no-reconciliation",
+    )
+    result = asyncio.run(instance.run())
+    evidence = evidence_of(result)
+    counts = evidence["record_counts"]
+
+    assert result.state is State.OPERATOR_REQUIRED
+    assert handoffs[-1].reason_code == "STOP_CANCEL_REJECTED"
+    assert handoffs[-1].stop_may_remain_executable is True
+    assert counts.get("cancel_reconciliation_orders_reads", 0) == 0
+    assert counts.get("cancel_reconciliation_positions_reads", 0) == 0
+    assert counts.get("stop_cancel_retries", 0) == 0
+    assert evidence["write_attempt_counters"]["stop_cancel"] == 1
+    assert evidence["write_attempt_counters"]["exit_place"] == 0
+    assert adapter_used.calls.count("cancel_equity_order") == 1
+    assert adapter_used.write_roles == ["entry", "stop", "cancel"]
+
+
+def test_rejected_cancel_closes_the_session_exactly_once(tmp_path):
+    from tests.test_checkpoint_7c_incident_regression import (
+        actual_binding, read_sanitized,
+    )
+
+    binding, factory, _, store = actual_binding(
+        tmp_path,
+        secret_reader=lambda prompt: "y",
+        run_id="fidelity-rejected-session-close",
+        adapter=RejectedCancelAdapter(cancel_mode="still_active"),
+    )
+    result = asyncio.run(binding.run())
+    evidence = read_sanitized(store.partial / "commissioning_evidence.json")
+
+    assert result.state is State.OPERATOR_REQUIRED
+    assert evidence["cancel_diagnostics"][
+        "cancel_response_shape_classification"
+    ] == "broker_rejected"
+    assert evidence["write_attempt_counters"]["exit_place"] == 0
+    assert factory.created == 1
+    assert factory.entered == 1
+    assert factory.closed == 1
 
 
 def test_rejection_classification_retains_no_broker_text():

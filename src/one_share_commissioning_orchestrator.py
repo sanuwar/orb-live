@@ -748,10 +748,14 @@ class OneShareCommissioningOrchestrator:
             self.machine.record_cancel_reconciliation(category)
             return
         except BrokerRejectedError as error:
+            # The transport returned, but what came back was an explicit
+            # rejection, not the documented cancel envelope. The rejection is
+            # detected before any payload field is read, so whether an accepted
+            # field was present remains genuinely unobserved.
             self._record_cancel_call_outcome(
                 cancel_started, returned=True,
                 classification=sanitized_exception_type(error),
-                response_shape="documented_envelope",
+                response_shape="broker_rejected",
                 accepted_present="unknown", accepted_value="unknown",
             )
             self.machine.stop_cancel_requested(WriteDisposition.REJECTED)

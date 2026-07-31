@@ -149,6 +149,27 @@ recorded `not_applicable`, not `transport`. Only `TimeoutError` claims the
 transport layer, and only the reconciliation deadline claims
 `reconciliation_deadline`.
 
+An explicit broker rejection has its own response-shape classification,
+`broker_rejected`. It is **neither a timeout nor a malformed response**: the
+adapter detects the rejection from the error flag on the result, before any
+payload field is read, so no cancel envelope is ever parsed. `documented_envelope`
+would claim a well-formed cancel response arrived, `malformed_envelope` would
+claim one arrived and failed parsing, and `not_reached` would deny that the
+transport returned at all. Its timeout layer is `not_applicable`, because a
+rejection is terminal — no deadline governed it and no reconciliation follows,
+so the `none` used on the success path would carry the wrong implication. Both
+accepted-field diagnostics stay `unknown`: the rejection short-circuits before
+the payload is inspected, so whether an `accepted` field was present is
+genuinely unobserved and must not be reported as `false`.
+
+No raw rejection payload, response body, or exception message is persisted —
+only the allowlisted class name `BrokerRejectedError` and the allowlisted shape
+value. This is **diagnostic fidelity only**: broker-write behaviour and
+reconciliation behaviour are unchanged. A rejected cancel still attempts exactly
+one cancel, performs zero retries, enters no reconciliation, submits no exit,
+leaves the protective stop executable, and hands off as `STOP_CANCEL_REJECTED`
+under `OPERATOR_REQUIRED`.
+
 ## Response-contract findings
 
 - The documented cancel envelope is `{"data": {"accepted": <bool>}, "guide": "..."}`.
@@ -183,7 +204,7 @@ being written, so free text cannot reach evidence by construction.
 | `cancel_elapsed_duration_bucket` | `under_1_second` / `1_to_5_seconds` / `5_to_15_seconds` / `over_15_seconds` / `unknown` |
 | `cancel_timeout_layer` | `none` / `not_applicable` / `reconciliation_deadline` / `transport` / `unknown` |
 | `cancel_transport_classification` | allowlisted exception class names, `UNKNOWN_EXCEPTION`, or `NONE` |
-| `cancel_response_shape_classification` | `documented_envelope` / `empty_result` / `malformed_envelope` / `not_reached` / `unknown` |
+| `cancel_response_shape_classification` | `broker_rejected` / `documented_envelope` / `empty_result` / `malformed_envelope` / `not_reached` / `unknown` |
 
 Duration is recorded only as a coarse bucket. Raw exception text, raw responses,
 request arguments, order identifiers, account information, tokens, credentials,
