@@ -16,7 +16,8 @@ from src.one_share_commissioning import (
     CommissioningMachine, EntryWindowError,
     EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
     RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
-    WriteDisposition, coarse_duration_bucket, sanitized_exception_type,
+    WriteDisposition, cancel_timeout_layer, coarse_duration_bucket,
+    sanitized_exception_type,
 )
 from src.robinhood_commissioning_adapter import (
     AmbiguousWriteError, BrokerRejectedError, CommissioningOrderRecord,
@@ -195,6 +196,10 @@ class OneShareCommissioningOrchestrator:
             "ENTRY_PLACE": "ENTRY_PLACE_AMBIGUOUS",
             "ENTRY_RECONCILIATION": "RECONCILIATION_FAILED",
             "STOP_PROTECTION": "STOP_PROTECTION_FAILED",
+            # An unclassified failure at the submission boundary leaves the
+            # cancel's fate unknown, which is an ambiguous write, not a
+            # reconciliation failure.
+            "STOP_CANCEL_SUBMISSION": "STOP_CANCEL_TRANSPORT_AMBIGUOUS",
             "CANCEL_RECONCILIATION": "CANCEL_RECONCILIATION_FAILED",
             "FLATTENING": "FLATTEN_FAILED",
             "FINAL_FLAT_VERIFICATION": "FINAL_FLAT_VERIFICATION_FAILED",
@@ -707,11 +712,8 @@ class OneShareCommissioningOrchestrator:
             "cancel_accepted_value", accepted_value
         )
         self.machine.record_cancel_diagnostic(
-            "cancel_task_cancelled",
-            "true" if classification == "CancelledError" else "false",
-        )
-        self.machine.record_cancel_diagnostic(
-            "cancel_timeout_layer", "none" if returned else "transport"
+            "cancel_timeout_layer",
+            cancel_timeout_layer(returned=returned, classification=classification),
         )
         self.machine.record_cancel_diagnostic(
             "session_healthy_after_cancel", "true" if returned else "unknown"
@@ -727,6 +729,11 @@ class OneShareCommissioningOrchestrator:
         self._last_write = "cancel"
         self.machine.record_cancel_diagnostic("cancel_call_started", "true")
         cancel_started = self.monotonic()
+        # The cancel write is its own boundary. Bounded reconciliation has not
+        # started yet, so a failure here must not be labelled a reconciliation
+        # failure. Restored below before any reconciliation record is written.
+        reconciliation_stage = self._stage
+        self._stage = "STOP_CANCEL_SUBMISSION"
         try:
             result = await self.adapter.cancel_equity_order({"order_id": stop_id})
         except AmbiguousWriteError as error:
@@ -746,14 +753,19 @@ class OneShareCommissioningOrchestrator:
                 "STOP_CANCEL_RESPONSE_MALFORMED",
             }:
                 category = "STOP_CANCEL_TRANSPORT_AMBIGUOUS"
+            self._stage = reconciliation_stage
             self.machine.stop_cancel_requested(WriteDisposition.AMBIGUOUS)
             self.machine.record_cancel_reconciliation(category)
             return
         except BrokerRejectedError as error:
+            # The transport returned, but what came back was an explicit
+            # rejection, not the documented cancel envelope. The rejection is
+            # detected before any payload field is read, so whether an accepted
+            # field was present remains genuinely unobserved.
             self._record_cancel_call_outcome(
                 cancel_started, returned=True,
                 classification=sanitized_exception_type(error),
-                response_shape="documented_envelope",
+                response_shape="broker_rejected",
                 accepted_present="unknown", accepted_value="unknown",
             )
             self.machine.stop_cancel_requested(WriteDisposition.REJECTED)
@@ -780,6 +792,7 @@ class OneShareCommissioningOrchestrator:
                 "STOP_CANCEL_REJECTED", position=True, stop=True,
                 action="Retain manual control; inspect the executable stop.",
             )
+        self._stage = reconciliation_stage
         self.machine.record_cancel_reconciliation(
             "STOP_CANCEL_REQUEST_ACCEPTED"
         )

@@ -293,7 +293,7 @@ def test_conclusive_cancel_records_returned_diagnostics_and_verifies_flat(tmp_pa
     assert diagnostics["cancel_response_shape_classification"] == "documented_envelope"
     assert diagnostics["cancel_response_contained_accepted"] == "true"
     assert diagnostics["cancel_accepted_value"] == "true"
-    assert diagnostics["cancel_task_cancelled"] == "false"
+    assert "cancel_task_cancelled" not in diagnostics
     assert diagnostics["cancel_timeout_layer"] == "none"
     assert diagnostics["session_healthy_after_cancel"] == "true"
     assert adapter_used.write_roles == ["entry", "stop", "cancel", "exit"]

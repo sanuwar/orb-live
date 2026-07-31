@@ -92,6 +92,9 @@ ALLOWED_FAILURE_CATEGORIES = frozenset({
     "STOP_CANCEL_PARTIAL_FILL", "STOP_CANCEL_STILL_ACTIVE",
     "STOP_CANCEL_MULTIPLE_MATCHES", "STOP_CANCEL_INCONSISTENT",
     "STOP_CANCEL_NOT_FOUND", "STOP_CANCEL_TIMEOUT",
+    # An explicit refusal of the cancel request. Terminal on its own: bounded
+    # reconciliation never starts, so it is not a reconciliation failure.
+    "STOP_CANCEL_REJECTED",
     "CANCEL_RECONCILIATION_FAILED", "FLATTEN_FAILED",
     "FINAL_FLAT_VERIFICATION_FAILED", "EVIDENCE_PERSISTENCE_FAILED",
     "SESSION_CLOSE_FAILED", "INTERNAL_INVARIANT_FAILURE",
@@ -104,19 +107,35 @@ ALLOWED_FAILURE_STAGES = frozenset({
     "ENTRY_AUTHORIZATION_INPUT", "ENTRY_AUTHORIZATION_CONSUMPTION",
     "FLATTEN_AUTHORIZATION_INPUT", "FLATTEN_AUTHORIZATION_CONSUMPTION",
     "ENTRY_WINDOW_VALIDATION", "ENTRY_PLACE", "ENTRY_RECONCILIATION",
-    "STOP_PROTECTION", "CANCEL_RECONCILIATION", "FLATTENING",
+    # The cancel write itself, distinct from the bounded reconciliation that
+    # may follow it. A failure here means no reconciliation read ever ran.
+    "STOP_PROTECTION", "STOP_CANCEL_SUBMISSION", "CANCEL_RECONCILIATION",
+    "FLATTENING",
     "FINAL_FLAT_VERIFICATION", "EVIDENCE_PERSISTENCE", "SESSION_CLOSE",
     "INTERNAL_INVARIANT",
 })
 
+# "CancelledError" is deliberately absent: asyncio.CancelledError derives from
+# BaseException, nothing here catches BaseException, and structured
+# cancellation is propagated rather than classified. An entry for it could
+# never be produced and would only imply an observation this code cannot make.
 SAFE_EXCEPTION_TYPES = frozenset({
     "AccountIdentityMismatchError", "AccountResolutionError",
     "AuthorizationDeclinedError", "AuthorizationInputError",
-    "AuthorizationInterruptedError", "BrowserAuthenticationRequestError",
-    "CancelledError", "CommissioningError", "CommissioningSessionBindingError",
+    "AuthorizationInterruptedError", "BrokerRejectedError",
+    "BrowserAuthenticationRequestError",
+    "CommissioningError", "CommissioningSessionBindingError",
     "EntryWindowError", "SilentAuthenticationError",
     "TimeoutError", "TypeError", "ValueError", "OSError", "RuntimeError",
 })
+
+# Exception classifications that genuinely denote a timeout. Anything else that
+# raises is a transport or contract failure, not a deadline expiry.
+RECOGNIZED_TIMEOUT_CLASSIFICATIONS = frozenset({"TimeoutError"})
+
+# Classifications that are already a terminal, explicit broker verdict. No
+# deadline governs them and no reconciliation follows, so no layer may be named.
+TERMINAL_REJECTION_CLASSIFICATIONS = frozenset({"BrokerRejectedError"})
 
 
 def sanitized_exception_type(error: BaseException) -> str:
@@ -343,25 +362,50 @@ _DURATION_BUCKETS = frozenset({
     "under_1_second", "1_to_5_seconds", "5_to_15_seconds", "over_15_seconds",
     "unknown",
 })
+# "cancel_task_cancelled" is deliberately absent. A cancelled task raises
+# asyncio.CancelledError, which propagates past every handler here, so no
+# evidence write can follow it. The key could only ever have recorded "false",
+# which states an observation this code is structurally unable to make.
 ALLOWED_CANCEL_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
     "cancel_call_started": _TRUTH_VALUES,
     "cancel_call_returned": _TRUTH_VALUES,
-    "cancel_task_cancelled": _TRUTH_VALUES,
     "session_healthy_after_cancel": _TRUTH_VALUES,
     "cancel_response_contained_accepted": _TRUTH_VALUES,
     "cancel_accepted_value": _TRUTH_VALUES,
     "cancel_elapsed_duration_bucket": _DURATION_BUCKETS,
     "cancel_timeout_layer": frozenset({
-        "none", "reconciliation_deadline", "transport", "unknown",
+        "none", "not_applicable", "reconciliation_deadline", "transport",
+        "unknown",
     }),
     "cancel_transport_classification": frozenset(
         SAFE_EXCEPTION_TYPES | {"UNKNOWN_EXCEPTION", "NONE"}
     ),
     "cancel_response_shape_classification": frozenset({
-        "documented_envelope", "empty_result", "malformed_envelope",
-        "not_reached", "unknown",
+        "broker_rejected", "documented_envelope", "empty_result",
+        "malformed_envelope", "not_reached", "unknown",
     }),
 })
+
+
+def cancel_timeout_layer(*, returned: bool, classification: str) -> str:
+    """Name the layer that timed out, or disclaim a timeout that never occurred.
+
+    A cancel call that raised did not necessarily time out. An argument-contract
+    rejection, a transport error, and a deadline expiry are different failures,
+    and only the last of them may claim a timeout layer.
+
+    An explicit broker rejection is terminal: no deadline governed it and no
+    reconciliation follows it, so it reports "not_applicable" rather than the
+    "none" used on the success path, where a later deadline may still expire.
+    """
+
+    if classification in TERMINAL_REJECTION_CLASSIFICATIONS:
+        return "not_applicable"
+    if returned:
+        return "none"
+    if classification in RECOGNIZED_TIMEOUT_CLASSIFICATIONS:
+        return "transport"
+    return "not_applicable"
 
 
 def coarse_duration_bucket(seconds: float | None) -> str:

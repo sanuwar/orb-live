@@ -138,6 +138,65 @@ transport verdict; the name is easy to misread and the new
 `asyncio.CancelledError` derives from `BaseException` and is deliberately **not**
 converted into a write ambiguity: it propagates, so structured cancellation is
 never swallowed and a cancelled task is never mistaken for a completed write.
+Because it propagates past every handler, no evidence write can follow it, so
+there is deliberately no `cancel_task_cancelled` diagnostic and no
+`CancelledError` entry in the classification allowlist — either would imply an
+observation this code is structurally unable to make.
+
+`cancel_timeout_layer` names a layer only for a recognized timeout. A cancel
+call that raised did not necessarily time out: an argument-contract rejection is
+recorded `not_applicable`, not `transport`. Only `TimeoutError` claims the
+transport layer, and only the reconciliation deadline claims
+`reconciliation_deadline`.
+
+An explicit broker rejection has its own response-shape classification,
+`broker_rejected`. It is **neither a timeout nor a malformed response**: the
+adapter detects the rejection from the error flag on the result, before any
+payload field is read, so no cancel envelope is ever parsed. `documented_envelope`
+would claim a well-formed cancel response arrived, `malformed_envelope` would
+claim one arrived and failed parsing, and `not_reached` would deny that the
+transport returned at all. Its timeout layer is `not_applicable`, because a
+rejection is terminal — no deadline governed it and no reconciliation follows,
+so the `none` used on the success path would carry the wrong implication. Both
+accepted-field diagnostics stay `unknown`: the rejection short-circuits before
+the payload is inspected, so whether an `accepted` field was present is
+genuinely unobserved and must not be reported as `false`.
+
+No raw rejection payload, response body, or exception message is persisted —
+only the allowlisted class name `BrokerRejectedError` and the allowlisted shape
+value. This is **diagnostic fidelity only**: broker-write behaviour and
+reconciliation behaviour are unchanged. A rejected cancel still attempts exactly
+one cancel, performs zero retries, enters no reconciliation, submits no exit,
+leaves the protective stop executable, and hands off as `STOP_CANCEL_REJECTED`
+under `OPERATOR_REQUIRED`.
+
+### The rejection now has its own failure category
+
+An explicit rejection previously recorded `failure_category =
+CANCEL_RECONCILIATION_FAILED` and `failure_stage = CANCEL_RECONCILIATION`. Both
+were wrong, and for the same reason: `STOP_CANCEL_REJECTED` was not an allowed
+failure category, so the classifier fell back to a stage-derived name — and the
+stage was set to `CANCEL_RECONCILIATION` before the cancel write, even though
+**bounded reconciliation never started**. Every reconciliation read counter was
+zero while the evidence claimed reconciliation had failed.
+
+`STOP_CANCEL_REJECTED` is now an allowed failure category, matching the handoff
+reason code exactly, the way `STOP_CANCEL_TIMEOUT` already does. A new stage,
+`STOP_CANCEL_SUBMISSION`, names the cancel write and its explicit verdict; it is
+scoped to the write alone and restored to `CANCEL_RECONCILIATION` before any
+reconciliation record, so a cancel that does proceed to bounded reconciliation
+and times out there is still attributed to reconciliation. An unclassified
+failure inside the submission window maps to `STOP_CANCEL_TRANSPORT_AMBIGUOUS`,
+because a cancel of unknown fate is an ambiguous write, not a reconciliation
+failure.
+
+The evidence therefore no longer calls an explicit rejection a reconciliation
+failure, and no longer implies that reconciliation ran. This is **classification
+naming only**. Broker-write, retry, handoff, and exit behaviour are unchanged:
+one cancel attempt, zero retries, zero reconciliation reads, zero exit attempts,
+the protective stop left executable, the session closed once, and the
+`STOP_CANCEL_REJECTED` handoff under `OPERATOR_REQUIRED` preserved. Historical
+incident reason codes and the retired-run records above are untouched.
 
 ## Response-contract findings
 
@@ -167,14 +226,13 @@ being written, so free text cannot reach evidence by construction.
 | --- | --- |
 | `cancel_call_started` | `true` / `false` / `unknown` |
 | `cancel_call_returned` | `true` / `false` / `unknown` |
-| `cancel_task_cancelled` | `true` / `false` / `unknown` |
 | `session_healthy_after_cancel` | `true` / `false` / `unknown` |
 | `cancel_response_contained_accepted` | `true` / `false` / `unknown` |
 | `cancel_accepted_value` | `true` / `false` / `unknown` |
 | `cancel_elapsed_duration_bucket` | `under_1_second` / `1_to_5_seconds` / `5_to_15_seconds` / `over_15_seconds` / `unknown` |
-| `cancel_timeout_layer` | `none` / `reconciliation_deadline` / `transport` / `unknown` |
+| `cancel_timeout_layer` | `none` / `not_applicable` / `reconciliation_deadline` / `transport` / `unknown` |
 | `cancel_transport_classification` | allowlisted exception class names, `UNKNOWN_EXCEPTION`, or `NONE` |
-| `cancel_response_shape_classification` | `documented_envelope` / `empty_result` / `malformed_envelope` / `not_reached` / `unknown` |
+| `cancel_response_shape_classification` | `broker_rejected` / `documented_envelope` / `empty_result` / `malformed_envelope` / `not_reached` / `unknown` |
 
 Duration is recorded only as a coarse bucket. Raw exception text, raw responses,
 request arguments, order identifiers, account information, tokens, credentials,
@@ -233,7 +291,9 @@ retries 0, exit place 1.
 3. `cancel_transport_classification` will read `UNKNOWN_EXCEPTION` for MCP SDK
    exception types, since only a fixed allowlist of class names may be
    persisted. That still distinguishes "raised" from "returned", which is the
-   distinction the incidents lacked.
+   distinction the incidents lacked. `BrokerRejectedError` is allowlisted
+   explicitly, so an outright broker refusal is no longer flattened into
+   `UNKNOWN_EXCEPTION`.
 4. If the cancel now succeeds, the run will exercise the exit-place path live for
    the first time. That path has offline coverage only.
 5. A fill that races the cancel remains possible and is handled as a
