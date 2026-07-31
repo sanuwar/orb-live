@@ -170,6 +170,34 @@ one cancel, performs zero retries, enters no reconciliation, submits no exit,
 leaves the protective stop executable, and hands off as `STOP_CANCEL_REJECTED`
 under `OPERATOR_REQUIRED`.
 
+### The rejection now has its own failure category
+
+An explicit rejection previously recorded `failure_category =
+CANCEL_RECONCILIATION_FAILED` and `failure_stage = CANCEL_RECONCILIATION`. Both
+were wrong, and for the same reason: `STOP_CANCEL_REJECTED` was not an allowed
+failure category, so the classifier fell back to a stage-derived name — and the
+stage was set to `CANCEL_RECONCILIATION` before the cancel write, even though
+**bounded reconciliation never started**. Every reconciliation read counter was
+zero while the evidence claimed reconciliation had failed.
+
+`STOP_CANCEL_REJECTED` is now an allowed failure category, matching the handoff
+reason code exactly, the way `STOP_CANCEL_TIMEOUT` already does. A new stage,
+`STOP_CANCEL_SUBMISSION`, names the cancel write and its explicit verdict; it is
+scoped to the write alone and restored to `CANCEL_RECONCILIATION` before any
+reconciliation record, so a cancel that does proceed to bounded reconciliation
+and times out there is still attributed to reconciliation. An unclassified
+failure inside the submission window maps to `STOP_CANCEL_TRANSPORT_AMBIGUOUS`,
+because a cancel of unknown fate is an ambiguous write, not a reconciliation
+failure.
+
+The evidence therefore no longer calls an explicit rejection a reconciliation
+failure, and no longer implies that reconciliation ran. This is **classification
+naming only**. Broker-write, retry, handoff, and exit behaviour are unchanged:
+one cancel attempt, zero retries, zero reconciliation reads, zero exit attempts,
+the protective stop left executable, the session closed once, and the
+`STOP_CANCEL_REJECTED` handoff under `OPERATOR_REQUIRED` preserved. Historical
+incident reason codes and the retired-run records above are untouched.
+
 ## Response-contract findings
 
 - The documented cancel envelope is `{"data": {"accepted": <bool>}, "guide": "..."}`.

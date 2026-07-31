@@ -20,6 +20,8 @@ import pytest
 
 from src.one_share_commissioning import (
     ALLOWED_CANCEL_DIAGNOSTICS,
+    ALLOWED_FAILURE_CATEGORIES,
+    ALLOWED_FAILURE_STAGES,
     RECOGNIZED_TIMEOUT_CLASSIFICATIONS,
     SAFE_EXCEPTION_TYPES,
     TERMINAL_REJECTION_CLASSIFICATIONS,
@@ -378,6 +380,147 @@ def test_rejection_classification_retains_no_broker_text():
     error = BrokerRejectedError("private broker refusal text")
     assert sanitized_exception_type(error) == "BrokerRejectedError"
     assert "private" not in sanitized_exception_type(error)
+
+
+# --- a rejection is not a reconciliation failure -----------------------
+
+
+def rejected_evidence(tmp_path, run_id):
+    instance, adapter_used, _, handoffs = make_orchestrator(
+        tmp_path,
+        adapter=RejectedCancelAdapter(cancel_mode="still_active"),
+        run_id=run_id,
+    )
+    result = asyncio.run(instance.run())
+    return result, evidence_of(result), adapter_used, handoffs
+
+
+def test_rejected_cancel_records_its_own_failure_category(tmp_path):
+    """The category previously fell back to the stage map, because
+    STOP_CANCEL_REJECTED was not an allowed category and the stage still read
+    CANCEL_RECONCILIATION. Both are now precise."""
+    result, evidence, _, handoffs = rejected_evidence(
+        tmp_path, "fidelity-rejected-category"
+    )
+
+    assert result.state is State.OPERATOR_REQUIRED
+    assert evidence["failure_category"] == "STOP_CANCEL_REJECTED"
+    assert evidence["completion_or_failure_reason"] == "STOP_CANCEL_REJECTED"
+    assert handoffs[-1].reason_code == "STOP_CANCEL_REJECTED"
+
+
+def test_rejected_cancel_is_not_called_a_reconciliation_failure(tmp_path):
+    _, evidence, _, _ = rejected_evidence(
+        tmp_path, "fidelity-rejected-not-reconciliation"
+    )
+
+    assert evidence["failure_category"] != "CANCEL_RECONCILIATION_FAILED"
+    assert evidence["failure_stage"] != "CANCEL_RECONCILIATION"
+
+
+def test_rejected_cancel_stage_names_the_submission_boundary(tmp_path):
+    """No bounded reconciliation read ever ran, so the stage must not imply
+    one. STOP_CANCEL_SUBMISSION names the write and its explicit verdict."""
+    _, evidence, _, _ = rejected_evidence(
+        tmp_path, "fidelity-rejected-stage"
+    )
+    counts = evidence["record_counts"]
+
+    assert evidence["failure_stage"] == "STOP_CANCEL_SUBMISSION"
+    assert counts.get("cancel_reconciliation_orders_reads", 0) == 0
+    assert counts.get("cancel_reconciliation_positions_reads", 0) == 0
+
+
+def test_rejected_cancel_category_and_stage_are_allowlisted(tmp_path):
+    _, evidence, _, _ = rejected_evidence(
+        tmp_path, "fidelity-rejected-allowlisted"
+    )
+
+    assert evidence["failure_category"] in ALLOWED_FAILURE_CATEGORIES
+    assert evidence["failure_stage"] in ALLOWED_FAILURE_STAGES
+    validate_sanitized_evidence(evidence)
+
+
+def test_rejected_cancel_classification_preserves_every_diagnostic(tmp_path):
+    """The naming repair must not disturb anything already pinned."""
+    _, evidence, adapter_used, handoffs = rejected_evidence(
+        tmp_path, "fidelity-rejected-preserved"
+    )
+    diagnostics = evidence["cancel_diagnostics"]
+    counts = evidence["record_counts"]
+
+    assert diagnostics["cancel_response_shape_classification"] == "broker_rejected"
+    assert diagnostics["cancel_transport_classification"] == "BrokerRejectedError"
+    assert diagnostics["cancel_timeout_layer"] == "not_applicable"
+    assert diagnostics["cancel_response_contained_accepted"] == "unknown"
+    assert diagnostics["cancel_accepted_value"] == "unknown"
+    assert evidence["write_attempt_counters"] == {
+        "entry_place": 1, "stop_place": 1, "stop_cancel": 1, "exit_place": 0,
+    }
+    assert counts.get("stop_cancel_retries", 0) == 0
+    assert handoffs[-1].stop_may_remain_executable is True
+    assert adapter_used.calls.count("cancel_equity_order") == 1
+    assert adapter_used.write_roles == ["entry", "stop", "cancel"]
+
+
+def test_rejected_cancel_evidence_carries_no_broker_text(tmp_path):
+    instance, _, _, _ = make_orchestrator(
+        tmp_path,
+        adapter=RejectedCancelAdapter(cancel_mode="still_active"),
+        run_id="fidelity-rejected-category-sanitized",
+    )
+    rendered = asyncio.run(instance.run()).evidence_path.read_text(
+        encoding="utf-8"
+    )
+
+    validate_sanitized_evidence(json.loads(rendered))
+    for prohibited in (
+        "broker operation was rejected", "rejected the request", "private",
+        STOP_ID, "stop-1", "entry-1", "transient",
+    ):
+        assert prohibited not in rendered
+
+
+def test_rejected_cancel_closes_the_session_once_with_the_new_category(tmp_path):
+    from tests.test_checkpoint_7c_incident_regression import (
+        actual_binding, read_sanitized,
+    )
+
+    binding, factory, _, store = actual_binding(
+        tmp_path,
+        secret_reader=lambda prompt: "y",
+        run_id="fidelity-rejected-category-close",
+        adapter=RejectedCancelAdapter(cancel_mode="still_active"),
+    )
+    result = asyncio.run(binding.run())
+    evidence = read_sanitized(store.partial / "commissioning_evidence.json")
+
+    assert result.state is State.OPERATOR_REQUIRED
+    assert evidence["failure_category"] == "STOP_CANCEL_REJECTED"
+    assert evidence["failure_stage"] == "STOP_CANCEL_SUBMISSION"
+    assert evidence["write_attempt_counters"]["exit_place"] == 0
+    assert factory.created == 1
+    assert factory.entered == 1
+    assert factory.closed == 1
+
+
+def test_ambiguous_cancel_still_reports_the_reconciliation_stage(tmp_path):
+    """The submission stage is scoped to the write. A cancel that goes on to
+    bounded reconciliation and times out there must still be attributed to
+    reconciliation, not to the submission boundary."""
+    instance, _, _, _ = make_orchestrator(
+        tmp_path,
+        adapter=RaisingCancelAdapter(
+            classification="RuntimeError", cancel_mode="still_active",
+            advance_phase=False,
+        ),
+        run_id="fidelity-ambiguous-stage-restored",
+    )
+    evidence = evidence_of(asyncio.run(instance.run()))
+
+    assert evidence["failure_category"] == "STOP_CANCEL_TIMEOUT"
+    assert evidence["failure_stage"] == "CANCEL_RECONCILIATION"
+    assert evidence["record_counts"]["cancel_reconciliation_orders_reads"] > 0
 
 
 # --- nothing raw reaches evidence --------------------------------------

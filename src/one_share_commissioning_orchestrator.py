@@ -196,6 +196,10 @@ class OneShareCommissioningOrchestrator:
             "ENTRY_PLACE": "ENTRY_PLACE_AMBIGUOUS",
             "ENTRY_RECONCILIATION": "RECONCILIATION_FAILED",
             "STOP_PROTECTION": "STOP_PROTECTION_FAILED",
+            # An unclassified failure at the submission boundary leaves the
+            # cancel's fate unknown, which is an ambiguous write, not a
+            # reconciliation failure.
+            "STOP_CANCEL_SUBMISSION": "STOP_CANCEL_TRANSPORT_AMBIGUOUS",
             "CANCEL_RECONCILIATION": "CANCEL_RECONCILIATION_FAILED",
             "FLATTENING": "FLATTEN_FAILED",
             "FINAL_FLAT_VERIFICATION": "FINAL_FLAT_VERIFICATION_FAILED",
@@ -725,6 +729,11 @@ class OneShareCommissioningOrchestrator:
         self._last_write = "cancel"
         self.machine.record_cancel_diagnostic("cancel_call_started", "true")
         cancel_started = self.monotonic()
+        # The cancel write is its own boundary. Bounded reconciliation has not
+        # started yet, so a failure here must not be labelled a reconciliation
+        # failure. Restored below before any reconciliation record is written.
+        reconciliation_stage = self._stage
+        self._stage = "STOP_CANCEL_SUBMISSION"
         try:
             result = await self.adapter.cancel_equity_order({"order_id": stop_id})
         except AmbiguousWriteError as error:
@@ -744,6 +753,7 @@ class OneShareCommissioningOrchestrator:
                 "STOP_CANCEL_RESPONSE_MALFORMED",
             }:
                 category = "STOP_CANCEL_TRANSPORT_AMBIGUOUS"
+            self._stage = reconciliation_stage
             self.machine.stop_cancel_requested(WriteDisposition.AMBIGUOUS)
             self.machine.record_cancel_reconciliation(category)
             return
@@ -782,6 +792,7 @@ class OneShareCommissioningOrchestrator:
                 "STOP_CANCEL_REJECTED", position=True, stop=True,
                 action="Retain manual control; inspect the executable stop.",
             )
+        self._stage = reconciliation_stage
         self.machine.record_cancel_reconciliation(
             "STOP_CANCEL_REQUEST_ACCEPTED"
         )
