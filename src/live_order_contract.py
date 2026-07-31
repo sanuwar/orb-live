@@ -795,6 +795,59 @@ def require_response_contract(tool_name: str) -> None:
 # Strict place-response parsing.
 # --------------------------------------------------------------------------
 
+def classify_place_response_shape(data: Any) -> dict[str, str]:
+    """Describe a place-response payload STRUCTURALLY. Reads no values.
+
+    This exists because a rejected placement currently reports only that the
+    response was malformed, which is not enough to tell a schema-legal
+    response the parser refuses from a genuinely broken one. It returns
+    booleans and one fixed classification -- never a key name, a value, an
+    identifier, a price, or any part of the response body.
+
+    It is diagnostic only: nothing here decides whether a write succeeded,
+    and the parser's verdict is unaffected.
+    """
+    facts = {
+        "data_object_present": isinstance(data, Mapping),
+        "order_key_present": False,
+        "order_value_null": False,
+        "order_object_present": False,
+        "identifier_field_present": False,
+        "accepted_field_present": False,
+        "unexpected_data_keys_present": False,
+    }
+    classification = "unknown"
+
+    if data is None:
+        classification = "envelope_absent"
+    elif not isinstance(data, Mapping):
+        classification = "data_not_an_object"
+    else:
+        facts["order_key_present"] = "order" in data
+        facts["accepted_field_present"] = "accepted" in data
+        facts["unexpected_data_keys_present"] = bool(set(data) - {"order"})
+        order = data.get("order")
+        facts["order_value_null"] = "order" in data and order is None
+        facts["order_object_present"] = isinstance(order, Mapping)
+        if isinstance(order, Mapping):
+            facts["identifier_field_present"] = "id" in order
+
+        if not facts["order_key_present"]:
+            classification = "order_key_absent"
+        elif facts["unexpected_data_keys_present"]:
+            # additionalProperties=false forbids this, so it outranks the
+            # order's own shape: the envelope itself is wrong.
+            classification = "unexpected_data_keys"
+        elif facts["order_value_null"]:
+            classification = "order_null_schema_legal"
+        elif facts["order_object_present"]:
+            classification = "order_object_returned"
+
+    result = {name: ("true" if value else "false") for name, value in facts.items()}
+    result["envelope_classification"] = classification
+    return result
+
+
 def parse_place_response(response: Any) -> ParsedPlaceResponse:
     """
     Parse an advertised place_equity_order success response.
