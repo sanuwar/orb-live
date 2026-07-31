@@ -18,6 +18,11 @@ from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from src.live_order_contract import (
+    CONTRACT_VIOLATION_KINDS,
+    PLACE_ORDER_FIELD_ALIAS_VALUES,
+    PLACE_ORDER_OBJECT_SCOPE,
+)
 from src.live_order_state_model import OrderStateClass, classify_order_state
 
 
@@ -136,7 +141,8 @@ SAFE_EXCEPTION_TYPES = frozenset({
     "AuthorizationInterruptedError", "BrokerRejectedError",
     "BrowserAuthenticationRequestError",
     "CommissioningError", "CommissioningSessionBindingError",
-    "EntryWindowError", "SilentAuthenticationError",
+    "EntryWindowError", "ResponseContractViolationError",
+    "SilentAuthenticationError",
     "TimeoutError", "TypeError", "ValueError", "OSError", "RuntimeError",
 })
 
@@ -424,6 +430,11 @@ _PLACE_ENVELOPE_CLASSIFICATIONS = frozenset({
     "envelope_absent",
     "unknown",
 })
+# The order-object contract violation, named rather than inferred. Imported
+# from the contract module so the vocabulary cannot drift from the schema it
+# describes. An alias never carries a field VALUE.
+_CONTRACT_SCOPES = frozenset({PLACE_ORDER_OBJECT_SCOPE})
+
 # Keys are role-prefixed so a placement never overwrites another role's facts.
 ALLOWED_PLACE_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
     **{
@@ -433,6 +444,18 @@ ALLOWED_PLACE_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
     },
     **{
         f"{role}_envelope_classification": _PLACE_ENVELOPE_CLASSIFICATIONS
+        for role in ("entry", "stop", "exit")
+    },
+    **{
+        f"{role}_contract_scope": _CONTRACT_SCOPES
+        for role in ("entry", "stop", "exit")
+    },
+    **{
+        f"{role}_contract_field_alias": PLACE_ORDER_FIELD_ALIAS_VALUES
+        for role in ("entry", "stop", "exit")
+    },
+    **{
+        f"{role}_contract_violation_kind": CONTRACT_VIOLATION_KINDS
         for role in ("entry", "stop", "exit")
     },
 })
