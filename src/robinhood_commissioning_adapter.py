@@ -62,6 +62,23 @@ class BrokerRejectedError(CommissioningError):
     """The broker returned an explicit rejection rather than an ambiguous result."""
 
 
+class PlacementSymbolMismatchError(CommissioningError):
+    """A placement response named a DIFFERENT, non-blank symbol.
+
+    Deliberately not an ``AmbiguousWriteError``: that type is routed into
+    bounded read-only reconciliation, and reconciliation cannot resolve this.
+    A response that positively identifies another instrument is a terminal
+    contract failure, so it fails closed at the write boundary instead.
+
+    Distinct from a BLANK creation-time symbol, which identifies nothing and
+    is reconcilable. The offending symbol is never carried in this error.
+    """
+
+    def __init__(self, category: str) -> None:
+        self.category = category
+        super().__init__(category)
+
+
 @dataclass(frozen=True)
 class CommissionedAccountRead:
     identity_match: bool
@@ -398,6 +415,25 @@ class RobinhoodCommissioningAdapter:
         observed_type = (
             f"stop_{parsed.order_type}" if parsed.trigger == "stop" else parsed.order_type
         )
+        # A creation response may carry the symbol blank; the broker populates
+        # it by the time the order is read back. Blank is NOT proof of
+        # identity, so the placement is routed into the existing bounded
+        # read-only reconciliation, which verifies the symbol from a status
+        # read. The requested symbol is never substituted here.
+        symbol_blank = not parsed.symbol.strip()
+        if symbol_blank:
+            raise AmbiguousWriteError(
+                f"{role.upper()}_PLACE_SYMBOL_PENDING",
+                transport_classification="NONE",
+                response_shape="documented_envelope",
+                call_returned=True,
+            )
+        if parsed.symbol.upper() != "AAPL":
+            # A non-blank symbol naming another instrument. Reconciliation
+            # cannot resolve this, so it fails closed at the boundary.
+            raise PlacementSymbolMismatchError(
+                f"{role.upper()}_PLACE_SYMBOL_MISMATCH"
+            )
         if not all((
             bool(parsed.server_order_id.strip()), parsed.symbol.upper() == "AAPL",
             parsed.side.lower() == expected_side,
@@ -412,9 +448,12 @@ class RobinhoodCommissioningAdapter:
                 else (
                     "STOP_PLACE_RESPONSE_MALFORMED"
                     if role == "stop"
-                    else "WRITE_RESULT_AMBIGUOUS"
+                    else "EXIT_PLACE_RESPONSE_MALFORMED"
                 )
             )
+            # Any remaining identity mismatch. A non-blank wrong symbol was
+            # already raised above as a terminal mismatch; what reaches here
+            # is reconcilable, and the requested values are never substituted.
             raise AmbiguousWriteError(category)
         if role == "stop" and parsed.stop_price != _decimal_text(arguments["stop_price"]):
             raise AmbiguousWriteError("STOP_PLACE_RESPONSE_MALFORMED")

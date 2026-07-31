@@ -514,6 +514,37 @@ def _require_text(value: Any, label: str) -> str:
     return value
 
 
+def _require_present_text(value: Any, label: str) -> str:
+    """A required schema ``string`` that MAY be empty.
+
+    Presence, non-nullness, and the string type are still enforced. Only the
+    non-blank rule is dropped, and only where the advertised schema does not
+    impose one: the order object declares ``symbol`` as a plain ``string``
+    with no ``minLength``, and the broker returns it blank on the immediate
+    creation response, populating it by the time the order is read back.
+
+    A blank value is NOT identity. Nothing here substitutes a requested
+    symbol; the caller must prove identity from a subsequent status read.
+    """
+    if isinstance(value, bool) or value is None:
+        raise ResponseContractViolationError(
+            f"The {label} is missing or null but is required.",
+            safe_contract_scope=PLACE_ORDER_OBJECT_SCOPE,
+            safe_field_alias="symbol",
+            safe_violation_kind="null",
+        )
+
+    if not isinstance(value, str):
+        raise ResponseContractViolationError(
+            f"The {label} must be a string.",
+            safe_contract_scope=PLACE_ORDER_OBJECT_SCOPE,
+            safe_field_alias="symbol",
+            safe_violation_kind="wrong_type",
+        )
+
+    return value
+
+
 def _optional_text(value: Any, label: str) -> str | None:
     """A schema ``["null", "string"]`` field."""
     if value is None:
@@ -836,6 +867,13 @@ CONTRACT_VIOLATION_KINDS: frozenset[str] = frozenset({
     "contradictory_fields", "unknown",
 })
 
+# Required text fields a CREATION response may return blank. Proven live on
+# 2026-07-31 (run …-06): entry, stop, and exit each reported
+# place_order_object / symbol / empty_text while the same orders read back
+# with the symbol populated. parse_order_status is unaffected and still
+# rejects a blank symbol.
+_CREATION_BLANK_TEXT_FIELDS: frozenset[str] = frozenset({"symbol"})
+
 _REQUIRED_DECIMAL_FIELDS = ("cumulative_quantity", "fees")
 _OPTIONAL_DECIMAL_FIELDS = ("quantity", "price", "stop_price", "average_price")
 _POSITIVE_DECIMAL_FIELDS = frozenset({"price", "stop_price", "average_price"})
@@ -907,6 +945,10 @@ def classify_place_order_object_violation(data: Any) -> dict[str, str] | None:
 
     for name in sorted(_ORDER_REQUIRED_TEXT_FIELDS):
         kind = _text_violation_kind(order.get(name))
+        if kind == "empty_text" and name in _CREATION_BLANK_TEXT_FIELDS:
+            # The creation parser accepts this, so it is not a violation.
+            # Reporting it would name a field the parser did not reject.
+            continue
         if kind is not None:
             return result(PLACE_ORDER_FIELD_ALIASES[name], kind)
 
@@ -1077,8 +1119,13 @@ def parse_place_response(response: Any) -> ParsedPlaceResponse:
         label="place response order",
     )
 
-    for name in sorted(_ORDER_REQUIRED_TEXT_FIELDS):
+    # symbol is validated separately below: a CREATION response may carry it
+    # blank, which the advertised schema permits and a status read never
+    # exhibits. Every other required text field keeps the strict rule.
+    for name in sorted(_ORDER_REQUIRED_TEXT_FIELDS - _CREATION_BLANK_TEXT_FIELDS):
         _require_text(order.get(name), f"place response order {name}")
+    for name in sorted(_CREATION_BLANK_TEXT_FIELDS):
+        _require_present_text(order.get(name), f"place response order {name}")
 
     # reject_reason is optional; validated for type only and then dropped.
     # It is free-text written by the broker and must not reach a log.
@@ -1152,7 +1199,9 @@ def parse_place_response(response: Any) -> ParsedPlaceResponse:
             order.get("id"), "place response order id"
         ),
         state=_require_text(order.get("state"), "place response order state"),
-        symbol=_require_text(
+        # Carried through exactly as the broker sent it, blank included.
+        # It is never replaced with the requested symbol.
+        symbol=_require_present_text(
             order.get("symbol"), "place response order symbol"
         ),
         side=_require_text(order.get("side"), "place response order side"),

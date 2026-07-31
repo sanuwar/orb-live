@@ -490,6 +490,14 @@ def test_null_non_nullable_place_fields_are_rejected(field_name):
 )
 @pytest.mark.parametrize("bad", [7, 7.5, True, [], {}, ""])
 def test_wrong_typed_place_text_fields_are_rejected(field_name, bad):
+    if field_name == "symbol" and bad == "":
+        # A CREATION response may carry the symbol blank; the broker
+        # populates it by the time the order is read back. Proven live on
+        # 2026-07-31. Presence, non-nullness, and the string type are still
+        # enforced, and parse_order_status still rejects a blank symbol --
+        # both asserted in tests/test_place_response_blank_symbol.py.
+        assert parse_place_response(make_place_response(symbol="")).symbol == ""
+        return
     with pytest.raises(ResponseContractViolationError):
         parse_place_response(make_place_response(**{field_name: bad}))
 

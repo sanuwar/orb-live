@@ -22,7 +22,8 @@ from src.one_share_commissioning import (
 )
 from src.robinhood_commissioning_adapter import (
     AmbiguousWriteError, BrokerRejectedError, CommissioningOrderRecord,
-    CommissioningPositionRecord, RobinhoodCommissioningAdapter,
+    CommissioningPositionRecord, PlacementSymbolMismatchError,
+    RobinhoodCommissioningAdapter,
 )
 
 
@@ -325,6 +326,7 @@ class OneShareCommissioningOrchestrator:
                     if error.category in {
                         "EXIT_PLACE_RESPONSE_MALFORMED",
                         "EXIT_PLACE_TRANSPORT_AMBIGUOUS",
+                        "EXIT_PLACE_SYMBOL_PENDING",
                     }
                     else "EXIT_PLACE_TRANSPORT_AMBIGUOUS"
                 )
@@ -334,6 +336,23 @@ class OneShareCommissioningOrchestrator:
                 )
                 return None
             raise
+        except PlacementSymbolMismatchError as error:
+            # The response positively named another instrument. Bounded reads
+            # cannot resolve that, so this never enters reconciliation: the
+            # write is recorded as ambiguous and the operator takes control.
+            if role == "entry":
+                self.machine.entry_submitted(WriteDisposition.AMBIGUOUS)
+            elif role == "stop":
+                self.machine.stop_submitted(WriteDisposition.AMBIGUOUS)
+            else:
+                self.machine.exit_submitted(
+                    WriteDisposition.AMBIGUOUS,
+                    latest_position_quantity=Decimal("1"),
+                )
+            await self._handoff(
+                error.category, position=True, stop=role in {"stop", "exit"},
+                action="Inspect the exact order and instrument in the Robinhood UI; do not retry.",
+            )
         except BrokerRejectedError as error:
             if role == "entry":
                 self.machine.entry_submitted(WriteDisposition.REJECTED)
@@ -471,6 +490,7 @@ class OneShareCommissioningOrchestrator:
         if ambiguity_category not in {
             "STOP_PLACE_RESPONSE_MALFORMED",
             "STOP_PLACE_TRANSPORT_AMBIGUOUS",
+            "STOP_PLACE_SYMBOL_PENDING",
         }:
             ambiguity_category = "STOP_PLACE_TRANSPORT_AMBIGUOUS"
         self.machine.record_stop_reconciliation(ambiguity_category)
@@ -650,6 +670,7 @@ class OneShareCommissioningOrchestrator:
         if ambiguity_category not in {
             "ENTRY_PLACE_RESPONSE_MALFORMED",
             "ENTRY_PLACE_TRANSPORT_AMBIGUOUS",
+            "ENTRY_PLACE_SYMBOL_PENDING",
         }:
             ambiguity_category = "ENTRY_PLACE_TRANSPORT_AMBIGUOUS"
         self.machine.record_entry_reconciliation(ambiguity_category)
