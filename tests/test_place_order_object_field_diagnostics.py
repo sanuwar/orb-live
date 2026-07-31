@@ -30,6 +30,8 @@ from src.one_share_commissioning import (
     ALLOWED_PLACE_DIAGNOSTICS,
     PROHIBITED_EVIDENCE_TERMS,
     SAFE_EXCEPTION_TYPES,
+    AtomicEvidenceStore,
+    CommissioningDiagnosticError,
     CommissioningError,
     State,
     validate_sanitized_evidence,
@@ -416,6 +418,131 @@ def test_unknown_or_unavailable_facts_are_dropped_not_invented(tmp_path):
     assert instance.machine.evidence.place_diagnostics == {
         "entry_contract_field_alias": "fees"
     }
+
+
+class FailingDiagnosticStore(AtomicEvidenceStore):
+    """Fail persistence only once a place diagnostic is being written.
+
+    That is strictly after the broker-write boundary, so it reproduces the
+    exposure precisely: the write is already spent when evidence fails.
+    """
+
+    def __init__(self, root, run_id):
+        super().__init__(root, run_id)
+        self.armed = False
+        self.induced_failures = 0
+
+    def persist(self, evidence):
+        if self.armed and evidence.place_diagnostics:
+            self.induced_failures += 1
+            raise CommissioningError("induced evidence persistence failure")
+        return super().persist(evidence)
+
+
+def test_diagnostic_persistence_failure_fails_closed_after_one_write(tmp_path):
+    """Pin what actually happens, not what would be tidier.
+
+    Recording a field diagnostic runs inside the ambiguous-placement handler.
+    If evidence persistence fails there, the CommissioningError replaces the
+    AmbiguousWriteError and reconciliation never starts. That is acceptable
+    only because it cannot continue trading: the write is already spent, no
+    second write follows, and the run aborts. This test exists to keep that
+    true, and to fail loudly if the behavior ever silently changes.
+    """
+    from tests.test_checkpoint_7c_incident_regression import actual_binding
+
+    adapter = NamedViolationAdapter("entry")
+    binding, factory, _, _ = actual_binding(
+        tmp_path,
+        secret_reader=lambda prompt: "y",
+        run_id="diagnostic-persistence-failure",
+        adapter=adapter,
+    )
+    store = FailingDiagnosticStore(tmp_path, "diagnostic-persistence-failure")
+    binding.evidence_store = store
+    store.armed = True
+
+    with pytest.raises(CommissioningDiagnosticError) as caught:
+        asyncio.run(binding.run())
+
+    # The real outcome: an internal-invariant diagnostic, NOT the ordinary
+    # OPERATOR_REQUIRED reconciliation verdict. Pinning the broader
+    # CommissioningError would let that distinction rot unnoticed.
+    assert caught.value.category == "INTERNAL_INVARIANT_FAILURE"
+    assert caught.value.stage == "INTERNAL_INVARIANT"
+    assert caught.value.exception_type == "CommissioningError"
+
+    # The failure was actually induced where intended.
+    assert store.induced_failures >= 1
+
+    # The diagnostic that could not be persisted was not partially written.
+    assert json.loads(
+        (store.partial / "commissioning_evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )["place_diagnostics"] == {}
+
+    # Exactly one broker write, and nothing after it.
+    assert adapter.write_roles == ["entry"]
+    assert adapter.calls.count("place_equity_order") == 1
+    assert "stop" not in adapter.write_roles
+    assert "cancel" not in adapter.write_roles
+    assert "exit" not in adapter.write_roles
+
+    # Placement reconciliation never began, and the ambiguous result was
+    # never converted into a success.
+    evidence = json.loads(
+        (store.partial / "commissioning_evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "ENTRY_RECONCILING" not in evidence["state_transitions"]
+    assert State.VERIFIED_FLAT.value not in evidence["state_transitions"]
+    assert State.COMPLETE.value not in evidence["state_transitions"]
+    assert evidence["boolean_validations"].get("verified_flat") is not True
+    assert evidence["record_counts"].get("entry_reconciliation_polls") is None
+
+    # The session was opened and closed exactly once.
+    assert factory.created == 1
+    assert factory.entered == 1
+    assert factory.closed == 1
+
+    # Write limits and strategy state are untouched by the failure.
+    assert evidence["write_attempt_counters"] == {
+        "entry_place": 1, "stop_place": 0, "stop_cancel": 0, "exit_place": 0,
+    }
+    assert evidence["boolean_validations"]["strategy_disabled"] is True
+
+
+def test_diagnostic_persistence_failure_persists_nothing_private(tmp_path):
+    from tests.test_checkpoint_7c_incident_regression import actual_binding
+
+    binding, _, _, _ = actual_binding(
+        tmp_path,
+        secret_reader=lambda prompt: "y",
+        run_id="diagnostic-persistence-privacy",
+        adapter=NamedViolationAdapter("entry"),
+    )
+    store = FailingDiagnosticStore(tmp_path, "diagnostic-persistence-privacy")
+    binding.evidence_store = store
+    store.armed = True
+
+    with pytest.raises(CommissioningDiagnosticError):
+        asyncio.run(binding.run())
+
+    rendered = (store.partial / "commissioning_evidence.json").read_text(
+        encoding="utf-8"
+    )
+    validate_sanitized_evidence(json.loads(rendered))
+    for prohibited in (
+        "order-1", "instrument-1", "transient", "200.00", PRIVATE_VALUE,
+        "agent", "raw_response",
+        # The induced exception's own message must not survive either.
+        "induced evidence persistence failure",
+    ):
+        assert prohibited not in rendered
+    # The authorization response is never persisted as a value.
+    assert '"y"' not in rendered
 
 
 def test_diagnostic_values_are_rejected_outside_the_allowlist(tmp_path):
