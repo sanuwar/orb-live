@@ -12,7 +12,12 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from src.live_order_contract import parse_cancel_response, parse_order_status, parse_place_response
+from src.live_order_contract import (
+    classify_place_response_shape,
+    parse_cancel_response,
+    parse_order_status,
+    parse_place_response,
+)
 from src.one_share_commissioning import CommissioningError, sanitized_exception_type
 
 
@@ -33,12 +38,16 @@ class AmbiguousWriteError(CommissioningError):
         transport_classification: str = "NONE",
         response_shape: str = "unknown",
         call_returned: bool = False,
+        place_shape: Mapping[str, str] | None = None,
     ) -> None:
         self.category = category
         # Allowlisted class name only; exception text is never retained.
         self.transport_classification = transport_classification
         self.response_shape = response_shape
         self.call_returned = call_returned
+        # Structural booleans plus one fixed classification, or None. Never
+        # any part of a response body.
+        self.place_shape = dict(place_shape) if place_shape else {}
         super().__init__(category)
 
 
@@ -341,10 +350,17 @@ class RobinhoodCommissioningAdapter:
                 else (
                     "STOP_PLACE_RESPONSE_MALFORMED"
                     if role == "stop"
-                    else "WRITE_RESULT_AMBIGUOUS"
+                    else "EXIT_PLACE_RESPONSE_MALFORMED"
                 )
             )
-            raise AmbiguousWriteError(category) from exc
+            raise AmbiguousWriteError(
+                category,
+                transport_classification=sanitized_exception_type(exc),
+                response_shape="malformed_envelope",
+                call_returned=True,
+                # Structural facts only; carries no part of the response body.
+                place_shape=classify_place_response_shape(data),
+            ) from exc
         expected_side, expected_type, expected_duration = {
             "entry": ("buy", "market", "gfd"),
             "stop": ("sell", "stop_market", "gtc"),

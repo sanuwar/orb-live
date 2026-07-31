@@ -16,6 +16,7 @@ from src.one_share_commissioning import (
     CommissioningMachine, EntryWindowError,
     EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
     RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
+    ALLOWED_PLACE_DIAGNOSTICS,
     WriteDisposition, cancel_timeout_layer, coarse_duration_bucket,
     sanitized_exception_type,
 )
@@ -303,6 +304,11 @@ class OneShareCommissioningOrchestrator:
         try:
             result = await self.adapter.place_equity_order(arguments, role=role)
         except AmbiguousWriteError as error:
+            # Every role records the same structural facts about what came
+            # back. This is the single choke point for all three placements,
+            # so the recurring place-response rejection is described here
+            # once rather than three times.
+            self._record_place_shape(role, getattr(error, "place_shape", {}))
             # Entry, stop, and exit all reconcile their own ambiguity with
             # bounded read-only reads. None of them may conclude from the
             # failed write alone, and none of them may write again.
@@ -357,6 +363,20 @@ class OneShareCommissioningOrchestrator:
             self.machine.exit_submitted(WriteDisposition.ACCEPTED,
                                         latest_position_quantity=Decimal("1"))
         return result
+
+    def _record_place_shape(self, role: str, shape: Mapping[str, str]) -> None:
+        """Persist allowlisted structural facts about a rejected placement.
+
+        Unknown keys and values are dropped rather than raised on: a
+        diagnostic must never be able to fail a run that is already handling
+        a write ambiguity.
+        """
+        for name, value in shape.items():
+            key = f"{role}_{name}"
+            allowed = ALLOWED_PLACE_DIAGNOSTICS.get(key)
+            if allowed is None or value not in allowed:
+                continue
+            self.machine.record_place_diagnostic(key, value)
 
     def _record_exit_call_outcome(
         self, *, returned: bool, classification: str, response_shape: str,

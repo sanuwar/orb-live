@@ -398,6 +398,45 @@ ALLOWED_CANCEL_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
 })
 
 
+# "identifier_field_present" is deliberately not called
+# "order_identifier_...": the evidence sanitizer rejects any key containing
+# "order_id", and that guard must not be weakened for a diagnostic's benefit.
+# The outer MCP layers (structuredContent, content list) are not classified
+# here: every read call already traverses them through the same helper and
+# they demonstrably work, so a classification would add nothing.
+_PLACE_SHAPE_FACTS = frozenset({
+    "data_object_present", "order_key_present", "order_value_null",
+    "order_object_present", "identifier_field_present",
+    "accepted_field_present", "unexpected_data_keys_present",
+})
+_PLACE_ENVELOPE_CLASSIFICATIONS = frozenset({
+    # The order object was present and structurally an object. Whatever the
+    # parser rejected was inside it.
+    "order_object_returned",
+    # data.order was explicitly null. The advertised outputSchema PERMITS
+    # this, and the parser rejects it deliberately, so this classification
+    # distinguishes a schema-legal response from a genuinely broken one.
+    "order_null_schema_legal",
+    # data carried keys beyond "order"; additionalProperties=false forbids it.
+    "unexpected_data_keys",
+    "order_key_absent",
+    "data_not_an_object",
+    "envelope_absent",
+    "unknown",
+})
+# Keys are role-prefixed so a placement never overwrites another role's facts.
+ALLOWED_PLACE_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
+    **{
+        f"{role}_{fact}": _TRUTH_VALUES
+        for role in ("entry", "stop", "exit")
+        for fact in _PLACE_SHAPE_FACTS
+    },
+    **{
+        f"{role}_envelope_classification": _PLACE_ENVELOPE_CLASSIFICATIONS
+        for role in ("entry", "stop", "exit")
+    },
+})
+
 ALLOWED_EXIT_DIAGNOSTICS: Mapping[str, frozenset[str]] = MappingProxyType({
     "exit_call_started": _TRUTH_VALUES,
     "exit_call_returned": _TRUTH_VALUES,
@@ -507,6 +546,7 @@ class SanitizedEvidence:
     record_counts: dict[str, int] = field(default_factory=dict)
     cancel_diagnostics: dict[str, str] = field(default_factory=dict)
     exit_diagnostics: dict[str, str] = field(default_factory=dict)
+    place_diagnostics: dict[str, str] = field(default_factory=dict)
     completion_or_failure_reason: str = "IN_PROGRESS"
     planned_risk_usd: int = 15
     sanitized_exception_type: str = "NONE"
@@ -794,6 +834,21 @@ class CommissioningMachine:
         if not isinstance(value, str) or value not in allowed:
             raise CommissioningError("cancel diagnostic value is invalid")
         self.evidence.cancel_diagnostics[key] = value
+        self.evidence_store.persist(self.evidence)
+
+    def record_place_diagnostic(self, key: str, value: str) -> None:
+        """Record one allowlisted structural fact about a place response.
+
+        These are shape facts only. No response body, key name, identifier,
+        price, or exception text can pass: both the key and the value must
+        appear in the fixed allowlist or this raises.
+        """
+        allowed = ALLOWED_PLACE_DIAGNOSTICS.get(key)
+        if allowed is None:
+            raise CommissioningError("place diagnostic key is invalid")
+        if not isinstance(value, str) or value not in allowed:
+            raise CommissioningError("place diagnostic value is invalid")
+        self.evidence.place_diagnostics[key] = value
         self.evidence_store.persist(self.evidence)
 
     def record_exit_diagnostic(self, key: str, value: str) -> None:
