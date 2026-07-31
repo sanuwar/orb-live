@@ -65,7 +65,10 @@ def test_ambiguous_exit_fails_closed_without_duplicate_write(tmp_path):
 
     assert run(instance).state is State.OPERATOR_REQUIRED
     assert adapter.write_roles.count('exit') == 1
-    assert handoffs[-1].reason_code == 'AMBIGUOUS_EXIT_SUBMISSION'
+    # An ambiguous exit is now read back rather than concluded. This fake never
+    # reveals an attributable sell and keeps the share, so bounded reads run out
+    # at the deadline and the run still fails closed with exactly one write.
+    assert handoffs[-1].reason_code == 'EXIT_RECONCILIATION_TIMEOUT'
     assert instance.machine.evidence.write_attempt_counters['exit_place'] == 1
 
 

@@ -27,6 +27,14 @@ from src.robinhood_commissioning_adapter import (
 
 POLL_SECONDS = 1.0
 STOP_CANCEL_DEADLINE_SECONDS = 30
+_EXIT_STATE_DIAGNOSTIC = {
+    OrderStateClass.TERMINAL_FILLED: "filled",
+    OrderStateClass.ACTIVE_OR_WORKING: "working",
+    OrderStateClass.CANCELLATION_PENDING: "cancellation_pending",
+    OrderStateClass.TERMINAL_CANCELLED: "cancelled",
+    OrderStateClass.TERMINAL_REJECTED_OR_FAILED: "rejected_or_failed",
+    OrderStateClass.PARTIAL_FILL_WITH_REMAINDER_CANCELLED: "partial_fill",
+}
 EXIT_FILL_DEADLINE_SECONDS = 30
 FINAL_FLAT_DEADLINE_SECONDS = 15
 
@@ -294,23 +302,43 @@ class OneShareCommissioningOrchestrator:
         self._last_write = role
         try:
             result = await self.adapter.place_equity_order(arguments, role=role)
-        except AmbiguousWriteError:
-            if role in {"entry", "stop"}:
-                raise
-            disposition = WriteDisposition.AMBIGUOUS
-            if role == "stop":
-                self.machine.stop_submitted(disposition)
-            else:
-                self.machine.exit_submitted(disposition, latest_position_quantity=Decimal("1"))
-            await self._handoff(f"AMBIGUOUS_{role.upper()}_SUBMISSION",
-                                position=True, stop=role in {"stop", "exit"},
-                                action="Inspect the exact order and position in the Robinhood UI; do not retry.")
-        except BrokerRejectedError:
+        except AmbiguousWriteError as error:
+            # Entry, stop, and exit all reconcile their own ambiguity with
+            # bounded read-only reads. None of them may conclude from the
+            # failed write alone, and none of them may write again.
+            if role == "exit":
+                self._record_exit_call_outcome(
+                    returned=getattr(error, "call_returned", False),
+                    classification=getattr(
+                        error, "transport_classification", "UNKNOWN_EXCEPTION"
+                    ),
+                    response_shape=getattr(error, "response_shape", "unknown"),
+                )
+                self.machine.record_exit_reconciliation(
+                    error.category
+                    if error.category in {
+                        "EXIT_PLACE_RESPONSE_MALFORMED",
+                        "EXIT_PLACE_TRANSPORT_AMBIGUOUS",
+                    }
+                    else "EXIT_PLACE_TRANSPORT_AMBIGUOUS"
+                )
+                self.machine.exit_submitted(
+                    WriteDisposition.AMBIGUOUS,
+                    latest_position_quantity=Decimal("1"),
+                )
+                return None
+            raise
+        except BrokerRejectedError as error:
             if role == "entry":
                 self.machine.entry_submitted(WriteDisposition.REJECTED)
             elif role == "stop":
                 self.machine.stop_submitted(WriteDisposition.REJECTED)
             else:
+                self._record_exit_call_outcome(
+                    returned=True,
+                    classification=sanitized_exception_type(error),
+                    response_shape="broker_rejected",
+                )
                 self.machine.exit_submitted(WriteDisposition.REJECTED,
                                             latest_position_quantity=Decimal("1"))
             await self._handoff(f"{role.upper()}_REJECTED", position=role != "entry",
@@ -322,9 +350,33 @@ class OneShareCommissioningOrchestrator:
         elif role == "stop":
             self.machine.stop_submitted(WriteDisposition.ACCEPTED)
         else:
+            self._record_exit_call_outcome(
+                returned=True, classification="NONE",
+                response_shape="documented_envelope",
+            )
             self.machine.exit_submitted(WriteDisposition.ACCEPTED,
                                         latest_position_quantity=Decimal("1"))
         return result
+
+    def _record_exit_call_outcome(
+        self, *, returned: bool, classification: str, response_shape: str,
+    ) -> None:
+        """Persist allowlisted exit-call observations; no raw values."""
+        self.machine.record_exit_diagnostic(
+            "exit_call_returned", "true" if returned else "false"
+        )
+        self.machine.record_exit_diagnostic(
+            "exit_transport_classification", classification
+        )
+        self.machine.record_exit_diagnostic(
+            "exit_response_shape_classification", response_shape
+        )
+        self.machine.record_exit_diagnostic(
+            "exit_timeout_layer",
+            cancel_timeout_layer(
+                returned=returned, classification=classification
+            ),
+        )
 
     @staticmethod
     def _entry_identity_matches(order: CommissioningOrderRecord) -> bool:
@@ -1383,9 +1435,197 @@ class OneShareCommissioningOrchestrator:
                                 action="Inspect and control the position manually.")
         exit_payload = exit_arguments(self.account_number)
         await self._review("exit", exit_payload)
+        exit_baseline_order_ids = frozenset(
+            row.server_order_id for row in orders
+        )
+        self.machine.record_exit_diagnostic("exit_call_started", "true")
         exit_result = await self._place("exit", exit_payload)
-        await self._reconcile_exit(exit_result.server_order_id)
+        if exit_result is None:
+            await self._reconcile_ambiguous_exit(exit_baseline_order_ids)
+        else:
+            await self._reconcile_exit(exit_result.server_order_id)
         return await self._finalize_flat()
+
+    def _exit_identity_matches(self, order: CommissioningOrderRecord) -> bool:
+        return (
+            order.symbol == "AAPL"
+            and order.side == "sell"
+            and order.order_type == "market"
+            and order.requested_quantity == Decimal("1")
+            and order.time_in_force == "gfd"
+            and order.market_hours == "regular_hours"
+        )
+
+    async def _fail_exit_reconciliation(
+        self,
+        category: str,
+        *,
+        action: str,
+        normalized_order_state: str | None = None,
+        attribution_unique: bool = False,
+        candidate_count: int | None = None,
+    ) -> None:
+        self.machine.record_exit_reconciliation(
+            category,
+            normalized_order_state=normalized_order_state,
+            attribution_unique=attribution_unique,
+            candidate_count=candidate_count,
+        )
+        await self._handoff(category, position=True, stop=False, action=action)
+
+    async def _reconcile_ambiguous_exit(
+        self, baseline_order_ids: frozenset[str]
+    ) -> None:
+        """Read back one ambiguous exit submission. Never writes anything.
+
+        The exit write is already spent. This resolves what the broker actually
+        did with it using positions and orders only. Flatness alone never ends
+        the run: an executable sell could still be working, so the order list
+        must also show nothing that can still sell.
+        """
+        self._stage = "EXIT_RECONCILIATION"
+        started = self.monotonic()
+        while True:
+            try:
+                self.machine.record_exit_reconciliation_read("orders")
+                orders = await self._read_orders()
+                self.machine.record_exit_reconciliation_read("positions")
+                position = self._aapl_position(await self._read_positions())
+            except CommissioningError:
+                await self._fail_exit_reconciliation(
+                    "EXIT_RECONCILIATION_INCONSISTENT",
+                    action="Inspect the exit and position; do not submit another sell.",
+                )
+
+            flat = position == Decimal("0")
+            self.machine.record_exit_diagnostic(
+                "position_flat_observed", "true" if flat else "false"
+            )
+            candidates = [
+                row for row in orders
+                if row.server_order_id not in baseline_order_ids
+                and self._exit_identity_matches(row)
+            ]
+            unknown_new = [
+                row for row in orders
+                if row.server_order_id not in baseline_order_ids
+                and not self._exit_identity_matches(row)
+            ]
+            if unknown_new:
+                await self._fail_exit_reconciliation(
+                    "EXIT_RECONCILIATION_CONFLICTING_ORDER",
+                    action="Inspect every new AAPL order; do not submit another sell.",
+                    candidate_count=len(unknown_new),
+                )
+            if len(candidates) > 1:
+                self.machine.record_exit_diagnostic(
+                    "exit_uniquely_attributed", "false"
+                )
+                await self._fail_exit_reconciliation(
+                    "EXIT_RECONCILIATION_MULTIPLE_MATCHES",
+                    action="Inspect every related sell order; do not submit another sell.",
+                    candidate_count=len(candidates),
+                )
+
+            remaining_executable = self._related_nonterminal(orders)
+            if len(candidates) == 1:
+                order = candidates[0]
+                normalized = order.state.strip().lower()
+                classification = classify_order_state(order.state)
+                self.machine.record_exit_diagnostic(
+                    "exit_uniquely_attributed", "true"
+                )
+                self.machine.record_exit_diagnostic(
+                    "exit_state_classification",
+                    _EXIT_STATE_DIAGNOSTIC.get(classification, "unknown"),
+                )
+                if classification is OrderStateClass.TERMINAL_FILLED:
+                    if (
+                        order.cumulative_quantity != Decimal("1")
+                        or order.remaining_quantity != Decimal("0")
+                        or not flat
+                    ):
+                        await self._fail_exit_reconciliation(
+                            "EXIT_RECONCILIATION_INCONSISTENT",
+                            action="Inspect the position; do not submit another sell.",
+                            normalized_order_state=normalized,
+                            attribution_unique=True,
+                            candidate_count=1,
+                        )
+                    self.machine.record_exit_reconciliation(
+                        "EXIT_RECONCILED_BY_ORDER",
+                        normalized_order_state=normalized,
+                        attribution_unique=True,
+                        candidate_count=1,
+                    )
+                    self.machine.persist_write_boundary("exit", "after")
+                    self.machine.exit_observed(
+                        position_quantity=position,
+                        related_nonterminal_orders=remaining_executable,
+                    )
+                    return
+                if classification in {
+                    OrderStateClass.ACTIVE_OR_WORKING,
+                    OrderStateClass.CANCELLATION_PENDING,
+                }:
+                    self.machine.record_exit_reconciliation(
+                        "EXIT_STILL_WORKING",
+                        normalized_order_state=normalized,
+                        attribution_unique=True,
+                        candidate_count=1,
+                    )
+                else:
+                    # Cancelled, rejected, failed, or partially filled. The
+                    # share may still be held and no second sell is permitted.
+                    await self._fail_exit_reconciliation(
+                        "EXIT_RECONCILIATION_INCONSISTENT",
+                        action="The exit did not complete; take manual control and do not retry.",
+                        normalized_order_state=normalized,
+                        attribution_unique=True,
+                        candidate_count=1,
+                    )
+            else:
+                self.machine.record_exit_diagnostic(
+                    "exit_uniquely_attributed", "false"
+                )
+                self.machine.record_exit_diagnostic(
+                    "exit_state_classification", "not_observed"
+                )
+                if flat and remaining_executable == 0:
+                    # The position is flat and nothing on the book can still
+                    # sell. Attribution is unproven, so this is recorded as a
+                    # weaker conclusion than EXIT_RECONCILED_BY_ORDER, but it
+                    # is safe: no share is held and no sell can execute.
+                    self.machine.record_exit_reconciliation(
+                        "EXIT_RECONCILED_BY_FLAT_POSITION",
+                        attribution_unique=False,
+                        candidate_count=0,
+                    )
+                    self.machine.persist_write_boundary("exit", "after")
+                    self.machine.exit_observed(
+                        position_quantity=position,
+                        related_nonterminal_orders=remaining_executable,
+                    )
+                    return
+                self.machine.record_exit_reconciliation(
+                    "EXIT_RECONCILIATION_NOT_FOUND",
+                    attribution_unique=False,
+                    candidate_count=0,
+                )
+
+            await self._require_before_flat_deadline(
+                position=True, stop=False,
+                action="Take immediate manual control; verify the exit and flatness.",
+            )
+            if self.monotonic() - started >= EXIT_FILL_DEADLINE_SECONDS:
+                self.machine.record_exit_diagnostic(
+                    "exit_timeout_layer", "reconciliation_deadline"
+                )
+                await self._fail_exit_reconciliation(
+                    "EXIT_RECONCILIATION_TIMEOUT",
+                    action="Take manual control; do not submit another exit.",
+                )
+            await self.sleep(POLL_SECONDS)
 
     async def _reconcile_exit(self, exit_id: str) -> None:
         self._stage = "FLATTENING"

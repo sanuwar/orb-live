@@ -371,12 +371,14 @@ def test_ambiguous_write_handoffs_without_retry(tmp_path, role):
     elif role == "cancel":
         assert handoffs[-1].reason_code == "STOP_CANCEL_TIMEOUT"
     else:
-        assert handoffs[-1].reason_code.startswith("AMBIGUOUS_")
+        # An ambiguous exit is reconciled read-only like every other ambiguous
+        # write; unresolved at the deadline it ends OPERATOR_REQUIRED.
+        assert handoffs[-1].reason_code == "EXIT_RECONCILIATION_TIMEOUT"
     categories = {
         "entry": "ENTRY_RECONCILIATION_TIMEOUT",
         "stop": "STOP_PROTECTION_FAILED",
         "cancel": "STOP_CANCEL_TIMEOUT",
-        "exit": "FLATTEN_FAILED",
+        "exit": "EXIT_RECONCILIATION_TIMEOUT",
     }
     counter_names = {
         "entry": "entry_place", "stop": "stop_place",
