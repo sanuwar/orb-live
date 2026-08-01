@@ -81,15 +81,44 @@ REAL_SESSION_RUNTIME_FLAG = "ENABLE_ATTENDED_ONE_SHARE_COMMISSIONING"
 LIVE_CHECKPOINT_AUTHORIZATION_FLAG = "AUTHORIZE_CHECKPOINT_7C_LIVE"
 ENTRY_AUTHORIZATION_PROMPT = "Authorize this one-share entry? [y/N] "
 FLATTEN_AUTHORIZATION_PROMPT = "Authorize controlled flatten? [y/N] "
+# Every Checkpoint 7C live identity that has been spent, blocked, abandoned,
+# or superseded. This tracked list is the ONLY authority: an on-disk evidence
+# directory or wrapper-used marker is corroboration, never protection, because
+# a cleared evidence root or a hand-copied Run ID would silently restore reuse.
+#
+# Entries are fixed literals, sorted, and never removed. No wildcard is used:
+# a pattern broad enough to cover these would also block an unissued future
+# identity, which would be a different and worse failure.
+#
+# An entry is added when an identity is issued, whatever happened next.
+# Notably retired despite leaving no execution marker:
+#   20260730-01/-02/-03  wrappers prepared or reserved, never launched
+#   20260731-03          wrapper prepared, superseded before launch
+#   20260731-04          launched, blocked at an acknowledgment BEFORE the
+#                        wrapper-used marker is written
+# The broker-free authorization rehearsal is deliberately absent: it consumes
+# no live identity at all. See CHECKPOINT_7C_RETIRED_RUN_ID_ENFORCEMENT.md.
 RETIRED_LIVE_RUN_IDS = frozenset({
-    'cp7c-live-aapl-one-share-20260730-04',
-    "cp7c-live-aapl-one-share-20260730-05",
-    "cp7c-live-aapl-one-share-20260729-04",
-    "cp7c-live-aapl-one-share-20260729-03",
-    "cp7c-live-aapl-one-share-20260729-02",
+    "cp7c-live-aapl-one-share-20260728-01",
     "cp7c-live-aapl-one-share-20260728-03",
     "cp7c-live-aapl-one-share-20260728-04",
     "cp7c-live-aapl-one-share-20260728-05",
+    "cp7c-live-aapl-one-share-20260728-06",
+    "cp7c-live-aapl-one-share-20260729-02",
+    "cp7c-live-aapl-one-share-20260729-03",
+    "cp7c-live-aapl-one-share-20260729-04",
+    "cp7c-live-aapl-one-share-20260730-01",
+    "cp7c-live-aapl-one-share-20260730-02",
+    "cp7c-live-aapl-one-share-20260730-03",
+    "cp7c-live-aapl-one-share-20260730-04",
+    "cp7c-live-aapl-one-share-20260730-05",
+    "cp7c-live-aapl-one-share-20260731-01",
+    "cp7c-live-aapl-one-share-20260731-02",
+    "cp7c-live-aapl-one-share-20260731-03",
+    "cp7c-live-aapl-one-share-20260731-04",
+    "cp7c-live-aapl-one-share-20260731-05",
+    "cp7c-live-aapl-one-share-20260731-06",
+    "cp7c-live-aapl-one-share-20260731-07",
 })
 
 
