@@ -872,20 +872,59 @@ class CommissioningMachine:
         self.evidence.cancel_diagnostics[key] = value
         self.evidence_store.persist(self.evidence)
 
-    def record_place_diagnostic(self, key: str, value: str) -> None:
-        """Record one allowlisted structural fact about a place response.
+    @staticmethod
+    def _validated_place_diagnostics(
+        updates: Mapping[str, str]
+    ) -> dict[str, str]:
+        """Validate a whole diagnostic update before anything is applied.
 
-        These are shape facts only. No response body, key name, identifier,
-        price, or exception text can pass: both the key and the value must
-        appear in the fixed allowlist or this raises.
+        Raises on the first invalid key or value, so a rejected batch never
+        reaches the evidence object at all.
         """
-        allowed = ALLOWED_PLACE_DIAGNOSTICS.get(key)
-        if allowed is None:
-            raise CommissioningError("place diagnostic key is invalid")
-        if not isinstance(value, str) or value not in allowed:
-            raise CommissioningError("place diagnostic value is invalid")
-        self.evidence.place_diagnostics[key] = value
-        self.evidence_store.persist(self.evidence)
+        if not isinstance(updates, Mapping):
+            raise CommissioningError("place diagnostics must be a mapping")
+        checked: dict[str, str] = {}
+        for key, value in updates.items():
+            allowed = ALLOWED_PLACE_DIAGNOSTICS.get(key)
+            if allowed is None:
+                raise CommissioningError("place diagnostic key is invalid")
+            if not isinstance(value, str) or value not in allowed:
+                raise CommissioningError("place diagnostic value is invalid")
+            checked[str(key)] = value
+        return checked
+
+    def record_place_diagnostics(self, updates: Mapping[str, str]) -> None:
+        """Record a whole placement diagnostic batch in ONE persistence call.
+
+        Structural facts only: every key and value must appear in the fixed
+        allowlist, so no response body, key name, identifier, price, or
+        exception text can pass. There is no path here that accepts an
+        arbitrary evidence field or an unvalidated mapping.
+
+        The update is applied transactionally. Validation happens first, then
+        a staged copy is swapped in and persisted exactly once. If persistence
+        fails the previous map is restored, so a failed batch can never leave
+        a partially populated diagnostic structure behind, and the failure is
+        re-raised rather than swallowed.
+        """
+        checked = self._validated_place_diagnostics(updates)
+        if not checked:
+            return
+        staged = dict(self.evidence.place_diagnostics)
+        staged.update(checked)
+        if staged == self.evidence.place_diagnostics:
+            return
+        previous = self.evidence.place_diagnostics
+        self.evidence.place_diagnostics = staged
+        try:
+            self.evidence_store.persist(self.evidence)
+        except Exception:
+            self.evidence.place_diagnostics = previous
+            raise
+
+    def record_place_diagnostic(self, key: str, value: str) -> None:
+        """Record one allowlisted structural fact about a place response."""
+        self.record_place_diagnostics({key: value})
 
     def record_exit_diagnostic(self, key: str, value: str) -> None:
         """Record one allowlisted exit observation; values are never free text."""
