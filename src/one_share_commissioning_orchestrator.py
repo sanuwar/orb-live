@@ -386,16 +386,23 @@ class OneShareCommissioningOrchestrator:
     def _record_place_shape(self, role: str, shape: Mapping[str, str]) -> None:
         """Persist allowlisted structural facts about a rejected placement.
 
+        Collected in memory and written as ONE atomic batch, so a placement
+        failure widens the evidence-persistence window by a single call rather
+        than by one per fact.
+
         Unknown keys and values are dropped rather than raised on: a
         diagnostic must never be able to fail a run that is already handling
-        a write ambiguity.
+        a write ambiguity. Nothing is invented to fill the batch.
         """
+        updates: dict[str, str] = {}
         for name, value in shape.items():
             key = f"{role}_{name}"
             allowed = ALLOWED_PLACE_DIAGNOSTICS.get(key)
             if allowed is None or value not in allowed:
                 continue
-            self.machine.record_place_diagnostic(key, value)
+            updates[key] = value
+        if updates:
+            self.machine.record_place_diagnostics(updates)
 
     def _record_exit_call_outcome(
         self, *, returned: bool, classification: str, response_shape: str,

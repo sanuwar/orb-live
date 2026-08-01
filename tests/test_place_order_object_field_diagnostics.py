@@ -429,11 +429,34 @@ def test_unknown_or_unavailable_facts_are_dropped_not_invented(tmp_path):
 
 
 class FailingDiagnosticStore(AtomicEvidenceStore):
-    """Fail persistence only once a place diagnostic is being written.
+    """A store that breaks when the place-diagnostic batch is written.
 
-    That is strictly after the broker-write boundary, so it reproduces the
-    exposure precisely: the write is already spent when evidence fails.
+    Triggered by the batch, then STICKY: a genuinely broken evidence store
+    (full disk, lost permission) does not recover just because the caller
+    rolled its in-memory state back. Arming on content alone would let the
+    batch's rollback un-break the fake and mask the real failure policy.
+
+    The trigger is strictly after the broker-write boundary, so this
+    reproduces the exposure precisely: the write is already spent when
+    evidence fails.
     """
+
+    def __init__(self, root, run_id):
+        super().__init__(root, run_id)
+        self.armed = False
+        self.broken = False
+        self.induced_failures = 0
+
+    def persist(self, evidence):
+        if self.armed and (self.broken or evidence.place_diagnostics):
+            self.broken = True
+            self.induced_failures += 1
+            raise CommissioningError("induced evidence persistence failure")
+        return super().persist(evidence)
+
+
+class TransientDiagnosticStore(AtomicEvidenceStore):
+    """Fails only the diagnostic batch itself, then recovers."""
 
     def __init__(self, root, run_id):
         super().__init__(root, run_id)
@@ -483,7 +506,8 @@ def test_diagnostic_persistence_failure_fails_closed_after_one_write(tmp_path):
     # The failure was actually induced where intended.
     assert store.induced_failures >= 1
 
-    # The diagnostic that could not be persisted was not partially written.
+    # The diagnostic that could not be persisted was not partially written,
+    # on disk or in memory. The batch is all-or-nothing.
     assert json.loads(
         (store.partial / "commissioning_evidence.json").read_text(
             encoding="utf-8"
