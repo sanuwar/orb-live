@@ -92,7 +92,15 @@ authorized for a first unattended run.
 Each milestone depends on the one before it. None may be skipped, and none is
 approved to begin before its predecessor is complete and reviewed.
 
-### Milestone 9 — Read-Only Broker-State Grounding
+### Milestone 9 — Read-Only Broker-State Grounding — **IN PROGRESS**
+
+The offline foundation — provenance framework, sanitized snapshot model,
+fail-closed decision API, freshness policy, and the read-only checkpoint design
+— is implemented in `src/read_only_broker_state.py`. **No state has been
+approved for active protection, and the attended read-only checkpoint has not
+been executed.** See
+[`MILESTONE_9_READ_ONLY_BROKER_STATE_GROUNDING.md`](MILESTONE_9_READ_ONLY_BROKER_STATE_GROUNDING.md)
+for the definition of done.
 
 - Ground active-protection status using **non-order broker reads** only.
 - Document the actual Robinhood order states observed, rather than inferring
