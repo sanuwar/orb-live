@@ -74,18 +74,44 @@ does not replace the fail-closed behavior established there.
 
 ### Authorized capital
 
-**$2,680 maximum trading capital.**
+**$2,680 is the initial pilot deployment ceiling — not a permanent system
+maximum.**
 
-This is a **capital ceiling, not a guaranteed maximum loss.** Broker behavior,
-overnight and intraday gaps, slippage, venue outages, API failures, and
-unresolved order states can produce losses outside any intended software limit.
-No configuration value in this repository can promise otherwise. The system's
-obligation is to *minimize* that exposure through cash-only operation, strict
-position and loss limits, fail-closed controls, monitoring, and automatic
-suspension — not to guarantee a bound.
+ORB-LIVE must support an **operator-configurable authorized capital ceiling**,
+including future tiers of **$30,000 or more**. No single dollar amount defines
+this system, and no dollar amount may be hard-coded as a permanent limit.
 
-Capital is deployed gradually under Milestone 13. The full ceiling is never
-authorized for a first unattended run.
+A ceiling is **not a guaranteed maximum loss.** Broker behavior, overnight and
+intraday gaps, slippage, venue outages, API failures, and unresolved order
+states can produce losses outside any intended software limit. No configuration
+value in this repository can promise otherwise. The system's obligation is to
+*minimize* that exposure through cash-only operation, strict position and loss
+limits, fail-closed controls, monitoring, and automatic suspension — not to
+guarantee a bound.
+
+#### Rules that govern every tier
+
+- Capital ceilings are **configuration-driven, validated, versioned, and
+  auditable**. They are never derived at runtime from the account balance.
+- **The trading agent may never raise its own authorized capital.** No code path
+  may widen its own limit, and no automatic escalation of any kind is permitted.
+- **Active deployment capital may be lower** than the account balance and lower
+  than the authorized ceiling. The ceiling is a bound, not a target.
+- Moving to a higher tier requires an **explicit operator-approved configuration
+  change**, reviewed like code.
+- **Risk-per-trade, position size, daily loss, weekly loss, total drawdown, and
+  simultaneous-position limits must be recalculated coherently for each capital
+  tier.** They may not be carried across tiers unchanged, and a tier whose limits
+  are incoherent against its ceiling must be rejected rather than accepted.
+- **A clean trial period does not automatically unlock a larger tier.** A
+  successful week is evidence *supporting* review, never a trigger. Promotion is
+  a human decision.
+- `strategy.enabled` remains `false` until the unattended activation milestone,
+  regardless of tier.
+
+**$2,680 remains the initial pilot tier** until a later scaling milestone
+explicitly approves a higher one. The full pilot ceiling is never authorized for
+a first unattended run.
 
 ## Ordered milestones to automation
 
@@ -147,27 +173,38 @@ the grounding gap above — and no operator will be watching to compensate.
 - Immediate automatic suspension on ambiguity.
 - Scale only after evidence-based review.
 
-### Milestone 13 — Capital Scaling Toward $2,680
+### Milestone 13 — Capital Tiering and Scaling
 
-- Increase deployment gradually.
+- Implement the **operator-configurable, validated, versioned, auditable**
+  capital-tier model described above. No hard-coded permanent amount.
+- Derive per-trade, position-size, daily-loss, weekly-loss, total-drawdown, and
+  simultaneous-position limits **coherently for each tier**, and reject a tier
+  whose limits are incoherent against its ceiling.
+- Increase deployment gradually, starting from the $2,680 pilot tier and
+  extending to higher operator-approved tiers such as $30,000 or more.
 - **Never enable all capital in the first unattended run.**
-- Define per-trade, daily, weekly, and total-capital limits.
+- **The agent may never raise its own ceiling**; every promotion is an explicit
+  operator-approved configuration change.
 - Preserve cash-only operation.
 - Retain automatic suspension and operator override.
-- Require reviewed evidence before every scaling tier.
+- Require reviewed evidence before every scaling tier; a clean trial period
+  supports review but never unlocks a tier on its own.
 
 ## Known configuration debt
 
 `config/strategy_v0.yaml` was sized for one-share attended commissioning, not
-for capital deployment. At least one value already conflicts with the authorized
-ceiling: `maximum_position_usd: 3000` exceeds $2,680. The per-trade, daily,
-weekly, and total-drawdown limits (`risk_per_trade_usd: 15`,
-`daily_loss_limit_usd: 45`, `weekly_loss_limit_usd: 120`,
-`total_drawdown_halt_usd: 300`) were likewise chosen for a single share.
+for capital deployment, and it encodes limits as flat absolute dollars with no
+notion of a tier. At least one value already conflicts with the pilot ceiling:
+`maximum_position_usd: 3000` exceeds $2,680. The per-trade, daily, weekly, and
+total-drawdown limits (`risk_per_trade_usd: 15`, `daily_loss_limit_usd: 45`,
+`weekly_loss_limit_usd: 120`, `total_drawdown_halt_usd: 300`) were likewise
+chosen for a single share, as were `maximum_open_positions: 1` and
+`maximum_entries_per_day: 2`.
 
-These must be deliberately re-derived under Milestone 13 rather than adjusted
-ad hoc. `strategy.enabled` remains `false` until a milestone explicitly
-authorizes changing it, as required by `CLAUDE.md`.
+These must be deliberately re-derived per tier under Milestone 13 rather than
+adjusted ad hoc, and the tier model must replace flat absolute constants.
+`strategy.enabled` remains `false` until a milestone explicitly authorizes
+changing it, as required by `CLAUDE.md`.
 
 ## Historical artifact disposition
 
