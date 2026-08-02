@@ -493,6 +493,7 @@ def test_the_supervised_mode_is_present():
 ALLOWED_FACT_VALUES = {
     "gate_verdict": {verdict.value for verdict in GateVerdict},
     "gate_mode": {mode.value for mode in GateMode},
+    "evidence_verified": {"true", "false"},
     "unmet_precondition_bucket": {"none", "one", "many"},
     "permits_automated_action": {"false"},
 }

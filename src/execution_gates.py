@@ -63,7 +63,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from enum import Enum
-from typing import Mapping
+from typing import Mapping, Protocol
 
 
 class ExecutionGateError(RuntimeError):
@@ -183,6 +183,39 @@ REQUIRED_EVIDENCE: Mapping[str, frozenset[EvidenceSource]] = {
 }
 
 
+class AttestationVerifier(Protocol):
+    """The one thing a gate needs from an attestation authority.
+
+    Narrow on purpose. A gate that held the signing key could mint its own
+    evidence, which is the failure this whole arrangement exists to prevent,
+    so it is given the ability to *check* and nothing else.
+    """
+
+    def verify(self, signed: object) -> bool: ...
+
+
+def verified_or_none(
+    verifier: "AttestationVerifier | None", candidate: object
+) -> Attestation | None:
+    """Unwrap a precondition value into an attestation, or refuse.
+
+    With a verifier present, only a signed attestation that passes
+    verification is accepted — a bare `Attestation` is refused outright,
+    because accepting one would restore exactly the honour system the
+    verifier exists to replace.
+
+    Without a verifier, a bare `Attestation` is accepted. That path is for
+    tests and for callers that have not adopted signing yet; `open_gate`
+    records which mode it ran in so the difference is never invisible.
+    """
+    if verifier is None:
+        return candidate if isinstance(candidate, Attestation) else None
+    inner = getattr(candidate, "attestation", None)
+    if not isinstance(inner, Attestation):
+        return None
+    return inner if verifier.verify(candidate) else None
+
+
 def evidence_is_acceptable(name: str, attestation: Attestation) -> bool:
     accepted = REQUIRED_EVIDENCE.get(name)
     if accepted is None:
@@ -221,19 +254,33 @@ class GatePreconditions:
 
     def __post_init__(self) -> None:
         for item in fields(self):
-            if not isinstance(getattr(self, item.name), Attestation):
-                raise ExecutionGateError(f"{item.name} must be an Attestation")
+            value = getattr(self, item.name)
+            # Either a bare Attestation (unsigned mode) or something carrying
+            # one (a SignedAttestation). Verification happens in `unmet`,
+            # because only there is a verifier in scope.
+            if not isinstance(value, Attestation) and not isinstance(
+                getattr(value, "attestation", None), Attestation
+            ):
+                raise ExecutionGateError(
+                    f"{item.name} must be an Attestation or a signed one"
+                )
 
     def unmet(
         self,
         *,
         current_monotonic: float,
         maximum_age_seconds: float = MAXIMUM_ATTESTATION_AGE_SECONDS,
+        verifier: "AttestationVerifier | None" = None,
     ) -> tuple[str, ...]:
         """Names of preconditions that are false, badly evidenced, or stale."""
         failing: list[str] = []
         for item in fields(self):
-            attestation: Attestation = getattr(self, item.name)
+            attestation = verified_or_none(verifier, getattr(self, item.name))
+            if attestation is None:
+                # Unsigned, unverifiable, or forged. Indistinguishable from
+                # false on purpose: a claim we cannot check is not a claim.
+                failing.append(item.name)
+                continue
             age = current_monotonic - attestation.recorded_monotonic
             if (
                 attestation.satisfied is not True
@@ -249,9 +296,12 @@ class GatePreconditions:
         *,
         current_monotonic: float,
         maximum_age_seconds: float = MAXIMUM_ATTESTATION_AGE_SECONDS,
+        verifier: "AttestationVerifier | None" = None,
     ) -> bool:
         return not self.unmet(
-            current_monotonic=current_monotonic, maximum_age_seconds=maximum_age_seconds
+            current_monotonic=current_monotonic,
+            maximum_age_seconds=maximum_age_seconds,
+            verifier=verifier,
         )
 
 
@@ -309,18 +359,32 @@ class UnattendedPreconditions:
 
     def __post_init__(self) -> None:
         for item in fields(self):
-            if not isinstance(getattr(self, item.name), Attestation):
-                raise ExecutionGateError(f"{item.name} must be an Attestation")
+            value = getattr(self, item.name)
+            # Either a bare Attestation (unsigned mode) or something carrying
+            # one (a SignedAttestation). Verification happens in `unmet`,
+            # because only there is a verifier in scope.
+            if not isinstance(value, Attestation) and not isinstance(
+                getattr(value, "attestation", None), Attestation
+            ):
+                raise ExecutionGateError(
+                    f"{item.name} must be an Attestation or a signed one"
+                )
 
     def unmet(
         self,
         *,
         current_monotonic: float,
         maximum_age_seconds: float = MAXIMUM_ATTESTATION_AGE_SECONDS,
+        verifier: "AttestationVerifier | None" = None,
     ) -> tuple[str, ...]:
         failing: list[str] = []
         for item in fields(self):
-            attestation: Attestation = getattr(self, item.name)
+            attestation = verified_or_none(verifier, getattr(self, item.name))
+            if attestation is None:
+                # Unsigned, unverifiable, or forged. Indistinguishable from
+                # false on purpose: a claim we cannot check is not a claim.
+                failing.append(item.name)
+                continue
             age = current_monotonic - attestation.recorded_monotonic
             if (
                 attestation.satisfied is not True
@@ -336,9 +400,12 @@ class UnattendedPreconditions:
         *,
         current_monotonic: float,
         maximum_age_seconds: float = MAXIMUM_ATTESTATION_AGE_SECONDS,
+        verifier: "AttestationVerifier | None" = None,
     ) -> bool:
         return not self.unmet(
-            current_monotonic=current_monotonic, maximum_age_seconds=maximum_age_seconds
+            current_monotonic=current_monotonic,
+            maximum_age_seconds=maximum_age_seconds,
+            verifier=verifier,
         )
 
 
@@ -360,6 +427,12 @@ class GateDecision:
     mode: GateMode
     unmet_precondition_count: int = 0
     permits_automated_action: bool = False
+    #: Whether the evidence behind this decision was cryptographically
+    #: verified. False means the caller supplied no verifier, so the
+    #: attestations were taken on trust. Recorded rather than assumed: an
+    #: unverified decision that looks identical to a verified one is how the
+    #: distinction quietly stops mattering.
+    evidence_verified: bool = False
     explanation: str = AUTHORITY_EXPLANATION
 
     def __post_init__(self) -> None:
@@ -378,6 +451,7 @@ class GateDecision:
         return {
             "gate_verdict": self.verdict.value,
             "gate_mode": self.mode.value,
+            "evidence_verified": "true" if self.evidence_verified else "false",
             "unmet_precondition_bucket": (
                 "none" if self.unmet_precondition_count == 0
                 else "one" if self.unmet_precondition_count == 1
@@ -392,6 +466,7 @@ def open_gate(
     *,
     mode: GateMode = GateMode.SUPERVISED,
     current_monotonic: float,
+    verifier: "AttestationVerifier | None" = None,
 ) -> GateDecision:
     """Evaluate the gate. Cannot return OPEN while no mode is approved.
 
@@ -411,16 +486,23 @@ def open_gate(
     ):
         raise ExecutionGateError("current time must be a number")
     if not isinstance(preconditions, GatePreconditions):
-        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT, mode)
+        return GateDecision(
+            GateVerdict.CLOSED_MALFORMED_INPUT, mode, 0, False, verifier is not None
+        )
 
-    unmet = preconditions.unmet(current_monotonic=current_monotonic)
+    verified = verifier is not None
+    unmet = preconditions.unmet(
+        current_monotonic=current_monotonic, verifier=verifier
+    )
     if mode not in ACTIVATION_APPROVALS:
         return GateDecision(
-            GateVerdict.CLOSED_ACTIVATION_NOT_APPROVED, mode, len(unmet)
+            GateVerdict.CLOSED_ACTIVATION_NOT_APPROVED, mode, len(unmet), False, verified
         )
     if unmet:
-        return GateDecision(GateVerdict.CLOSED_PRECONDITION_UNMET, mode, len(unmet))
-    return GateDecision(GateVerdict.OPEN, mode)
+        return GateDecision(
+            GateVerdict.CLOSED_PRECONDITION_UNMET, mode, len(unmet), False, verified
+        )
+    return GateDecision(GateVerdict.OPEN, mode, 0, False, verified)
 
 
 def open_unattended_gate(
@@ -428,6 +510,7 @@ def open_unattended_gate(
     unattended: UnattendedPreconditions,
     *,
     current_monotonic: float,
+    verifier: "AttestationVerifier | None" = None,
 ) -> GateDecision:
     """The unattended gate. Requires everything supervised does, and more.
 
@@ -445,22 +528,27 @@ def open_unattended_gate(
     ):
         raise ExecutionGateError("current time must be a number")
     if not isinstance(unattended, UnattendedPreconditions):
-        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT, GateMode.LIMITED_UNATTENDED)
+        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT,
+                            GateMode.LIMITED_UNATTENDED, 0, False, verifier is not None)
     if not isinstance(preconditions, GatePreconditions):
-        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT, GateMode.LIMITED_UNATTENDED)
+        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT,
+                            GateMode.LIMITED_UNATTENDED, 0, False, verifier is not None)
 
-    unmet = len(preconditions.unmet(current_monotonic=current_monotonic)) + len(
-        unattended.unmet(current_monotonic=current_monotonic)
-    )
+    verified = verifier is not None
+    unmet = len(
+        preconditions.unmet(current_monotonic=current_monotonic, verifier=verifier)
+    ) + len(unattended.unmet(current_monotonic=current_monotonic, verifier=verifier))
     if GateMode.LIMITED_UNATTENDED not in ACTIVATION_APPROVALS:
         return GateDecision(
-            GateVerdict.CLOSED_ACTIVATION_NOT_APPROVED, GateMode.LIMITED_UNATTENDED, unmet
+            GateVerdict.CLOSED_ACTIVATION_NOT_APPROVED,
+            GateMode.LIMITED_UNATTENDED, unmet, False, verified,
         )
     if unmet:
         return GateDecision(
-            GateVerdict.CLOSED_PRECONDITION_UNMET, GateMode.LIMITED_UNATTENDED, unmet
+            GateVerdict.CLOSED_PRECONDITION_UNMET,
+            GateMode.LIMITED_UNATTENDED, unmet, False, verified,
         )
-    return GateDecision(GateVerdict.OPEN, GateMode.LIMITED_UNATTENDED)
+    return GateDecision(GateVerdict.OPEN, GateMode.LIMITED_UNATTENDED, 0, False, verified)
 
 
 def gate_readiness_report() -> Mapping[str, object]:
@@ -489,6 +577,7 @@ __all__ = [
     "REQUIRED_PRECONDITIONS",
     "UNATTENDED_PRECONDITIONS",
     "Attestation",
+    "AttestationVerifier",
     "EvidenceSource",
     "ExecutionGateError",
     "GateDecision",
@@ -497,6 +586,7 @@ __all__ = [
     "GateVerdict",
     "UnattendedPreconditions",
     "evidence_is_acceptable",
+    "verified_or_none",
     "gate_readiness_report",
     "open_gate",
     "open_unattended_gate",
