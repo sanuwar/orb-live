@@ -193,7 +193,12 @@ pinned file, so none of it disturbs the held checkpoint's digest.
 | D | Offline reconciliation and restart recovery | new module | C |
 | E | Hard risk controls and kill switch | `src/risk_limits.py` | — |
 | F | Operational monitoring and privacy-safe alerts | new module | E |
-| G | Supervised and limited-unattended gate definitions, **inert** | new module | E, F |
+| G | Supervised-execution gate definition, **inert** | new module | — |
+| H | Limited-unattended gate definition, **inert** | same module as G | G |
+
+The gate definitions take already-decided facts rather than importing the risk,
+recovery, lifecycle, and monitoring modules. That keeps each review separate,
+and stops a gate from re-deriving inputs it could then silently disagree with.
 
 **Blocked by the real-account checkpoint** — steps 3–5 of the Milestone 9
 definition of done, anything requiring `VERIFIED_ACTIVE_PROTECTION` to be
