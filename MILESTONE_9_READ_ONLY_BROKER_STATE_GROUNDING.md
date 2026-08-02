@@ -1,8 +1,8 @@
 # Milestone 9 — Read-Only Broker-State Grounding
 
-**Status: IN PROGRESS.** This is the offline foundation. The attended
-read-only observation checkpoint is designed here but **not executed**, and no
-broker state has been approved for active protection.
+**Status: IN PROGRESS.** The offline foundation and the real read-only
+observation runtime are both implemented. The attended checkpoint **has not
+been executed**, and no broker state has been approved for active protection.
 
 ## Why active protection cannot be inferred from schema
 
@@ -157,23 +157,298 @@ Asserted, not claimed:
 - `decide_broker_state` contains no I/O call when inspected via its AST;
 - the plan object refuses every write-shaped configuration.
 
+## The real observation runtime
+
+`src/read_only_broker_state.py` defines what a snapshot *means*.
+`src/read_only_observation_runtime.py` is what actually produces one from a
+real broker, and it is deliberately the narrowest thing that can.
+
+### The capability surface is a partition, not a filter
+
+All 49 advertised broker operations are classified in
+`MCP_TOOL_CLASSIFICATION`. A tool **absent** from the mapping is refused, so a
+newly advertised operation cannot be reached before it is reviewed.
+
+| Capability | Count | May be invoked? |
+| --- | --- | --- |
+| `READ_ONLY_PERMITTED` | 3 | Yes |
+| `UNNECESSARY` | 27 | No |
+| `AMBIGUOUS_CAPABILITY` | 4 | No |
+| `WRITE_CAPABLE` | 15 | No |
+
+Ambiguity is grouped with proven writes on purpose. "We could not establish
+that this is read-only" and "this writes" must produce identical behaviour,
+because the cost of being wrong is identical.
+
+`review_equity_order` is the notable case. Attended commissioning permits it;
+this checkpoint does not. Its description says non-committing, but this
+repository has never proven it leaves no broker-side artifact, and a checkpoint
+whose entire claim is *zero writes* cannot rest on a description. The
+divergence is deliberate and pinned by test: the write path accepts review
+because it is about to write anyway.
+
+### Two things are deliberately not read
+
+- **Cash.** `get_accounts` carries no cash, balance, or buying-power field —
+  its record is identity and status only. `get_portfolio` would carry one and
+  is classified `UNNECESSARY`. So cash availability is reported `UNKNOWN`,
+  honestly, rather than sourced by widening the surface for a value that
+  grounding active protection does not need. `decide_broker_state` does not
+  gate on it, and `UNKNOWN` is never treated as sufficient.
+- **Market session.** Taken from a local exchange-calendar equivalent, not a
+  broker or market-data read. A year outside the modelled table, a date past
+  its expiry, or a naive timestamp yields `UNKNOWN` — never "probably open".
+
+This closes step 6 of the definition of done for position, order, and
+market-session acquisition, and closes it *honestly* for buying power: the
+snapshot reports that it does not know, instead of guessing or reaching
+further than a read-only checkpoint should.
+
+### Zero writes, asserted structurally
+
+- The reader exposes exactly `read_accounts`, `read_positions`, `read_orders`
+  — no placement, cancellation, replacement, strategy activation, or generic
+  `call_tool` passthrough to implement or misuse.
+- The module contains **exactly three** `call_tool` sites, each naming a
+  module-level constant that resolves to a permitted read at parse time. There
+  is no path where a caller-supplied or response-supplied string becomes a
+  tool name. The repository-wide call-site guard sees all three as `literal`.
+- The module imports nothing write-capable — no adapter, client, session, MCP,
+  or orchestrator — so there is no write-capable object in reach to fall back
+  to. Asserted by parsing the imports.
+- Write-tool names appear in the file **only** as classification literals, and
+  a test proves the textual count matches the denylist count exactly.
+- Evidence carries `placement_writes`, `cancellation_writes`,
+  `replacement_writes`, and `strategy_activations`, all required to be exactly
+  zero, and refuses to persist a recorded call to a non-permitted tool.
+
+### Failure is never relabelled
+
+A *recognized* read failure degrades one component to `UNAVAILABLE`. A
+capability violation and an unrecognized exception both escape instead, and
+become `CAPABILITY_VIOLATION` or `INTERNAL_INVARIANT_FAILURE`. Neither may be
+quietly reported as "the broker was unavailable" — that label reads as a
+normal, expected condition, and these are not.
+
+## Corrections from independent review
+
+Six findings were raised against the first two commits and are now fixed. Each
+is pinned by focused regression tests.
+
+**F1 — the session handle was public.** `RestrictedReadOnlyReader` held
+`session` as a public dataclass field, so a generic write-capable call was one
+attribute access away from any future caller, and the docstring's claim that
+it was "held privately" was simply false. It is now a plain class with
+`__slots__` and a private `_session`; there is no `__dict__` to attach a
+public alias to, and `__repr__` renders neither the session nor the account.
+
+**F3 — early closes were classified as regular sessions.** At 14:00 ET on a
+half-day the calendar returned `REGULAR_HOURS` while the market was shut.
+`2026-11-27`, `2026-12-24`, and `2027-11-26` now close the regular session at
+13:00 ET. After an early close the result is `CLOSED` rather than
+`EXTENDED_HOURS`: post-close extended trading does exist on those days, but
+this table cannot bound it, and reporting a session it cannot bound would
+repeat the original error. A test sweeps every day in 2026–2027 and asserts no
+closed day ever reads as open. The table also now **expires**: nothing after
+`2027-12-31` classifies as anything but `UNKNOWN`.
+
+**F4 — the limitation was neither displayed nor recorded.** Evidence now
+carries `calendar_source`, `calendar_supported_range`, `calendar_limitation`,
+and `calendar_expires_after`, and the launcher prints all four plus an
+explicit note that there is no authoritative feed. A reviewer never has to
+infer where a `market_session` value came from.
+
+**F5 — a declined operator had already opened a session.** The session was
+opened first and the operator prompted inside it, so a decline authenticated a
+session it never used. Authorization is now fully resolved *before* any
+transport exists, in both modes, via `PreResolvedAuthorization`. A test drives
+the declined path with a session factory that raises on entry and asserts it
+was entered **zero** times.
+
+**F6 — session open and close failures escaped as tracebacks.**
+`asyncio.run(...)` was unwrapped, so a transport failure printed a raw
+traceback, produced no evidence, and returned no controlled code. Both phases
+now yield the `SESSION_UNAVAILABLE` outcome with
+`INVESTIGATE_SESSION_OPEN`/`INVESTIGATE_SESSION_CLOSE`, a nonzero exit, and
+privacy-safe evidence where the run identity is still unused. Tests raise from
+the fake transport with a secret embedded in the message and assert none of it
+reaches evidence or disk. A close failure keeps the observation already
+written rather than rewriting immutable history.
+
+**F7 — an unknown broker state was persisted verbatim.**
+`observed_protection_state` was the one evidence field that accepted arbitrary
+broker text. It is now constrained to `KNOWN_ORDER_STATES` plus the approved
+set, with `UNRECOGNIZED` recorded for anything else. Known states are still
+recorded verbatim — that is the point of the checkpoint — and the approved set
+is folded in dynamically so a later promotion cannot make a state unrecordable.
+
+### Twelve outcomes, two of which are completions
+
+`OBSERVATION_RECORDED` · `NO_PROTECTIVE_ORDER_OBSERVED` ·
+`PROTECTION_AMBIGUOUS` · `ATTRIBUTION_AMBIGUOUS` · `BROKER_READ_UNAVAILABLE` ·
+`SNAPSHOT_NOT_FRESH` · `DECLINED_BY_OPERATOR` · `AUTHORIZATION_REJECTED` ·
+`PRECONDITION_REJECTED` · `CAPABILITY_VIOLATION` · `SESSION_UNAVAILABLE` ·
+`INTERNAL_INVARIANT_FAILURE`
+
+`SESSION_UNAVAILABLE` is kept distinct from `BROKER_READ_UNAVAILABLE` on
+purpose: "no session" and "a session, but the read failed" call for different
+operator action.
+
+Classification order is the same safety property as in the decision model:
+availability → coherence → attribution → interpretation. Reading a protection
+state out of an unavailable, stale, or unattributable snapshot would be worse
+than reporting nothing, because it would look like a result.
+
+Attribution is by exact normalized symbol. Nothing is inferred from ordering,
+recency, quantity coincidence, or "the only order there is" — an
+unattributable observation is reported ambiguous rather than assigned to the
+symbol we happened to be asking about. An unrecognized order state counts as
+*live*, not harmless.
+
+### Neither completion approves anything
+
+`OBSERVATION_RECORDED` records a state and proposes at most
+`READ_ONLY_LIVE_OBSERVATION`. The runner raises rather than emit
+`APPROVED_FOR_ACTIVE_PROTECTION`, and a test asserts that running a full clean
+checkpoint against an existing `confirmed` stop leaves
+`ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` empty. Recording an observation
+is not approving it.
+
+### The launcher
+
+`read_only_observation_checkpoint_launcher.py` is **tracked**, not an
+untracked day-of wrapper. A commissioning wrapper carries only a date and a
+Run ID; this carries reviewed safety behaviour, so it belongs in review.
+
+Execution requires all of: the
+`--i-understand-this-performs-real-broker-reads` acknowledgment,
+`ENABLE_MILESTONE_9_READ_ONLY_OBSERVATION=1`, the authorization flag, an
+unused Run ID, and **exactly one** authorization mode.
+
+The session object never leaves the launcher's session scope: the runtime
+receives only the restricted reader. The session factory is imported inside
+the function so that importing the launcher — which tests do — never reaches
+transport code.
+
+## Authorization: two modes, no default
+
+Repeated `y/N` prompts do not survive contact with scheduled execution, and
+the approved destination is unattended operation. So there are two modes, and
+supplying **neither is refused** — a scheduled run must never silently fall
+back to a prompt nobody is present to answer, and a manual run must never
+silently skip the manifest. Supplying **both** is also refused.
+
+`ENABLE_MILESTONE_9_READ_ONLY_OBSERVATION=1` remains necessary and remains
+**insufficient**. Environment presence is never itself approval.
+
+### `--interactive` — manual development
+
+Two hidden `y/N` prompts, unchanged. Only exact `y`/`Y` approves; empty,
+`yes`, `Y `, EOF, and an unreadable prompt all decline. Each stage may be
+asked once; a second request is a rejection, not a re-prompt. Both are
+answered **before any read occurs**, pinned by a test asserting the reader is
+never called on decline.
+
+### `--authorization-manifest` — scheduled, unattended
+
+An operator-issued JSON document, validated and consumed **before** the
+checkpoint starts, so an invalid or spent manifest costs zero broker reads.
+
+`src/read_only_authorization_manifest.py` is deliberately **not** an
+always-yes mode. It authorizes one checkpoint identity, once. Nothing in it
+produces the string `y`, and a test parses the launcher's AST to assert no
+`"y"`, `"Y"`, or `"yes"` literal exists anywhere in it.
+
+Every field is pinned and independently enforced — each one alone can refuse:
+
+| Field | Rule |
+| --- | --- |
+| `scope` | exactly `READ_ONLY_BROKER_OBSERVATION` |
+| `approved_main_sha` | must equal resolved `HEAD` |
+| `checkpoint_implementation_digest` | must equal the digest over 5 pinned files |
+| `allowed_broker_operations` | exactly the three reviewed reads, no duplicates |
+| `write_limits` | all four counters exactly `0`, exact key set |
+| `maximum_sessions` | exactly `1` |
+| `checkpoint_observation_id` | must equal this run's identity |
+| `issued_at` / `expires_at` | timezone-aware, window ≤ 24h, currently valid |
+| `issued_by` | refused if it names an agent or automation |
+| field set | exact — missing **and** unexpected keys both refused |
+
+The implementation digest covers `read_only_observation_runtime`,
+`read_only_broker_state`, `read_only_authorization_manifest`,
+`live_order_state_model`, and the launcher. Change any of them and every
+previously issued manifest stops validating — an operator approved *this
+implementation*, not this file name.
+
+`HEAD` is resolved by reading the git directory directly. No subprocess: this
+is the authorization path, and shelling out there would add a process-spawn
+surface to the one module whose value is being small enough to audit.
+
+### One use, recorded outside evidence
+
+`ManifestConsumptionLedger` records spent identities in a directory supplied
+separately from `--evidence-root`. This is deliberate. Evidence records what a
+run *saw*; the ledger is a control input governing whether a run may *happen*.
+Storing the second inside the first would mean clearing evidence silently
+restores authorization — the same class of gap that retired Run IDs closed for
+commissioning. Consumption is directory creation, atomic on POSIX and Windows,
+so two concurrent launches cannot both win. A manifest that fails validation
+is **not** consumed: a refusal must not burn an identity the operator can
+legitimately reissue.
+
+### The agent never authors its own authorization
+
+There is no template generator, no renewal helper, and no serializer. A test
+walks the module's AST for any call that could *emit* a manifest — `open`,
+`write_text`, `write_bytes`, `json.dump`, `json.dumps` — and asserts there are
+none. The only permitted filesystem mutation is the ledger's `mkdir`, which
+*spends* authorization rather than granting it. A second test sweeps all of
+`src/` for anything that both mentions the scope and serializes JSON.
+
+### Unattended is a validated mode, not a skipped check
+
+`ReadOnlyCheckpointRequest` carries `authorization_mode`. `ATTENDED_MODE`
+requires an operator present; `UNATTENDED_MODE` does not, because its approval
+is a manifest issued earlier rather than a person now. An unrecognized mode is
+refused. "No operator at the keyboard" is therefore first-class and
+validated — not a precondition quietly bypassed.
+
+## What this manifest is not
+
+A future unattended **write** milestone needs a different, richer policy.
+`UNATTENDED_WRITE_POLICY_REQUIRED_FIELDS` names its required contents —
+capital tier, strategy version, symbol allowlist, position and exposure
+limits, daily/weekly/drawdown limits, permitted trading window, deployment
+expiry, global kill-switch state.
+
+That is a **specification, not an implementation**. Nothing reads or honours
+those fields today, none of them may appear in a read-only manifest, and
+`assert_not_write_authorization` refuses a manifest that carries one. This
+format cannot be widened into write authorization: a write-enabled runtime
+must be authorized by an object that does not exist yet, reviewed on its own
+terms. **The trading agent may never create, renew, broaden, or raise its own
+authorization.**
+
 ## Definition of done for Milestone 9
 
-This offline PR delivers the framework. Milestone 9 is complete only when **all**
-of the following hold:
+Milestone 9 is complete only when **all** of the following hold:
 
-1. This foundation is reviewed and merged. *(this PR)*
+1. ~~The offline foundation is reviewed and merged.~~ **Done** — PR #43.
 2. A reviewed attended read-only checkpoint executes against a real account,
-   performing only the permitted reads and zero writes.
+   performing only the permitted reads and zero writes. **Not done.** The
+   runtime and launcher exist and are tested against fakes; **nothing has been
+   executed against a real account.**
 3. Its sanitized observations are recorded, including `NOT_OBSERVED` if no safe
-   protective order existed.
+   protective order existed. **Not done** — follows from step 2.
 4. A human reviews those observations and explicitly approves zero or more
-   states, promoting them to `APPROVED_FOR_ACTIVE_PROTECTION`.
+   states, promoting them to `APPROVED_FOR_ACTIVE_PROTECTION`. **Not done.**
 5. `ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` is updated to match, with the
-   consistency test still passing.
-6. Reliable position, order, buying-power, and market-session snapshot
-   acquisition is wired to real reads.
+   consistency test still passing. **Not done** — the set is still empty.
+6. ~~Reliable position, order, buying-power, and market-session snapshot
+   acquisition is wired to real reads.~~ **Done**, with buying power closed
+   honestly as `UNKNOWN` rather than by widening the read surface — see above.
 
-Steps 2 through 6 are **not** in this PR. Approving zero states remains a
-legitimate outcome: if the observations do not justify approval, the mapping
-stays empty and unattended operation stays blocked on it.
+Steps 2 through 5 require an operator at a terminal and are **not** software
+work. Approving zero states remains a legitimate outcome: if the observations
+do not justify approval, the mapping stays empty and unattended operation
+stays blocked on it.

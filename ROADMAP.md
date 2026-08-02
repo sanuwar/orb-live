@@ -122,19 +122,53 @@ approved to begin before its predecessor is complete and reviewed.
 
 The offline foundation — provenance framework, sanitized snapshot model,
 fail-closed decision API, freshness policy, and the read-only checkpoint design
-— is implemented in `src/read_only_broker_state.py`. **No state has been
-approved for active protection, and the attended read-only checkpoint has not
-been executed.** See
+— is implemented in `src/read_only_broker_state.py`. The real observation
+runtime that produces a snapshot from an actual broker, its
+capability-restricted reader, and the tracked attended launcher are in
+`src/read_only_observation_runtime.py` and
+`read_only_observation_checkpoint_launcher.py`.
+
+**No state has been approved for active protection, and the attended read-only
+checkpoint has not been executed against a real account.** Every test is
+fake-only. See
 [`MILESTONE_9_READ_ONLY_BROKER_STATE_GROUNDING.md`](MILESTONE_9_READ_ONLY_BROKER_STATE_GROUNDING.md)
 for the definition of done.
 
 - Ground active-protection status using **non-order broker reads** only.
 - Document the actual Robinhood order states observed, rather than inferring
   them from the advertised schema.
-- **Keep all writes disabled.**
+- **Keep all writes disabled.** All 49 advertised broker operations are
+  classified; only 3 may be invoked, and an operation whose write capability is
+  merely *ambiguous* is refused as strictly as a proven write.
 - Establish reliable position, order, buying-power, and market-session
-  snapshots.
+  snapshots. Buying power is closed **honestly**: no permitted read carries a
+  balance, so cash availability reports `UNKNOWN` rather than widening the read
+  surface for a value the decision does not use.
 - Fail closed on unknown or conflicting states.
+
+- Support **non-interactive authorization** so the checkpoint can run on a
+  schedule. An operator-issued manifest pins scope, commit, implementation
+  digest, capability list, zero write limits, one session, observation
+  identity, and an expiry window; it is validated and consumed before any
+  read. It is not an always-yes mode and nothing auto-answers a prompt.
+
+Remaining: an operator must issue a manifest (or attend a terminal), execute
+the checkpoint, and review what it records. That is not software work, and
+**approving zero states is a legitimate result.**
+
+### Authorization policy, across milestones
+
+The read-only manifest authorizes **reads only** and cannot be widened.
+Milestones 12 and 13 require a **separate** write-enabled policy carrying
+operator-approved capital tier, strategy version, symbol allowlist, position
+and exposure limits, daily/weekly/drawdown limits, permitted trading window,
+deployment expiry, and global kill-switch state. Its required fields are named
+in `src/read_only_authorization_manifest.py` as a specification only — nothing
+implements or honours them, and a read-only manifest carrying any of them is
+refused.
+
+**The trading agent may never create, renew, broaden, or raise its own
+authorization**, in any milestone. Authorization is always an operator input.
 
 *Why first:* every later milestone depends on being able to assert that a
 protective stop is genuinely armed. Today that assertion is unavailable — see
