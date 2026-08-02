@@ -200,8 +200,14 @@ def test_the_explanation_names_what_is_missing():
     assert "empty" in AUTHORITY_EXPLANATION
 
 
-def test_the_supervised_mode_is_the_only_one_defined_here():
-    assert {mode.value for mode in GateMode} == {"SUPERVISED"}
+def test_the_mode_vocabulary_is_closed():
+    """Two modes, and neither is approved.
+
+    This asserted `SUPERVISED` alone until the limited-unattended mode landed.
+    Pinning the whole set keeps a third mode from arriving unnoticed.
+    """
+    assert {mode.value for mode in GateMode} == {"SUPERVISED", "LIMITED_UNATTENDED"}
+    assert ACTIVATION_APPROVALS == frozenset()
 
 
 # --------------------------------------------------------------------------
@@ -320,3 +326,160 @@ def test_the_repository_still_has_strategy_disabled():
     from src.config import load_config
 
     assert load_config()["strategy"]["enabled"] is False
+
+
+# --------------------------------------------------------------------------
+# 6. Limited unattended operation (task H).
+# --------------------------------------------------------------------------
+
+from src.execution_gates import (  # noqa: E402
+    UNATTENDED_PRECONDITIONS,
+    UnattendedPreconditions,
+    open_unattended_gate,
+)
+
+
+def unattended(**overrides) -> UnattendedPreconditions:
+    values = {name: True for name in UNATTENDED_PRECONDITIONS}
+    values.update(overrides)
+    return UnattendedPreconditions(**values)
+
+
+def test_unattended_mode_exists_and_is_not_approved():
+    assert GateMode.LIMITED_UNATTENDED not in ACTIVATION_APPROVALS
+
+
+def test_the_unattended_gate_cannot_open_with_everything_satisfied():
+    decision = open_unattended_gate(preconditions(), unattended())
+    assert decision.verdict is GateVerdict.CLOSED_ACTIVATION_NOT_APPROVED
+    assert decision.is_open is False
+    assert decision.permits_automated_action is False
+
+
+def test_unattended_requires_strictly_more_than_supervised():
+    """The absence of a human is the reason to require more, not less."""
+    assert set(UNATTENDED_PRECONDITIONS).isdisjoint(REQUIRED_PRECONDITIONS)
+    total = len(REQUIRED_PRECONDITIONS) + len(UNATTENDED_PRECONDITIONS)
+    assert total == 17
+    assert total > len(REQUIRED_PRECONDITIONS)
+
+
+def test_unattended_still_requires_every_supervised_precondition():
+    """No condition is relaxed because nobody is watching."""
+    for name in REQUIRED_PRECONDITIONS:
+        decision = open_unattended_gate(
+            preconditions(**{name: False}), unattended()
+        )
+        assert decision.is_open is False
+        assert decision.unmet_precondition_count >= 1
+
+
+def test_operator_acknowledgement_is_still_required_unattended():
+    """Unattended means no human watches the session, not that none authorized
+    the deployment. The acknowledgement moves earlier; it does not vanish."""
+    assert "operator_present_and_acknowledged" in REQUIRED_PRECONDITIONS
+    decision = open_unattended_gate(
+        preconditions(operator_present_and_acknowledged=False), unattended()
+    )
+    assert decision.unmet_precondition_count == 1
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_each_unattended_precondition_alone_registers_as_unmet(name):
+    decision = open_unattended_gate(preconditions(), unattended(**{name: False}))
+    assert decision.unmet_precondition_count == 1
+    assert decision.is_open is False
+
+
+def test_the_unmet_count_spans_both_records():
+    """An operator reading "two unmet" should not have to ask which list."""
+    decision = open_unattended_gate(
+        preconditions(risk_within_limits=False),
+        unattended(alerting_verified_reachable=False),
+    )
+    assert decision.unmet_precondition_count == 2
+
+
+def test_the_unattended_precondition_set_covers_the_expected_ground():
+    assert set(UNATTENDED_PRECONDITIONS) == {
+        "capital_tier_approved",
+        "deployment_not_expired",
+        "within_permitted_trading_window",
+        "alerting_verified_reachable",
+        "kill_switch_remotely_operable",
+        "automatic_suspension_armed",
+        "no_unresolved_operator_action",
+        "supervised_evidence_reviewed",
+    }
+
+
+def test_a_remotely_operable_kill_switch_is_required():
+    """A kill switch needing physical access is not a kill switch at 3am."""
+    assert "kill_switch_remotely_operable" in UNATTENDED_PRECONDITIONS
+
+
+def test_alerting_must_be_verified_before_the_session_not_during():
+    assert "alerting_verified_reachable" in UNATTENDED_PRECONDITIONS
+
+
+def test_supervised_evidence_must_be_reviewed_first():
+    """Unattended follows supervised; it does not skip it."""
+    assert "supervised_evidence_reviewed" in UNATTENDED_PRECONDITIONS
+
+
+def test_no_combination_of_unattended_preconditions_opens_the_gate():
+    """All 256 unattended combinations, with supervised fully satisfied."""
+    checked = 0
+    for combination in itertools.product(
+        [True, False], repeat=len(UNATTENDED_PRECONDITIONS)
+    ):
+        values = dict(zip(UNATTENDED_PRECONDITIONS, combination))
+        decision = open_unattended_gate(preconditions(), UnattendedPreconditions(**values))
+        assert decision.is_open is False
+        assert decision.permits_automated_action is False
+        checked += 1
+    assert checked == 256
+
+
+def test_there_are_no_default_unattended_preconditions():
+    for field in dataclasses.fields(UnattendedPreconditions):
+        assert field.default is dataclasses.MISSING, field.name
+    with pytest.raises(TypeError):
+        UnattendedPreconditions()
+
+
+@pytest.mark.parametrize("value", [1, "true", None, []])
+def test_a_truthy_non_bool_unattended_precondition_is_refused(value):
+    with pytest.raises(ExecutionGateError):
+        unattended(capital_tier_approved=value)
+
+
+def test_malformed_unattended_input_closes_rather_than_raises():
+    assert open_unattended_gate(preconditions(), "fine").verdict is (
+        GateVerdict.CLOSED_MALFORMED_INPUT
+    )
+    assert open_unattended_gate("fine", unattended()).verdict is (
+        GateVerdict.CLOSED_MALFORMED_INPUT
+    )
+
+
+def test_an_open_unattended_decision_cannot_be_constructed():
+    with pytest.raises(ExecutionGateError):
+        GateDecision(GateVerdict.OPEN, GateMode.LIMITED_UNATTENDED)
+
+
+def test_the_readiness_report_counts_both_requirement_sets():
+    report = gate_readiness_report()
+    assert report["required_precondition_count"] == 9
+    assert report["unattended_precondition_count"] == 8
+    assert report["total_unattended_requirement_count"] == 17
+    assert report["gate_is_openable"] is False
+
+
+def test_unattended_facts_are_allowlisted():
+    decision = open_unattended_gate(preconditions(), unattended())
+    facts = decision.sanitized_facts()
+    assert set(facts) == set(ALLOWED_FACT_VALUES)
+    for key, value in facts.items():
+        assert value in ALLOWED_FACT_VALUES[key], (key, value)
+    assert facts["gate_mode"] == "LIMITED_UNATTENDED"

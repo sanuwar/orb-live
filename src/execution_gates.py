@@ -57,10 +57,12 @@ class GateVerdict(str, Enum):
 
 
 class GateMode(str, Enum):
-    """Who is watching. Named here so the limited-unattended gate has a
-    vocabulary to extend rather than inventing a parallel one."""
+    """Who is watching."""
 
     SUPERVISED = "SUPERVISED"
+    #: Nobody is watching. Everything the supervised mode requires still
+    #: applies, plus the conditions below — see `UNATTENDED_PRECONDITIONS`.
+    LIMITED_UNATTENDED = "LIMITED_UNATTENDED"
 
 
 #: Operator approvals that would permit a gate mode to open. Empty, and a test
@@ -137,6 +139,71 @@ REQUIRED_PRECONDITIONS: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------
+# Limited unattended operation.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UnattendedPreconditions:
+    """What unattended operation requires **in addition** to everything above.
+
+    The relationship is strictly additive and enforced by test: unattended can
+    only ever require *more* than supervised, never less. A mode that relaxed
+    a condition because nobody is watching would have the logic exactly
+    backwards — the absence of a human is the reason to require more.
+
+    `operator_present_and_acknowledged` stays in the base set and stays
+    required. That is not an oversight. Unattended means no human watches the
+    *session*; it does not mean no human ever authorized the deployment. The
+    acknowledgement moves earlier in time, it does not disappear.
+    """
+
+    #: A capital tier was approved by reviewed configuration, not derived.
+    capital_tier_approved: bool
+    #: The deployment's expiry has not passed.
+    deployment_not_expired: bool
+    #: Trading is inside the approved window for this deployment.
+    within_permitted_trading_window: bool
+    #: Alert delivery was verified reachable *before* the session began.
+    alerting_verified_reachable: bool
+    #: The kill switch can be operated without physical access to the host.
+    kill_switch_remotely_operable: bool
+    #: Automatic suspension is armed and was tested.
+    automatic_suspension_armed: bool
+    #: No prior run ended requiring operator attention.
+    no_unresolved_operator_action: bool
+    #: Supervised runs were reviewed and judged sufficient evidence.
+    supervised_evidence_reviewed: bool
+
+    def __post_init__(self) -> None:
+        for item in fields(self):
+            value = getattr(self, item.name)
+            if not isinstance(value, bool):
+                raise ExecutionGateError(f"{item.name} must be a bool")
+
+    def unmet(self) -> tuple[str, ...]:
+        return tuple(
+            item.name for item in fields(self) if getattr(self, item.name) is not True
+        )
+
+    @property
+    def all_met(self) -> bool:
+        return not self.unmet()
+
+
+UNATTENDED_PRECONDITIONS: tuple[str, ...] = (
+    "capital_tier_approved",
+    "deployment_not_expired",
+    "within_permitted_trading_window",
+    "alerting_verified_reachable",
+    "kill_switch_remotely_operable",
+    "automatic_suspension_armed",
+    "no_unresolved_operator_action",
+    "supervised_evidence_reviewed",
+)
+
+
 @dataclass(frozen=True)
 class GateDecision:
     verdict: GateVerdict
@@ -198,12 +265,42 @@ def open_gate(
     return GateDecision(GateVerdict.OPEN, mode)
 
 
+def open_unattended_gate(
+    preconditions: GatePreconditions, unattended: UnattendedPreconditions
+) -> GateDecision:
+    """The unattended gate. Requires everything supervised does, and more.
+
+    Both records are evaluated, and the unmet count spans both — an operator
+    reading "one unmet" should not have to ask which of two lists it came
+    from.
+    """
+    if not isinstance(unattended, UnattendedPreconditions):
+        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT, GateMode.LIMITED_UNATTENDED)
+    if not isinstance(preconditions, GatePreconditions):
+        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT, GateMode.LIMITED_UNATTENDED)
+
+    unmet = len(preconditions.unmet()) + len(unattended.unmet())
+    if GateMode.LIMITED_UNATTENDED not in ACTIVATION_APPROVALS:
+        return GateDecision(
+            GateVerdict.CLOSED_ACTIVATION_NOT_APPROVED, GateMode.LIMITED_UNATTENDED, unmet
+        )
+    if unmet:
+        return GateDecision(
+            GateVerdict.CLOSED_PRECONDITION_UNMET, GateMode.LIMITED_UNATTENDED, unmet
+        )
+    return GateDecision(GateVerdict.OPEN, GateMode.LIMITED_UNATTENDED)
+
+
 def gate_readiness_report() -> Mapping[str, object]:
     """What still stands between here and an openable gate."""
     return {
         "approved_modes": sorted(mode.value for mode in ACTIVATION_APPROVALS),
         "activation_approved": bool(ACTIVATION_APPROVALS),
         "required_precondition_count": len(REQUIRED_PRECONDITIONS),
+        "unattended_precondition_count": len(UNATTENDED_PRECONDITIONS),
+        "total_unattended_requirement_count": (
+            len(REQUIRED_PRECONDITIONS) + len(UNATTENDED_PRECONDITIONS)
+        ),
         "gate_is_openable": False,
     }
 
@@ -212,11 +309,14 @@ __all__ = [
     "ACTIVATION_APPROVALS",
     "AUTHORITY_EXPLANATION",
     "REQUIRED_PRECONDITIONS",
+    "UNATTENDED_PRECONDITIONS",
     "ExecutionGateError",
     "GateDecision",
     "GateMode",
     "GatePreconditions",
     "GateVerdict",
+    "UnattendedPreconditions",
     "gate_readiness_report",
     "open_gate",
+    "open_unattended_gate",
 ]
