@@ -189,7 +189,27 @@ class AccountRiskState:
             raise RiskLimitError("open position count must not be negative")
 
 
-class ActionLedger:
+class ActionLedgerBase:
+    """The ledger contract `evaluate` will accept.
+
+    An explicit base rather than duck typing: the `isinstance` check in
+    `evaluate` is a real guard, and replacing it with "has the right method
+    names" would let any object with a `has_seen` attribute through. A durable
+    implementation subclasses this so the guard keeps its teeth.
+    """
+
+    def has_seen(self, key: str) -> bool:
+        raise NotImplementedError
+
+    def record(self, key: str, approved_quantity: int) -> None:
+        raise NotImplementedError
+
+    @property
+    def approved_quantity(self) -> int:
+        raise NotImplementedError
+
+
+class ActionLedger(ActionLedgerBase):
     """Remembers idempotency keys, and how much exposure they approved.
 
     Deliberately has no removal method. "Forget this key" is indistinguishable
@@ -292,7 +312,7 @@ def evaluate(
         return RiskAssessment(RiskDecision.DENIED_MALFORMED_PROPOSAL)
     if not isinstance(limits, RiskLimits) or not isinstance(state, AccountRiskState):
         raise RiskLimitError("limits and account state are required")
-    if not isinstance(ledger, ActionLedger):
+    if not isinstance(ledger, ActionLedgerBase):
         raise RiskLimitError("an action ledger is required")
     if not isinstance(current_monotonic, (int, float)) or isinstance(
         current_monotonic, bool
@@ -336,6 +356,7 @@ __all__ = [
     "DENIAL_DECISIONS",
     "AccountRiskState",
     "ActionLedger",
+    "ActionLedgerBase",
     "ActionProposal",
     "KillSwitchState",
     "RiskAssessment",
