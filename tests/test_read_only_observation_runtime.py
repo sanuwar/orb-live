@@ -1089,7 +1089,7 @@ def test_an_unexpected_failure_is_an_invariant_failure_not_a_result(tmp_path):
 
 def test_every_outcome_is_a_distinct_value_and_only_two_are_completions():
     values = [outcome.value for outcome in CheckpointOutcome]
-    assert len(values) == len(set(values)) == 11
+    assert len(values) == len(set(values)) == 12
     assert runtime.COMPLETED_OUTCOMES == {
         CheckpointOutcome.OBSERVATION_RECORDED,
         CheckpointOutcome.NO_PROTECTIVE_ORDER_OBSERVED,
@@ -1143,3 +1143,477 @@ def test_the_runner_never_writes_evidence_naming_a_write_tool(tmp_path):
     for name, capability in MCP_TOOL_CLASSIFICATION.items():
         if capability is not ToolCapability.READ_ONLY_PERMITTED:
             assert name not in text
+
+
+# --------------------------------------------------------------------------
+# 10. Review corrections (PR #44 findings F1, F3, F4, F5, F6, F7).
+# --------------------------------------------------------------------------
+
+
+# --- F1: the session handle is private -------------------------------------
+
+
+def test_the_reader_exposes_no_public_session_handle():
+    """F1. A public handle put a generic write call one attribute away."""
+    reader = RestrictedReadOnlyReader(session=FakeSession(), account_number=ACCOUNT)
+    public = {name for name in dir(reader) if not name.startswith("_")}
+    assert "session" not in public
+    assert not hasattr(reader, "session")
+    assert reader._session is not None
+
+
+def test_the_reader_has_no_dict_to_reintroduce_a_public_session():
+    """__slots__ means a public alias cannot be attached after construction."""
+    reader = RestrictedReadOnlyReader(session=FakeSession(), account_number=ACCOUNT)
+    assert not hasattr(reader, "__dict__")
+    with pytest.raises(AttributeError):
+        reader.session = FakeSession()
+
+
+def test_the_reader_repr_never_renders_the_session():
+    """A repr lands in logs and tracebacks."""
+    reader = RestrictedReadOnlyReader(session=FakeSession(), account_number=ACCOUNT)
+    rendered = repr(reader)
+    assert "FakeSession" not in rendered
+    assert "session" not in rendered
+    assert ACCOUNT not in rendered
+
+
+def test_the_reader_still_reads_normally_with_a_private_session():
+    session = FakeSession(default_payloads())
+    reader = RestrictedReadOnlyReader(session=session, account_number=ACCOUNT)
+    asyncio.run(reader.read_accounts())
+    assert session.requested == ["get_accounts"]
+
+
+# --- F3: early closes ------------------------------------------------------
+
+
+EARLY_CLOSE_DAYS = [(2026, 11, 27), (2026, 12, 24), (2027, 11, 26)]
+
+
+@pytest.mark.parametrize("year,month,day", EARLY_CLOSE_DAYS)
+def test_an_early_close_afternoon_is_not_a_regular_session(year, month, day):
+    """F3. 14:00 ET previously classified REGULAR_HOURS while shut."""
+    moment = datetime(year, month, day, 14, 0, tzinfo=EASTERN)
+    assert classify_market_session(moment) is MarketSession.CLOSED
+
+
+@pytest.mark.parametrize("year,month,day", EARLY_CLOSE_DAYS)
+def test_the_early_close_boundary_is_one_pm_eastern(year, month, day):
+    before = datetime(year, month, day, 12, 59, tzinfo=EASTERN)
+    at_close = datetime(year, month, day, 13, 0, tzinfo=EASTERN)
+    assert classify_market_session(before) is MarketSession.REGULAR_HOURS
+    assert classify_market_session(at_close) is MarketSession.CLOSED
+
+
+@pytest.mark.parametrize("year,month,day", EARLY_CLOSE_DAYS)
+def test_an_early_close_morning_is_still_a_normal_session(year, month, day):
+    """The half-day is short, not cancelled."""
+    assert (
+        classify_market_session(datetime(year, month, day, 10, 0, tzinfo=EASTERN))
+        is MarketSession.REGULAR_HOURS
+    )
+    assert (
+        classify_market_session(datetime(year, month, day, 9, 29, tzinfo=EASTERN))
+        is MarketSession.EXTENDED_HOURS
+    )
+
+
+@pytest.mark.parametrize("year,month,day", EARLY_CLOSE_DAYS)
+def test_no_early_close_day_reports_extended_hours_after_the_close(year, month, day):
+    """Post-close extended trading exists but this table cannot bound it."""
+    for hour in (13, 15, 17, 19):
+        moment = datetime(year, month, day, hour, 30, tzinfo=EASTERN)
+        assert classify_market_session(moment) is MarketSession.CLOSED
+
+
+def test_a_full_trading_day_still_closes_at_four():
+    assert (
+        classify_market_session(datetime(2026, 8, 3, 15, 59, tzinfo=EASTERN))
+        is MarketSession.REGULAR_HOURS
+    )
+    assert (
+        classify_market_session(datetime(2026, 8, 3, 13, 30, tzinfo=EASTERN))
+        is MarketSession.REGULAR_HOURS
+    )
+
+
+def test_no_supported_date_in_range_is_ever_wrongly_open():
+    """Sweep every covered day: a closed day must never read as open."""
+    from datetime import timedelta
+
+    from src.read_only_observation_runtime import (
+        _EARLY_CLOSE_DAYS,
+        _MARKET_HOLIDAYS,
+    )
+
+    moment = datetime(2026, 1, 1, 14, 0, tzinfo=EASTERN)
+    end = datetime(2027, 12, 31, 14, 0, tzinfo=EASTERN)
+    while moment <= end:
+        session = classify_market_session(moment)
+        shut = (
+            moment.weekday() >= 5
+            or moment.date() in _MARKET_HOLIDAYS
+            or moment.date() in _EARLY_CLOSE_DAYS
+        )
+        if shut:
+            assert session is MarketSession.CLOSED, moment
+        moment += timedelta(days=1)
+
+
+def test_the_table_expires_rather_than_ageing_into_silence():
+    from src.read_only_observation_runtime import CALENDAR_EXPIRES_AFTER
+
+    assert CALENDAR_EXPIRES_AFTER.isoformat() == "2027-12-31"
+    assert (
+        classify_market_session(datetime(2028, 1, 3, 10, 0, tzinfo=EASTERN))
+        is MarketSession.UNKNOWN
+    )
+
+
+# --- F4: calendar provenance is recorded and displayed ---------------------
+
+
+def test_calendar_metadata_is_fixed_and_complete():
+    """F4. The limitation was previously neither displayed nor recorded."""
+    from src.read_only_observation_runtime import calendar_metadata
+
+    meta = calendar_metadata()
+    assert set(meta) == {
+        "calendar_source",
+        "calendar_supported_range",
+        "calendar_limitation",
+        "calendar_expires_after",
+    }
+    assert meta["calendar_source"] == "static_tracked_table"
+    assert meta["calendar_supported_range"] == "2026-2027"
+    assert meta["calendar_expires_after"] == "2027-12-31"
+    assert all(isinstance(value, str) for value in meta.values())
+
+
+def test_evidence_records_the_calendar_provenance(tmp_path):
+    result = run_checkpoint(make_request(tmp_path), StubReader())
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["calendar_source"] == "static_tracked_table"
+    assert payload["calendar_supported_range"] == "2026-2027"
+    assert payload["calendar_expires_after"] == "2027-12-31"
+    assert "expires_after_2027" in payload["calendar_limitation"]
+    validate_read_only_evidence(payload)
+
+
+def test_the_launcher_report_displays_the_calendar_limitation(tmp_path, capsys):
+    import read_only_observation_checkpoint_launcher as launcher
+
+    result = run_checkpoint(make_request(tmp_path), StubReader())
+    launcher.report(result)
+    printed = capsys.readouterr().out
+    assert "calendar_source: static_tracked_table" in printed
+    assert "calendar_supported_range: 2026-2027" in printed
+    assert "2027-12-31" in printed
+    assert "no authoritative feed" in printed
+
+
+# --- F5: a declined operator opens no session ------------------------------
+
+
+class ExplodingSessionFactory:
+    """Any use at all is a failure: entering it means a session was opened."""
+
+    def __init__(self, *, fail_on=None):
+        self.entered = 0
+        self.fail_on = fail_on
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        self.entered += 1
+        if self.fail_on == "open":
+            raise RuntimeError("transport handshake failed: secret-token-abc")
+        return FakeSession(default_payloads())
+
+    async def __aexit__(self, *exc):
+        if self.fail_on == "close":
+            raise RuntimeError("transport teardown failed: secret-token-xyz")
+        return False
+
+
+def unattended_request(tmp_path, run_id="m9-obs-0002"):
+    from src.read_only_observation_runtime import UNATTENDED_MODE
+
+    return ReadOnlyCheckpointRequest(
+        run_id=run_id,
+        account_number=ACCOUNT,
+        symbol=SYMBOL,
+        expected_quantity=Decimal("1"),
+        evidence_root=tmp_path / "evidence",
+        authorization_flag=READ_ONLY_AUTHORIZATION_FLAG,
+        operator_present=False,
+        authorization_mode=UNATTENDED_MODE,
+    )
+
+
+def test_a_declined_operator_opens_zero_sessions(tmp_path):
+    """F5. The session used to be opened before the prompt was answered."""
+    import read_only_observation_checkpoint_launcher as launcher
+    from src.read_only_observation_runtime import PreResolvedAuthorization
+
+    factory = ExplodingSessionFactory()
+    declined = PreResolvedAuthorization(
+        decisions={ACKNOWLEDGMENT_STAGE: True, OBSERVATION_STAGE: False}
+    )
+    result = asyncio.run(
+        launcher._execute(
+            unattended_request(tmp_path), declined, session_factory=factory
+        )
+    )
+    assert result.outcome is CheckpointOutcome.DECLINED_BY_OPERATOR
+    assert factory.entered == 0
+
+
+def test_declining_the_first_stage_also_opens_zero_sessions(tmp_path):
+    import read_only_observation_checkpoint_launcher as launcher
+    from src.read_only_observation_runtime import PreResolvedAuthorization
+
+    factory = ExplodingSessionFactory()
+    declined = PreResolvedAuthorization(
+        decisions={ACKNOWLEDGMENT_STAGE: False, OBSERVATION_STAGE: False}
+    )
+    result = asyncio.run(
+        launcher._execute(
+            unattended_request(tmp_path), declined, session_factory=factory
+        )
+    )
+    assert result.outcome is CheckpointOutcome.DECLINED_BY_OPERATOR
+    assert factory.entered == 0
+
+
+def test_the_launcher_resolves_interactive_authorization_before_any_session(
+    monkeypatch, tmp_path
+):
+    """Both prompts are answered while no transport object exists."""
+    import read_only_observation_checkpoint_launcher as launcher
+
+    monkeypatch.setenv("ENABLE_MILESTONE_9_READ_ONLY_OBSERVATION", "1")
+    monkeypatch.setattr(launcher, "_read_secret", lambda prompt: "n")
+    namespace = launcher.build_parser().parse_args([
+        "--run-id", "m9-obs-0003",
+        "--account-number", ACCOUNT,
+        "--symbol", SYMBOL,
+        "--expected-quantity", "1",
+        "--evidence-root", str(tmp_path / "evidence"),
+        "--authorization", READ_ONLY_AUTHORIZATION_FLAG,
+        "--operator-present",
+        "--i-understand-this-performs-real-broker-reads",
+        "--interactive",
+    ])
+    provider = launcher.build_authorization(namespace, now=REGULAR_HOURS)
+    assert provider.all_approved is False
+
+
+def test_an_approved_authorization_does_open_exactly_one_session(tmp_path):
+    import read_only_observation_checkpoint_launcher as launcher
+    from src.read_only_observation_runtime import PreResolvedAuthorization
+
+    factory = ExplodingSessionFactory()
+    approved = PreResolvedAuthorization(
+        decisions={ACKNOWLEDGMENT_STAGE: True, OBSERVATION_STAGE: True}
+    )
+    result = asyncio.run(
+        launcher._execute(
+            unattended_request(tmp_path), approved, session_factory=factory
+        )
+    )
+    assert factory.entered == 1
+    assert result.outcome is CheckpointOutcome.NO_PROTECTIVE_ORDER_OBSERVED
+
+
+# --- F6: session open and close failures fail closed -----------------------
+
+
+def approved_authorization():
+    from src.read_only_observation_runtime import PreResolvedAuthorization
+
+    return PreResolvedAuthorization(
+        decisions={ACKNOWLEDGMENT_STAGE: True, OBSERVATION_STAGE: True}
+    )
+
+
+def test_a_session_open_failure_is_a_recorded_outcome(tmp_path):
+    """F6. This previously escaped as an uncaught traceback."""
+    import read_only_observation_checkpoint_launcher as launcher
+
+    factory = ExplodingSessionFactory(fail_on="open")
+    result = asyncio.run(
+        launcher._execute(
+            unattended_request(tmp_path), approved_authorization(),
+            session_factory=factory,
+        )
+    )
+    assert result.outcome is CheckpointOutcome.SESSION_UNAVAILABLE
+    assert result.evidence.operator_action_required == "INVESTIGATE_SESSION_OPEN"
+    assert result.evidence_path is not None
+
+
+def test_a_session_close_failure_is_a_recorded_outcome(tmp_path):
+    import read_only_observation_checkpoint_launcher as launcher
+
+    factory = ExplodingSessionFactory(fail_on="close")
+    result = asyncio.run(
+        launcher._execute(
+            unattended_request(tmp_path), approved_authorization(),
+            session_factory=factory,
+        )
+    )
+    assert result.outcome is CheckpointOutcome.SESSION_UNAVAILABLE
+    assert result.evidence.operator_action_required == "INVESTIGATE_SESSION_CLOSE"
+
+
+def test_a_close_failure_keeps_the_observation_that_was_recorded(tmp_path):
+    """Evidence is immutable once written; history is not rewritten."""
+    import read_only_observation_checkpoint_launcher as launcher
+
+    factory = ExplodingSessionFactory(fail_on="close")
+    result = asyncio.run(
+        launcher._execute(
+            unattended_request(tmp_path), approved_authorization(),
+            session_factory=factory,
+        )
+    )
+    assert result.evidence_path is not None
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["read_call_counts"] == {
+        "get_accounts": 1,
+        "get_equity_positions": 1,
+        "get_equity_orders": 1,
+    }
+
+
+@pytest.mark.parametrize("phase", ["open", "close"])
+def test_no_transport_text_survives_a_session_failure(tmp_path, phase):
+    """The fakes raise with a secret in the message; none of it may escape."""
+    import read_only_observation_checkpoint_launcher as launcher
+
+    factory = ExplodingSessionFactory(fail_on=phase)
+    result = asyncio.run(
+        launcher._execute(
+            unattended_request(tmp_path), approved_authorization(),
+            session_factory=factory,
+        )
+    )
+    rendered = json.dumps(result.evidence.__dict__)
+    assert "secret-token" not in rendered
+    assert "transport" not in rendered
+    if result.evidence_path is not None:
+        assert "secret-token" not in result.evidence_path.read_text(encoding="utf-8")
+
+
+def test_session_failure_evidence_still_asserts_zero_writes(tmp_path):
+    import read_only_observation_checkpoint_launcher as launcher
+
+    factory = ExplodingSessionFactory(fail_on="open")
+    result = asyncio.run(
+        launcher._execute(
+            unattended_request(tmp_path), approved_authorization(),
+            session_factory=factory,
+        )
+    )
+    assert result.evidence.write_counters == {
+        name: 0 for name in REQUIRED_ZERO_COUNTERS
+    }
+    assert_zero_write_evidence(result.evidence)
+
+
+def test_a_session_failure_on_a_spent_run_id_still_returns_an_outcome(tmp_path):
+    """No durable home for the evidence is not a reason to lose the outcome."""
+    from src.read_only_observation_runtime import record_session_failure
+
+    request = unattended_request(tmp_path)
+    run_checkpoint(request, StubReader())
+    result = record_session_failure(request, phase="open")
+    assert result.outcome is CheckpointOutcome.SESSION_UNAVAILABLE
+    assert result.evidence_path is None
+
+
+def test_an_invalid_session_failure_phase_is_refused(tmp_path):
+    from src.read_only_observation_runtime import record_session_failure
+
+    with pytest.raises(ReadOnlyRuntimeError):
+        record_session_failure(unattended_request(tmp_path), phase="reopen")
+
+
+def test_session_unavailable_is_not_a_completion():
+    assert CheckpointOutcome.SESSION_UNAVAILABLE not in runtime.COMPLETED_OUTCOMES
+
+
+# --- F7: observed state is constrained to the known vocabulary -------------
+
+
+def test_an_unknown_broker_state_persists_only_as_unrecognized(tmp_path):
+    """F7. This previously wrote arbitrary broker text into evidence."""
+    leaked = "unlisted_broker_state_x9"
+    result = run_checkpoint(
+        make_request(tmp_path),
+        StubReader(
+            positions=[ObservedPosition(SYMBOL, Decimal("1"))],
+            orders=[ObservedOrder(SYMBOL, "sell", "stop_market", leaked, True)],
+        ),
+    )
+    assert result.outcome is CheckpointOutcome.OBSERVATION_RECORDED
+    assert result.evidence.observed_protection_state == "UNRECOGNIZED"
+    assert leaked not in result.evidence_path.read_text(encoding="utf-8")
+
+
+def test_a_known_broker_state_is_still_recorded_verbatim(tmp_path):
+    """Recording observed states is the entire point of the checkpoint."""
+    result = run_checkpoint(
+        make_request(tmp_path),
+        StubReader(
+            positions=[ObservedPosition(SYMBOL, Decimal("1"))],
+            orders=[ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True)],
+        ),
+    )
+    assert result.evidence.observed_protection_state == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "state,expected",
+    [
+        ("confirmed", "confirmed"),
+        ("Confirmed", "confirmed"),
+        ("unconfirmed", "unconfirmed"),
+        ("queued", "queued"),
+        ("wibble", "UNRECOGNIZED"),
+        ("state-with-acct123", "UNRECOGNIZED"),
+        ("", "NONE"),
+        (None, "NONE"),
+        (42, "NONE"),
+    ],
+)
+def test_recordable_order_state_vocabulary(state, expected):
+    from src.read_only_observation_runtime import recordable_order_state
+
+    assert recordable_order_state(state) == expected
+
+
+def test_every_recordable_state_is_in_the_known_vocabulary():
+    """No evidence value may fall outside a fixed, reviewable set."""
+    from src.read_only_observation_runtime import (
+        KNOWN_ORDER_STATES,
+        UNRECOGNIZED_ORDER_STATE,
+        recordable_order_state,
+    )
+
+    permitted = KNOWN_ORDER_STATES | {UNRECOGNIZED_ORDER_STATE, "NONE"}
+    for probe in ("confirmed", "filled", "zzz", "", None, "PENDING_CANCELLED"):
+        assert recordable_order_state(probe) in permitted
+
+
+def test_the_approved_set_is_folded_in_dynamically():
+    """Promoting a state later must not make it unrecordable."""
+    from src.read_only_broker_state import approved_active_protection_states
+    from src.read_only_observation_runtime import recordable_order_state
+
+    for state in approved_active_protection_states():
+        assert recordable_order_state(state) == state

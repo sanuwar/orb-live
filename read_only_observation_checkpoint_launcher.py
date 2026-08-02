@@ -58,15 +58,22 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from src.read_only_observation_runtime import (  # noqa: E402
     ATTENDED_MODE,
+    AUTHORIZATION_STAGES,
+    CALENDAR_EXPIRES_AFTER,
+    CALENDAR_SOURCE,
+    CALENDAR_SUPPORTED_RANGE,
     EASTERN,
     READ_ONLY_AUTHORIZATION_FLAG,
     UNATTENDED_MODE,
     CheckpointOutcome,
     CheckpointResult,
+    PreResolvedAuthorization,
     ReadOnlyAuthorizationGate,
     ReadOnlyCheckpointRequest,
     ReadOnlyRuntimeError,
     RestrictedReadOnlyReader,
+    calendar_metadata,
+    record_session_failure,
     run_read_only_observation_checkpoint,
 )
 
@@ -167,16 +174,21 @@ def assert_real_read_preconditions(namespace: argparse.Namespace) -> None:
         raise ReadOnlyRuntimeError("interactive mode requires an operator present")
 
 
-def build_authorization(namespace: argparse.Namespace, *, now: datetime):
-    """Return the authorization provider for the selected mode.
+def build_authorization(
+    namespace: argparse.Namespace, *, now: datetime
+) -> PreResolvedAuthorization:
+    """Resolve authorization **fully, before any session is opened**.
 
-    Both providers have the same shape and the same single-use discipline, so
-    the runtime cannot tell them apart and cannot be looser with either. The
-    manifest path validates and consumes *before* the checkpoint starts, so an
-    invalid or spent manifest costs zero broker reads.
+    Both modes return the same `PreResolvedAuthorization`, so the runtime
+    cannot tell them apart and cannot be looser with either. Resolving up
+    front is the point: a declined operator, an expired manifest, or a spent
+    identity must cost zero session opens and zero broker reads.
     """
     if namespace.interactive:
-        return ReadOnlyAuthorizationGate(secret_reader=_read_secret)
+        gate = ReadOnlyAuthorizationGate(secret_reader=_read_secret)
+        # Asked here, at the terminal, before any transport exists.
+        decisions = {stage: gate(stage) for stage in AUTHORIZATION_STAGES}
+        return PreResolvedAuthorization(decisions=decisions)
 
     from src.read_only_authorization_manifest import (  # noqa: PLC0415
         ManifestAuthorization,
@@ -187,42 +199,81 @@ def build_authorization(namespace: argparse.Namespace, *, now: datetime):
 
     manifest = load_manifest(Path(namespace.authorization_manifest))
     assert_not_write_authorization(manifest)
-    return ManifestAuthorization(
+    provider = ManifestAuthorization(
         manifest=manifest,
         ledger=ManifestConsumptionLedger(Path(namespace.authorization_ledger)),
         repository_root=REPOSITORY_ROOT,
         checkpoint_observation_id=namespace.run_id,
         now=now,
     )
-
-
-async def _run_with_session(
-    request: ReadOnlyCheckpointRequest, authorization: Any
-) -> CheckpointResult:
-    """Open one session, hand a *restricted reader* to the runtime, close it.
-
-    The session factory is imported here rather than at module scope so that
-    importing this launcher — which tests do — never reaches broker
-    transport code. The session object itself never leaves this function: the
-    runtime receives only the restricted reader.
-    """
-    from src.robinhood_commissioning_session import (  # noqa: PLC0415
-        silent_robinhood_session_factory,
+    # Validation and consumption already happened in the constructor above; a
+    # manifest that got this far approves both stages.
+    return PreResolvedAuthorization(
+        decisions={stage: provider(stage) for stage in AUTHORIZATION_STAGES}
     )
 
-    async with silent_robinhood_session_factory() as session:
-        reader = RestrictedReadOnlyReader(
-            session=session,
-            account_number=request.account_number,
-            maximum_calls_per_tool=1,
-        )
+
+def _unreachable_reader() -> Any:
+    """Proves the declined path never asks for a reader."""
+    raise ReadOnlyRuntimeError("no session was opened")
+
+
+async def _execute(
+    request: ReadOnlyCheckpointRequest,
+    authorization: PreResolvedAuthorization,
+    *,
+    session_factory: Any = None,
+) -> CheckpointResult:
+    """Run the checkpoint, opening a session **only** if authorized.
+
+    A decline short-circuits before any transport exists: the runtime asks
+    for authorization before it asks for a reader, so the reader factory
+    below is never invoked and no session is opened.
+
+    Session-open and session-close failures are caught and converted into a
+    recorded `SESSION_UNAVAILABLE` outcome. Nothing from the transport — no
+    traceback, no exception text — crosses this boundary.
+    """
+    if not authorization.all_approved:
         return await run_read_only_observation_checkpoint(
             request,
-            reader_factory=lambda: reader,
+            reader_factory=_unreachable_reader,
             authorization=authorization,
             monotonic=time.monotonic,
             now=lambda: datetime.now(tz=EASTERN),
         )
+
+    if session_factory is None:
+        # Imported here, not at module scope, so importing this launcher —
+        # which tests do — never reaches broker transport code.
+        from src.robinhood_commissioning_session import (  # noqa: PLC0415
+            silent_robinhood_session_factory,
+        )
+
+        session_factory = silent_robinhood_session_factory
+
+    result: CheckpointResult | None = None
+    try:
+        async with session_factory() as session:
+            reader = RestrictedReadOnlyReader(
+                session=session,
+                account_number=request.account_number,
+                maximum_calls_per_tool=1,
+            )
+            result = await run_read_only_observation_checkpoint(
+                request,
+                reader_factory=lambda: reader,
+                authorization=authorization,
+                monotonic=time.monotonic,
+                now=lambda: datetime.now(tz=EASTERN),
+            )
+    except Exception:
+        # `result is None` means the session never opened; otherwise the body
+        # completed and the failure came from closing it.
+        return record_session_failure(
+            request, phase="open" if result is None else "close", existing=result
+        )
+    return result
 
 
 def report(result: CheckpointResult) -> None:
@@ -235,8 +286,15 @@ def report(result: CheckpointResult) -> None:
     print(f"operator_action_required: {result.evidence.operator_action_required}")
     for name, value in sorted(result.evidence.write_counters.items()):
         print(f"{name}: {value}")
+    for name, value in sorted(calendar_metadata().items()):
+        print(f"{name}: {value}")
     if result.evidence_path is not None:
         print(f"evidence: {result.evidence_path}")
+    print(
+        f"NOTE: market_session comes from a {CALENDAR_SOURCE} covering "
+        f"{CALENDAR_SUPPORTED_RANGE} only, with no authoritative feed. "
+        f"It classifies nothing after {CALENDAR_EXPIRES_AFTER.isoformat()}."
+    )
     print(
         "NOTE: an observation is not an approval. "
         "ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES is unchanged."
@@ -256,7 +314,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # manifest's fields are operator material and do not belong in a log.
         print(f"refused: {type(exc).__name__}: {exc}")
         return 2
-    result = asyncio.run(_run_with_session(request, authorization))
+    try:
+        result = asyncio.run(_execute(request, authorization))
+    except Exception as exc:
+        # Nothing should reach here — `_execute` converts session failures
+        # itself. If it does, it is still an outcome, never a traceback.
+        print(f"failed closed: {type(exc).__name__}")
+        return 3
     report(result)
     return 0 if result.outcome in {
         CheckpointOutcome.OBSERVATION_RECORDED,

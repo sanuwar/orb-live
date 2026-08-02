@@ -248,9 +248,23 @@ _REGULAR_CLOSE = time(16, 0)
 _EXTENDED_OPEN = time(4, 0)
 _EXTENDED_CLOSE = time(20, 0)
 
+#: Early-close (half-day) regular-session close. 13:00 ET.
+_EARLY_REGULAR_CLOSE = time(13, 0)
+
 #: US equity market full holidays for the years this checkpoint may run in.
 #: A date outside the covered years yields UNKNOWN rather than a guess.
 _COVERED_CALENDAR_YEARS: frozenset[int] = frozenset({2026, 2027})
+
+#: Where this calendar comes from and what it does not cover. Recorded in
+#: evidence and printed by the launcher so a reviewer never has to infer the
+#: provenance of a `market_session` value from source code.
+CALENDAR_SOURCE = "static_tracked_table"
+CALENDAR_SUPPORTED_RANGE = "2026-2027"
+CALENDAR_LIMITATION = "no_authoritative_feed_expires_after_2027"
+
+#: The last date this table can classify. Past it, every classification is
+#: UNKNOWN — the table cannot silently age into supporting a later year.
+CALENDAR_EXPIRES_AFTER = date(2027, 12, 31)
 
 _MARKET_HOLIDAYS: frozenset[date] = frozenset({
     date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
@@ -262,22 +276,57 @@ _MARKET_HOLIDAYS: frozenset[date] = frozenset({
 })
 
 
+#: Half-days: the regular session ends at 13:00 ET, not 16:00. Before this
+#: was modelled, a 14:00 ET observation on one of these dates classified as
+#: REGULAR_HOURS while the market was shut — a review finding, and exactly
+#: the kind of quiet wrongness a static table produces as it ages.
+_EARLY_CLOSE_DAYS: frozenset[date] = frozenset({
+    date(2026, 11, 27),   # day after Thanksgiving
+    date(2026, 12, 24),   # Christmas Eve
+    date(2027, 11, 26),   # day after Thanksgiving
+})
+
+
+def calendar_metadata() -> dict[str, str]:
+    """Provenance of every `market_session` value this runtime produces."""
+    return {
+        "calendar_source": CALENDAR_SOURCE,
+        "calendar_supported_range": CALENDAR_SUPPORTED_RANGE,
+        "calendar_limitation": CALENDAR_LIMITATION,
+        "calendar_expires_after": CALENDAR_EXPIRES_AFTER.isoformat(),
+    }
+
+
 def classify_market_session(moment: datetime) -> MarketSession:
     """Exchange-calendar equivalent. No broker read, no market-data tool.
 
-    Deliberately conservative: an uncovered year, an early-close day this
-    table does not model, or a naive timestamp yields UNKNOWN. The caller
-    treats UNKNOWN as unusable, so an unmodelled day cannot be mistaken for
-    an open one.
+    Deliberately conservative: an uncovered year, a date past the table's
+    expiry, or a naive timestamp yields UNKNOWN. The caller treats UNKNOWN as
+    unusable, so an unmodelled day cannot be mistaken for an open one.
+
+    Half-days end the regular session at 13:00 ET. After an early close this
+    reports CLOSED rather than EXTENDED_HOURS: post-close extended trading
+    does exist on those days, but this table does not model its bounds, and
+    reporting a session it cannot bound would be the same class of error the
+    early-close gap was.
     """
     if not isinstance(moment, datetime) or moment.tzinfo is None:
         return MarketSession.UNKNOWN
     eastern = moment.astimezone(EASTERN)
     if eastern.year not in _COVERED_CALENDAR_YEARS:
         return MarketSession.UNKNOWN
-    if eastern.weekday() >= 5 or eastern.date() in _MARKET_HOLIDAYS:
+    day = eastern.date()
+    if day > CALENDAR_EXPIRES_AFTER:
+        return MarketSession.UNKNOWN
+    if eastern.weekday() >= 5 or day in _MARKET_HOLIDAYS:
         return MarketSession.CLOSED
     clock = eastern.timetz().replace(tzinfo=None)
+    if day in _EARLY_CLOSE_DAYS:
+        if _REGULAR_OPEN <= clock < _EARLY_REGULAR_CLOSE:
+            return MarketSession.REGULAR_HOURS
+        if _EXTENDED_OPEN <= clock < _REGULAR_OPEN:
+            return MarketSession.EXTENDED_HOURS
+        return MarketSession.CLOSED
     if _REGULAR_OPEN <= clock < _REGULAR_CLOSE:
         return MarketSession.REGULAR_HOURS
     if _EXTENDED_OPEN <= clock < _EXTENDED_CLOSE:
@@ -369,31 +418,55 @@ class ReadOnlyBrokerReader(Protocol):
     async def read_orders(self) -> tuple[ObservedOrder, ...]: ...
 
 
-@dataclass
 class RestrictedReadOnlyReader:
     """Wraps one session and can express exactly three calls.
 
-    The wrapped session is held privately and is never handed out. Tool names
-    are module constants, not parameters and not data — there is no code path
-    where a caller-supplied or response-supplied string becomes a tool name.
-    Each permitted read may be performed at most `maximum_calls_per_tool`
-    times, so even a looping caller cannot amplify the surface.
+    The wrapped session is held in `_session` and is **never exposed as a
+    public attribute**. This is deliberate and was a review finding: while
+    nothing in this runtime reaches through a reader to the session, a public
+    handle would put a generic write-capable call one attribute access away
+    from any future caller. A private name does not stop a determined caller
+    — nothing in Python does — but it removes the accidental path and makes
+    the intent unambiguous.
+
+    It is a plain class rather than a dataclass so the private field cannot be
+    reintroduced as a public init parameter or leak through `repr`.
+
+    Tool names are module constants, not parameters and not data — there is no
+    code path where a caller-supplied or response-supplied string becomes a
+    tool name. Each permitted read may be performed at most
+    `maximum_calls_per_tool` times, so even a looping caller cannot amplify
+    the surface.
     """
 
-    session: Any
-    account_number: str
-    maximum_calls_per_tool: int = 1
-    call_counts: dict[str, int] = field(default_factory=dict)
+    __slots__ = ("_session", "account_number", "maximum_calls_per_tool", "call_counts")
 
-    def __post_init__(self) -> None:
-        if self.session is None or not callable(getattr(self.session, "call_tool", None)):
+    def __init__(
+        self,
+        session: Any,
+        account_number: str,
+        maximum_calls_per_tool: int = 1,
+        call_counts: dict[str, int] | None = None,
+    ) -> None:
+        if session is None or not callable(getattr(session, "call_tool", None)):
             raise ReadOnlyRuntimeError("one injected session is required")
-        if not isinstance(self.account_number, str) or not self.account_number.strip():
+        if not isinstance(account_number, str) or not account_number.strip():
             raise ReadOnlyRuntimeError("one account identity is required")
-        if not isinstance(self.maximum_calls_per_tool, int) or isinstance(
-            self.maximum_calls_per_tool, bool
-        ) or self.maximum_calls_per_tool < 1:
+        if not isinstance(maximum_calls_per_tool, int) or isinstance(
+            maximum_calls_per_tool, bool
+        ) or maximum_calls_per_tool < 1:
             raise ReadOnlyRuntimeError("per-tool call ceiling must be a positive int")
+        self._session = session
+        self.account_number = account_number
+        self.maximum_calls_per_tool = maximum_calls_per_tool
+        self.call_counts: dict[str, int] = dict(call_counts or {})
+
+    def __repr__(self) -> str:
+        # Never renders the session: a repr lands in logs and tracebacks.
+        return (
+            f"RestrictedReadOnlyReader(reads={sorted(self.call_counts)}, "
+            f"maximum_calls_per_tool={self.maximum_calls_per_tool})"
+        )
 
     @property
     def write_attempts(self) -> int:
@@ -419,7 +492,7 @@ class RestrictedReadOnlyReader:
         # below are the only call sites in this file.
         self._reserve(_ACCOUNTS_TOOL)
         try:
-            result = await self.session.call_tool(_ACCOUNTS_TOOL, {})
+            result = await self._session.call_tool(_ACCOUNTS_TOOL, {})
         except Exception as exc:
             raise ReadOnlyRuntimeError("broker read failed") from exc
         payload = self._settle(result)
@@ -452,7 +525,7 @@ class RestrictedReadOnlyReader:
     async def read_positions(self) -> tuple[ObservedPosition, ...]:
         self._reserve(_POSITIONS_TOOL)
         try:
-            result = await self.session.call_tool(
+            result = await self._session.call_tool(
                 _POSITIONS_TOOL, {"account_number": self.account_number}
             )
         except Exception as exc:
@@ -473,7 +546,7 @@ class RestrictedReadOnlyReader:
     async def read_orders(self) -> tuple[ObservedOrder, ...]:
         self._reserve(_ORDERS_TOOL)
         try:
-            result = await self.session.call_tool(
+            result = await self._session.call_tool(
                 _ORDERS_TOOL, {"account_number": self.account_number}
             )
         except Exception as exc:
@@ -778,6 +851,10 @@ class CheckpointOutcome(str, Enum):
     PRECONDITION_REJECTED = "PRECONDITION_REJECTED"
     #: The runtime refused an operation outside the read-only surface.
     CAPABILITY_VIOLATION = "CAPABILITY_VIOLATION"
+    #: The broker session could not be opened, or did not close cleanly.
+    #: Distinct from BROKER_READ_UNAVAILABLE on purpose: "no session" and
+    #: "session but the read failed" call for different operator action.
+    SESSION_UNAVAILABLE = "SESSION_UNAVAILABLE"
     #: An internal invariant failed. Never interpreted as a safe result.
     INTERNAL_INVARIANT_FAILURE = "INTERNAL_INVARIANT_FAILURE"
 
@@ -809,6 +886,42 @@ APPROVAL_INPUTS: frozenset[str] = frozenset({"y", "Y"})
 
 def is_approval(supplied: Any) -> bool:
     return isinstance(supplied, str) and supplied in APPROVAL_INPUTS
+
+
+@dataclass
+class PreResolvedAuthorization:
+    """Replays decisions that were already made, once each.
+
+    This exists so a launcher can obtain interactive approval **before**
+    opening a broker session. Previously the session was opened first and the
+    operator was prompted inside it, which meant a decline had already
+    authenticated a session it never used — avoidable, and a review finding.
+
+    It records decisions; it cannot manufacture one. A stage with no recorded
+    decision declines.
+    """
+
+    decisions: Mapping[str, bool]
+    _used: set[str] = field(default_factory=set, init=False)
+
+    def __post_init__(self) -> None:
+        for stage in self.decisions:
+            if stage not in AUTHORIZATION_STAGES:
+                raise ReadOnlyRuntimeError("authorization stage is invalid")
+
+    @property
+    def all_approved(self) -> bool:
+        return all(
+            self.decisions.get(stage) is True for stage in AUTHORIZATION_STAGES
+        )
+
+    def __call__(self, stage: str) -> bool:
+        if stage not in AUTHORIZATION_STAGES:
+            raise ReadOnlyRuntimeError("authorization stage is invalid")
+        if stage in self._used:
+            raise ReadOnlyRuntimeError("authorization is not reusable")
+        self._used.add(stage)
+        return self.decisions.get(stage) is True
 
 
 @dataclass
@@ -885,6 +998,12 @@ class ReadOnlyObservationEvidence:
     proposed_provenance: str = "NONE"
     read_call_counts: dict[str, int] = field(default_factory=dict)
     approved_active_protection_state_count: int = 0
+    #: Provenance of `snapshot_facts["market_session"]`, so a reviewer never
+    #: has to infer where a session classification came from.
+    calendar_source: str = CALENDAR_SOURCE
+    calendar_supported_range: str = CALENDAR_SUPPORTED_RANGE
+    calendar_limitation: str = CALENDAR_LIMITATION
+    calendar_expires_after: str = CALENDAR_EXPIRES_AFTER.isoformat()
     write_counters: dict[str, int] = field(default_factory=lambda: {
         "placement_writes": 0,
         "cancellation_writes": 0,
@@ -892,6 +1011,28 @@ class ReadOnlyObservationEvidence:
         "strategy_activations": 0,
     })
     operator_action_required: str = "NONE"
+
+
+#: The value recorded when the broker names a state this repository has never
+#: seen. Every other evidence field is a fixed enum, count bucket, or flag;
+#: without this, an arbitrary broker string would be the one free-form channel
+#: into a persisted file a human is expected to read and act on.
+UNRECOGNIZED_ORDER_STATE = "UNRECOGNIZED"
+
+
+def recordable_order_state(state: str | None) -> str:
+    """Constrain an observed state to the known vocabulary, or say so.
+
+    Approved states are folded in dynamically so that promoting a state later
+    cannot make it unrecordable here.
+    """
+    if not isinstance(state, str) or not state:
+        return "NONE"
+    normalized = normalize_state(state)
+    permitted = KNOWN_ORDER_STATES | approved_active_protection_states()
+    if normalized in permitted:
+        return normalized
+    return UNRECOGNIZED_ORDER_STATE
 
 
 #: The counters that must be zero for a run to be a read-only run at all.
@@ -1062,6 +1203,50 @@ def _propose_provenance(result: AcquisitionResult, outcome: CheckpointOutcome) -
     return provenance.value
 
 
+def record_session_failure(
+    request: ReadOnlyCheckpointRequest,
+    *,
+    phase: str,
+    existing: CheckpointResult | None = None,
+) -> CheckpointResult:
+    """Turn a session-open or session-close failure into a recorded outcome.
+
+    No traceback, no transport text, no exception message — only the phase,
+    which is one of two fixed strings. Evidence is written when the run
+    identity is still unused (a failed open). After a completed checkpoint the
+    evidence file already exists and is immutable by design, so a close
+    failure keeps the observation that was recorded and reports the failure
+    through the outcome and exit code instead of rewriting history.
+    """
+    if phase not in {"open", "close"}:
+        raise ReadOnlyRuntimeError("session failure phase is invalid")
+    action = "INVESTIGATE_SESSION_OPEN" if phase == "open" else "INVESTIGATE_SESSION_CLOSE"
+
+    if existing is not None:
+        existing.evidence.operator_action_required = action
+        return CheckpointResult(
+            CheckpointOutcome.SESSION_UNAVAILABLE,
+            existing.evidence,
+            existing.evidence_path,
+        )
+
+    evidence = ReadOnlyObservationEvidence(run_id=str(request.run_id))
+    evidence.outcome = CheckpointOutcome.SESSION_UNAVAILABLE.value
+    evidence.operator_action_required = action
+    evidence.approved_active_protection_state_count = len(
+        approved_active_protection_states()
+    )
+    try:
+        store = ReadOnlyEvidenceStore(request.evidence_root, request.run_id)
+        store.start()
+        path = store.finalize(evidence)
+    except Exception:
+        # A run identity already spent, or an unwritable evidence root. The
+        # outcome still stands; it simply has nowhere durable to live.
+        return CheckpointResult(CheckpointOutcome.SESSION_UNAVAILABLE, evidence, None)
+    return CheckpointResult(CheckpointOutcome.SESSION_UNAVAILABLE, evidence, path)
+
+
 async def run_read_only_observation_checkpoint(
     request: ReadOnlyCheckpointRequest,
     *,
@@ -1157,8 +1342,8 @@ async def run_read_only_observation_checkpoint(
     evidence.snapshot_facts = result.snapshot.sanitized_facts()
     evidence.read_call_counts = counts
     if outcome is CheckpointOutcome.OBSERVATION_RECORDED:
-        evidence.observed_protection_state = (
-            result.observed_protection_state or "NONE"
+        evidence.observed_protection_state = recordable_order_state(
+            result.observed_protection_state
         )
     try:
         evidence.proposed_provenance = _propose_provenance(result, outcome)
@@ -1196,8 +1381,17 @@ __all__ = [
     "ObservedAccount",
     "ObservedOrder",
     "ObservedPosition",
+    "CALENDAR_EXPIRES_AFTER",
+    "CALENDAR_LIMITATION",
+    "CALENDAR_SOURCE",
+    "CALENDAR_SUPPORTED_RANGE",
     "PERMITTED_READ_TOOLS",
     "PROHIBITED_CAPABILITIES",
+    "PreResolvedAuthorization",
+    "UNRECOGNIZED_ORDER_STATE",
+    "calendar_metadata",
+    "record_session_failure",
+    "recordable_order_state",
     "PROHIBITED_EVIDENCE_TERMS",
     "READ_ONLY_AUTHORIZATION_FLAG",
     "REQUIRED_ZERO_COUNTERS",

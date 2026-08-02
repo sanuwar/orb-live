@@ -676,7 +676,11 @@ def test_the_launcher_builds_a_manifest_authorization(tmp_path, monkeypatch):
     )
     launcher.assert_real_read_preconditions(namespace)
     provider = launcher.build_authorization(namespace, now=NOW)
-    assert isinstance(provider, ManifestAuthorization)
+    # Resolved up front so a manifest failure costs zero session opens.
+    from src.read_only_observation_runtime import PreResolvedAuthorization
+
+    assert isinstance(provider, PreResolvedAuthorization)
+    assert provider.all_approved is True
     assert provider(ACKNOWLEDGMENT_STAGE) is True
 
 

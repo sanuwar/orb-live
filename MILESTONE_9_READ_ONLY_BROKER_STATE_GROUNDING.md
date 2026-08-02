@@ -196,8 +196,8 @@ because it is about to write anyway.
   grounding active protection does not need. `decide_broker_state` does not
   gate on it, and `UNKNOWN` is never treated as sufficient.
 - **Market session.** Taken from a local exchange-calendar equivalent, not a
-  broker or market-data read. A year outside the modelled table, an unmodelled
-  early close, or a naive timestamp yields `UNKNOWN` — never "probably open".
+  broker or market-data read. A year outside the modelled table, a date past
+  its expiry, or a naive timestamp yields `UNKNOWN` — never "probably open".
 
 This closes step 6 of the definition of done for position, order, and
 market-session acquisition, and closes it *honestly* for buying power: the
@@ -230,13 +230,69 @@ become `CAPABILITY_VIOLATION` or `INTERNAL_INVARIANT_FAILURE`. Neither may be
 quietly reported as "the broker was unavailable" — that label reads as a
 normal, expected condition, and these are not.
 
-### Eleven outcomes, two of which are completions
+## Corrections from independent review
+
+Six findings were raised against the first two commits and are now fixed. Each
+is pinned by focused regression tests.
+
+**F1 — the session handle was public.** `RestrictedReadOnlyReader` held
+`session` as a public dataclass field, so a generic write-capable call was one
+attribute access away from any future caller, and the docstring's claim that
+it was "held privately" was simply false. It is now a plain class with
+`__slots__` and a private `_session`; there is no `__dict__` to attach a
+public alias to, and `__repr__` renders neither the session nor the account.
+
+**F3 — early closes were classified as regular sessions.** At 14:00 ET on a
+half-day the calendar returned `REGULAR_HOURS` while the market was shut.
+`2026-11-27`, `2026-12-24`, and `2027-11-26` now close the regular session at
+13:00 ET. After an early close the result is `CLOSED` rather than
+`EXTENDED_HOURS`: post-close extended trading does exist on those days, but
+this table cannot bound it, and reporting a session it cannot bound would
+repeat the original error. A test sweeps every day in 2026–2027 and asserts no
+closed day ever reads as open. The table also now **expires**: nothing after
+`2027-12-31` classifies as anything but `UNKNOWN`.
+
+**F4 — the limitation was neither displayed nor recorded.** Evidence now
+carries `calendar_source`, `calendar_supported_range`, `calendar_limitation`,
+and `calendar_expires_after`, and the launcher prints all four plus an
+explicit note that there is no authoritative feed. A reviewer never has to
+infer where a `market_session` value came from.
+
+**F5 — a declined operator had already opened a session.** The session was
+opened first and the operator prompted inside it, so a decline authenticated a
+session it never used. Authorization is now fully resolved *before* any
+transport exists, in both modes, via `PreResolvedAuthorization`. A test drives
+the declined path with a session factory that raises on entry and asserts it
+was entered **zero** times.
+
+**F6 — session open and close failures escaped as tracebacks.**
+`asyncio.run(...)` was unwrapped, so a transport failure printed a raw
+traceback, produced no evidence, and returned no controlled code. Both phases
+now yield the `SESSION_UNAVAILABLE` outcome with
+`INVESTIGATE_SESSION_OPEN`/`INVESTIGATE_SESSION_CLOSE`, a nonzero exit, and
+privacy-safe evidence where the run identity is still unused. Tests raise from
+the fake transport with a secret embedded in the message and assert none of it
+reaches evidence or disk. A close failure keeps the observation already
+written rather than rewriting immutable history.
+
+**F7 — an unknown broker state was persisted verbatim.**
+`observed_protection_state` was the one evidence field that accepted arbitrary
+broker text. It is now constrained to `KNOWN_ORDER_STATES` plus the approved
+set, with `UNRECOGNIZED` recorded for anything else. Known states are still
+recorded verbatim — that is the point of the checkpoint — and the approved set
+is folded in dynamically so a later promotion cannot make a state unrecordable.
+
+### Twelve outcomes, two of which are completions
 
 `OBSERVATION_RECORDED` · `NO_PROTECTIVE_ORDER_OBSERVED` ·
 `PROTECTION_AMBIGUOUS` · `ATTRIBUTION_AMBIGUOUS` · `BROKER_READ_UNAVAILABLE` ·
 `SNAPSHOT_NOT_FRESH` · `DECLINED_BY_OPERATOR` · `AUTHORIZATION_REJECTED` ·
-`PRECONDITION_REJECTED` · `CAPABILITY_VIOLATION` ·
+`PRECONDITION_REJECTED` · `CAPABILITY_VIOLATION` · `SESSION_UNAVAILABLE` ·
 `INTERNAL_INVARIANT_FAILURE`
+
+`SESSION_UNAVAILABLE` is kept distinct from `BROKER_READ_UNAVAILABLE` on
+purpose: "no session" and "a session, but the read failed" call for different
+operator action.
 
 Classification order is the same safety property as in the decision model:
 availability → coherence → attribution → interpretation. Reading a protection
