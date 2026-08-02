@@ -122,19 +122,33 @@ approved to begin before its predecessor is complete and reviewed.
 
 The offline foundation — provenance framework, sanitized snapshot model,
 fail-closed decision API, freshness policy, and the read-only checkpoint design
-— is implemented in `src/read_only_broker_state.py`. **No state has been
-approved for active protection, and the attended read-only checkpoint has not
-been executed.** See
+— is implemented in `src/read_only_broker_state.py`. The real observation
+runtime that produces a snapshot from an actual broker, its
+capability-restricted reader, and the tracked attended launcher are in
+`src/read_only_observation_runtime.py` and
+`read_only_observation_checkpoint_launcher.py`.
+
+**No state has been approved for active protection, and the attended read-only
+checkpoint has not been executed against a real account.** Every test is
+fake-only. See
 [`MILESTONE_9_READ_ONLY_BROKER_STATE_GROUNDING.md`](MILESTONE_9_READ_ONLY_BROKER_STATE_GROUNDING.md)
 for the definition of done.
 
 - Ground active-protection status using **non-order broker reads** only.
 - Document the actual Robinhood order states observed, rather than inferring
   them from the advertised schema.
-- **Keep all writes disabled.**
+- **Keep all writes disabled.** All 49 advertised broker operations are
+  classified; only 3 may be invoked, and an operation whose write capability is
+  merely *ambiguous* is refused as strictly as a proven write.
 - Establish reliable position, order, buying-power, and market-session
-  snapshots.
+  snapshots. Buying power is closed **honestly**: no permitted read carries a
+  balance, so cash availability reports `UNKNOWN` rather than widening the read
+  surface for a value the decision does not use.
 - Fail closed on unknown or conflicting states.
+
+Remaining: an operator must execute the attended checkpoint and review what it
+records. That is not software work, and **approving zero states is a legitimate
+result.**
 
 *Why first:* every later milestone depends on being able to assert that a
 protective stop is genuinely armed. Today that assertion is unavailable — see

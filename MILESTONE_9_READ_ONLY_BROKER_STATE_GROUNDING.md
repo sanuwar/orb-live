@@ -1,8 +1,8 @@
 # Milestone 9 — Read-Only Broker-State Grounding
 
-**Status: IN PROGRESS.** This is the offline foundation. The attended
-read-only observation checkpoint is designed here but **not executed**, and no
-broker state has been approved for active protection.
+**Status: IN PROGRESS.** The offline foundation and the real read-only
+observation runtime are both implemented. The attended checkpoint **has not
+been executed**, and no broker state has been approved for active protection.
 
 ## Why active protection cannot be inferred from schema
 
@@ -157,23 +157,146 @@ Asserted, not claimed:
 - `decide_broker_state` contains no I/O call when inspected via its AST;
 - the plan object refuses every write-shaped configuration.
 
+## The real observation runtime
+
+`src/read_only_broker_state.py` defines what a snapshot *means*.
+`src/read_only_observation_runtime.py` is what actually produces one from a
+real broker, and it is deliberately the narrowest thing that can.
+
+### The capability surface is a partition, not a filter
+
+All 49 advertised broker operations are classified in
+`MCP_TOOL_CLASSIFICATION`. A tool **absent** from the mapping is refused, so a
+newly advertised operation cannot be reached before it is reviewed.
+
+| Capability | Count | May be invoked? |
+| --- | --- | --- |
+| `READ_ONLY_PERMITTED` | 3 | Yes |
+| `UNNECESSARY` | 27 | No |
+| `AMBIGUOUS_CAPABILITY` | 4 | No |
+| `WRITE_CAPABLE` | 15 | No |
+
+Ambiguity is grouped with proven writes on purpose. "We could not establish
+that this is read-only" and "this writes" must produce identical behaviour,
+because the cost of being wrong is identical.
+
+`review_equity_order` is the notable case. Attended commissioning permits it;
+this checkpoint does not. Its description says non-committing, but this
+repository has never proven it leaves no broker-side artifact, and a checkpoint
+whose entire claim is *zero writes* cannot rest on a description. The
+divergence is deliberate and pinned by test: the write path accepts review
+because it is about to write anyway.
+
+### Two things are deliberately not read
+
+- **Cash.** `get_accounts` carries no cash, balance, or buying-power field —
+  its record is identity and status only. `get_portfolio` would carry one and
+  is classified `UNNECESSARY`. So cash availability is reported `UNKNOWN`,
+  honestly, rather than sourced by widening the surface for a value that
+  grounding active protection does not need. `decide_broker_state` does not
+  gate on it, and `UNKNOWN` is never treated as sufficient.
+- **Market session.** Taken from a local exchange-calendar equivalent, not a
+  broker or market-data read. A year outside the modelled table, an unmodelled
+  early close, or a naive timestamp yields `UNKNOWN` — never "probably open".
+
+This closes step 6 of the definition of done for position, order, and
+market-session acquisition, and closes it *honestly* for buying power: the
+snapshot reports that it does not know, instead of guessing or reaching
+further than a read-only checkpoint should.
+
+### Zero writes, asserted structurally
+
+- The reader exposes exactly `read_accounts`, `read_positions`, `read_orders`
+  — no placement, cancellation, replacement, strategy activation, or generic
+  `call_tool` passthrough to implement or misuse.
+- The module contains **exactly three** `call_tool` sites, each naming a
+  module-level constant that resolves to a permitted read at parse time. There
+  is no path where a caller-supplied or response-supplied string becomes a
+  tool name. The repository-wide call-site guard sees all three as `literal`.
+- The module imports nothing write-capable — no adapter, client, session, MCP,
+  or orchestrator — so there is no write-capable object in reach to fall back
+  to. Asserted by parsing the imports.
+- Write-tool names appear in the file **only** as classification literals, and
+  a test proves the textual count matches the denylist count exactly.
+- Evidence carries `placement_writes`, `cancellation_writes`,
+  `replacement_writes`, and `strategy_activations`, all required to be exactly
+  zero, and refuses to persist a recorded call to a non-permitted tool.
+
+### Failure is never relabelled
+
+A *recognized* read failure degrades one component to `UNAVAILABLE`. A
+capability violation and an unrecognized exception both escape instead, and
+become `CAPABILITY_VIOLATION` or `INTERNAL_INVARIANT_FAILURE`. Neither may be
+quietly reported as "the broker was unavailable" — that label reads as a
+normal, expected condition, and these are not.
+
+### Eleven outcomes, two of which are completions
+
+`OBSERVATION_RECORDED` · `NO_PROTECTIVE_ORDER_OBSERVED` ·
+`PROTECTION_AMBIGUOUS` · `ATTRIBUTION_AMBIGUOUS` · `BROKER_READ_UNAVAILABLE` ·
+`SNAPSHOT_NOT_FRESH` · `DECLINED_BY_OPERATOR` · `AUTHORIZATION_REJECTED` ·
+`PRECONDITION_REJECTED` · `CAPABILITY_VIOLATION` ·
+`INTERNAL_INVARIANT_FAILURE`
+
+Classification order is the same safety property as in the decision model:
+availability → coherence → attribution → interpretation. Reading a protection
+state out of an unavailable, stale, or unattributable snapshot would be worse
+than reporting nothing, because it would look like a result.
+
+Attribution is by exact normalized symbol. Nothing is inferred from ordering,
+recency, quantity coincidence, or "the only order there is" — an
+unattributable observation is reported ambiguous rather than assigned to the
+symbol we happened to be asking about. An unrecognized order state counts as
+*live*, not harmless.
+
+### Neither completion approves anything
+
+`OBSERVATION_RECORDED` records a state and proposes at most
+`READ_ONLY_LIVE_OBSERVATION`. The runner raises rather than emit
+`APPROVED_FOR_ACTIVE_PROTECTION`, and a test asserts that running a full clean
+checkpoint against an existing `confirmed` stop leaves
+`ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` empty. Recording an observation
+is not approving it.
+
+### The launcher
+
+`read_only_observation_checkpoint_launcher.py` is **tracked**, not an
+untracked day-of wrapper. A commissioning wrapper carries only a date and a
+Run ID; this carries reviewed safety behaviour, so it belongs in review.
+
+Execution requires all of: the
+`--i-understand-this-performs-real-broker-reads` acknowledgment,
+`ENABLE_MILESTONE_9_READ_ONLY_OBSERVATION=1`, the authorization flag, an
+unused Run ID, and two hidden `y/N` answers. Only exact `y` or `Y` approves —
+empty, `yes`, `Y `, EOF, and an unreadable prompt all decline. Each stage may
+be asked once; a second request is a rejection, not a re-prompt.
+
+Both prompts are answered **before any read occurs**, pinned by a test that
+asserts the reader was never called on decline. The session object never
+leaves the launcher's session scope: the runtime receives only the restricted
+reader. The session factory is imported inside the function so that importing
+the launcher — which tests do — never reaches transport code.
+
 ## Definition of done for Milestone 9
 
-This offline PR delivers the framework. Milestone 9 is complete only when **all**
-of the following hold:
+Milestone 9 is complete only when **all** of the following hold:
 
-1. This foundation is reviewed and merged. *(this PR)*
+1. ~~The offline foundation is reviewed and merged.~~ **Done** — PR #43.
 2. A reviewed attended read-only checkpoint executes against a real account,
-   performing only the permitted reads and zero writes.
+   performing only the permitted reads and zero writes. **Not done.** The
+   runtime and launcher exist and are tested against fakes; **nothing has been
+   executed against a real account.**
 3. Its sanitized observations are recorded, including `NOT_OBSERVED` if no safe
-   protective order existed.
+   protective order existed. **Not done** — follows from step 2.
 4. A human reviews those observations and explicitly approves zero or more
-   states, promoting them to `APPROVED_FOR_ACTIVE_PROTECTION`.
+   states, promoting them to `APPROVED_FOR_ACTIVE_PROTECTION`. **Not done.**
 5. `ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` is updated to match, with the
-   consistency test still passing.
-6. Reliable position, order, buying-power, and market-session snapshot
-   acquisition is wired to real reads.
+   consistency test still passing. **Not done** — the set is still empty.
+6. ~~Reliable position, order, buying-power, and market-session snapshot
+   acquisition is wired to real reads.~~ **Done**, with buying power closed
+   honestly as `UNKNOWN` rather than by widening the read surface — see above.
 
-Steps 2 through 6 are **not** in this PR. Approving zero states remains a
-legitimate outcome: if the observations do not justify approval, the mapping
-stays empty and unattended operation stays blocked on it.
+Steps 2 through 5 require an operator at a terminal and are **not** software
+work. Approving zero states remains a legitimate outcome: if the observations
+do not justify approval, the mapping stays empty and unattended operation
+stays blocked on it.
