@@ -249,6 +249,7 @@ def test_the_first_alert_of_a_category_is_sent():
 def test_a_repeat_within_the_cooldown_is_suppressed():
     policy = AlertPolicy(cooldown_seconds=300.0)
     assert policy.should_send(warning(), current_monotonic=0.0) is True
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
     assert policy.should_send(warning(), current_monotonic=10.0) is False
     assert policy.should_send(warning(), current_monotonic=299.9) is False
 
@@ -256,6 +257,7 @@ def test_a_repeat_within_the_cooldown_is_suppressed():
 def test_a_repeat_after_the_cooldown_is_sent():
     policy = AlertPolicy(cooldown_seconds=300.0)
     policy.should_send(warning(), current_monotonic=0.0)
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
     assert policy.should_send(warning(), current_monotonic=300.0) is True
 
 
@@ -263,19 +265,23 @@ def test_an_escalation_is_never_suppressed():
     """A warning becoming critical is new information, however recent."""
     policy = AlertPolicy(cooldown_seconds=3600.0)
     assert policy.should_send(warning(), current_monotonic=0.0) is True
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
     assert policy.should_send(critical(), current_monotonic=1.0) is True
 
 
 def test_a_de_escalation_is_suppressed_like_any_repeat():
     policy = AlertPolicy(cooldown_seconds=3600.0)
     policy.should_send(critical(), current_monotonic=0.0)
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
     assert policy.should_send(warning(), current_monotonic=1.0) is False
 
 
 def test_a_second_escalation_to_the_same_severity_is_suppressed():
     policy = AlertPolicy(cooldown_seconds=3600.0)
     policy.should_send(warning(), current_monotonic=0.0)
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
     assert policy.should_send(critical(), current_monotonic=1.0) is True
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
     assert policy.should_send(critical(), current_monotonic=2.0) is False
 
 
@@ -294,6 +300,7 @@ def test_suppression_is_keyed_by_category_not_by_facts():
     second = Alert(AlertCategory.BROKER_DATA_STALE, AlertSeverity.WARNING,
                    {"component": "risk", "count_bucket": "many"})
     assert policy.should_send(first, current_monotonic=0.0) is True
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
     assert policy.should_send(second, current_monotonic=1.0) is False
 
 
@@ -405,3 +412,111 @@ def test_alert_facts_survive_the_commissioning_privacy_sanitizer():
     for key, values in ALLOWED_ALERT_FACTS.items():
         for value in values:
             validate_sanitized_evidence({key: value})
+
+
+# --------------------------------------------------------------------------
+# 7. Delivery confirmation (review finding).
+# --------------------------------------------------------------------------
+
+
+def test_an_unconfirmed_send_is_always_resent():
+    """Review finding: a critical whose delivery failed used to go silent.
+
+    Suppression is only safe if the thing being suppressed actually arrived.
+    """
+    policy = AlertPolicy(cooldown_seconds=3600.0)
+    alert = Alert(AlertCategory.KILL_SWITCH_ENGAGED, AlertSeverity.CRITICAL, GOOD_FACTS)
+    assert policy.should_send(alert, current_monotonic=0.0) is True
+    # Delivery failed; nobody confirms.
+    assert policy.should_send(alert, current_monotonic=1.0) is True
+    assert policy.should_send(alert, current_monotonic=2.0) is True
+
+
+def test_an_explicit_delivery_failure_also_forces_a_resend():
+    policy = AlertPolicy(cooldown_seconds=3600.0)
+    policy.should_send(warning(), current_monotonic=0.0)
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
+    assert policy.should_send(warning(), current_monotonic=1.0) is False
+    policy.record_delivery_failure(AlertCategory.BROKER_DATA_STALE)
+    assert policy.should_send(warning(), current_monotonic=2.0) is True
+
+
+def test_silence_is_never_evidence_of_health():
+    """A fresh send is undelivered until confirmed, and says so."""
+    policy = AlertPolicy(cooldown_seconds=3600.0)
+    assert policy.all_delivered is True          # nothing sent yet
+    policy.should_send(warning(), current_monotonic=0.0)
+    assert policy.all_delivered is False
+    assert policy.undelivered_categories == (AlertCategory.BROKER_DATA_STALE,)
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
+    assert policy.all_delivered is True
+    assert policy.undelivered_categories == ()
+
+
+def test_undelivered_categories_are_reported_sorted_and_complete():
+    policy = AlertPolicy(cooldown_seconds=3600.0)
+    policy.should_send(warning(AlertCategory.RECOVERY_INCONSISTENT), current_monotonic=0.0)
+    policy.should_send(warning(AlertCategory.BROKER_DATA_STALE), current_monotonic=0.0)
+    assert policy.undelivered_categories == (
+        AlertCategory.BROKER_DATA_STALE,
+        AlertCategory.RECOVERY_INCONSISTENT,
+    )
+
+
+def test_a_resend_after_failure_is_itself_unconfirmed():
+    """The retry must not be assumed to have worked either."""
+    policy = AlertPolicy(cooldown_seconds=3600.0)
+    policy.should_send(warning(), current_monotonic=0.0)
+    policy.should_send(warning(), current_monotonic=1.0)
+    assert policy.all_delivered is False
+
+
+def test_confirming_a_category_that_was_never_sent_is_refused():
+    policy = AlertPolicy()
+    with pytest.raises(MonitoringError):
+        policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
+    with pytest.raises(MonitoringError):
+        policy.record_delivery_failure(AlertCategory.BROKER_DATA_STALE)
+
+
+@pytest.mark.parametrize("bad", ["BROKER_DATA_STALE", None, 3])
+def test_delivery_bookkeeping_refuses_a_non_category(bad):
+    policy = AlertPolicy()
+    with pytest.raises(MonitoringError):
+        policy.confirm_delivery(bad)
+    with pytest.raises(MonitoringError):
+        policy.record_delivery_failure(bad)
+
+
+def test_confirmation_is_per_category():
+    policy = AlertPolicy(cooldown_seconds=3600.0)
+    policy.should_send(warning(AlertCategory.BROKER_DATA_STALE), current_monotonic=0.0)
+    policy.should_send(warning(AlertCategory.RECOVERY_INCONSISTENT), current_monotonic=0.0)
+    policy.confirm_delivery(AlertCategory.BROKER_DATA_STALE)
+    assert policy.should_send(
+        warning(AlertCategory.BROKER_DATA_STALE), current_monotonic=1.0
+    ) is False
+    assert policy.should_send(
+        warning(AlertCategory.RECOVERY_INCONSISTENT), current_monotonic=1.0
+    ) is True
+
+
+def test_no_alert_carries_a_permission_field():
+    """Severity conveys urgency, never authority."""
+    names = {f.name for f in dataclasses.fields(Alert)}
+    assert not any("permit" in n or "author" in n or "allow" in n for n in names)
+    for category in AlertCategory:
+        severity = (
+            AlertSeverity.CRITICAL if category in ALWAYS_ESCALATING
+            else AlertSeverity.INFO
+        )
+        alert = Alert(category, severity, GOOD_FACTS)
+        assert not hasattr(alert, "permits_automated_action")
+        assert not hasattr(alert, "authorizes")
+
+
+def test_monitoring_never_reads_credentials_or_production_data():
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    for token in ("local.yaml", "data/", ".rh_tokens", "token", "credential",
+                  "password", "secret", "environ", "getenv"):
+        assert token not in source, token

@@ -212,17 +212,35 @@ def assess_heartbeat(
 # --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _SendRecord:
+    sent_monotonic: float
+    severity: AlertSeverity
+    delivered: bool
+
+
 @dataclass
 class AlertPolicy:
-    """Suppresses repeats, never escalations.
+    """Suppresses repeats, never escalations, and never unconfirmed sends.
 
     Keyed by category rather than by rendered text, so a condition that
     reports slightly different facts each time still counts as the same
     condition — which is precisely the flapping case that floods a channel.
+
+    Suppression is only safe if the thing being suppressed actually arrived.
+    An earlier version assumed it had, which meant a critical alert whose
+    delivery failed was suppressed for the whole cooldown and the operator
+    never learned. **A send is treated as undelivered until
+    `confirm_delivery` says otherwise**, and an undelivered category is
+    always resent. Silence is not evidence of health.
+
+    That trades some duplicate alerts for never losing one, which is the
+    correct direction: a duplicate is an annoyance, a lost critical is the
+    failure this module exists to prevent.
     """
 
     cooldown_seconds: float = 300.0
-    _last_sent: dict[AlertCategory, tuple[float, AlertSeverity]] = field(
+    _last_sent: dict[AlertCategory, _SendRecord] = field(
         default_factory=dict, init=False
     )
 
@@ -230,24 +248,73 @@ class AlertPolicy:
         if self.cooldown_seconds < 0:
             raise MonitoringError("cooldown must not be negative")
 
+    def _remember(self, alert: Alert, moment: float) -> None:
+        self._last_sent[alert.category] = _SendRecord(moment, alert.severity, False)
+
     def should_send(self, alert: Alert, *, current_monotonic: float) -> bool:
         if not isinstance(alert, Alert):
             raise MonitoringError("an alert is required")
         previous = self._last_sent.get(alert.category)
         if previous is None:
-            self._last_sent[alert.category] = (current_monotonic, alert.severity)
+            self._remember(alert, current_monotonic)
             return True
-        last_time, last_severity = previous
-        escalated = _SEVERITY_RANK[alert.severity] > _SEVERITY_RANK[last_severity]
-        if escalated:
+        if not previous.delivered:
+            # The last one may never have arrived. Suppressing on top of an
+            # unconfirmed send is how a condition goes quiet without being
+            # resolved.
+            self._remember(alert, current_monotonic)
+            return True
+        if _SEVERITY_RANK[alert.severity] > _SEVERITY_RANK[previous.severity]:
             # New information regardless of how recently the lower severity
             # fired. Suppressing this is how a warning hides a critical.
-            self._last_sent[alert.category] = (current_monotonic, alert.severity)
+            self._remember(alert, current_monotonic)
             return True
-        if current_monotonic - last_time >= self.cooldown_seconds:
-            self._last_sent[alert.category] = (current_monotonic, alert.severity)
+        if current_monotonic - previous.sent_monotonic >= self.cooldown_seconds:
+            self._remember(alert, current_monotonic)
             return True
         return False
+
+    def confirm_delivery(self, category: AlertCategory) -> None:
+        """Record that an alert actually reached its destination."""
+        if not isinstance(category, AlertCategory):
+            raise MonitoringError("alert category is invalid")
+        previous = self._last_sent.get(category)
+        if previous is None:
+            raise MonitoringError("no send is outstanding for this category")
+        self._last_sent[category] = _SendRecord(
+            previous.sent_monotonic, previous.severity, True
+        )
+
+    def record_delivery_failure(self, category: AlertCategory) -> None:
+        """Explicitly mark a send as failed. Equivalent to never confirming
+        it, and available so a caller can say so rather than stay silent."""
+        if not isinstance(category, AlertCategory):
+            raise MonitoringError("alert category is invalid")
+        if category not in self._last_sent:
+            raise MonitoringError("no send is outstanding for this category")
+        previous = self._last_sent[category]
+        self._last_sent[category] = _SendRecord(
+            previous.sent_monotonic, previous.severity, False
+        )
+
+    @property
+    def undelivered_categories(self) -> tuple[AlertCategory, ...]:
+        """Categories with an unconfirmed send. Never an empty-means-healthy
+        signal: a caller must treat a non-empty result as unresolved."""
+        return tuple(
+            sorted(
+                (
+                    category
+                    for category, record in self._last_sent.items()
+                    if not record.delivered
+                ),
+                key=lambda item: item.value,
+            )
+        )
+
+    @property
+    def all_delivered(self) -> bool:
+        return not self.undelivered_categories
 
     @property
     def tracked_categories(self) -> int:
