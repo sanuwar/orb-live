@@ -1,8 +1,37 @@
 # Milestone 9 — Read-Only Broker-State Grounding
 
-**Status: IN PROGRESS.** The offline foundation and the real read-only
-observation runtime are both implemented. The attended checkpoint **has not
-been executed**, and no broker state has been approved for active protection.
+**Status: IN PROGRESS — HELD AT AN OPERATOR GATE.** The offline foundation and
+the real read-only observation runtime are both implemented, merged, and
+verified. The attended checkpoint **has not been executed**, and no broker
+state has been approved for active protection.
+
+## ⛔ Operator gate: the real-account checkpoint is ON HOLD
+
+Step 2 of the definition of done is **software-complete and deliberately not
+run**. Until an operator explicitly lifts this hold, nothing may:
+
+- execute the checkpoint against a real account,
+- open a broker session,
+- create or issue an authorization manifest,
+- enable `strategy.enabled`, or
+- create or approve any write capability.
+
+### Pins preserved for the eventual run
+
+| Pin | Value |
+| --- | --- |
+| `checkpoint_implementation_digest` | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` |
+| `approved_main_sha` | **re-derive from `git rev-parse HEAD` at manifest-issue time** |
+
+The digest is the durable pin — it changes only when one of the five files in
+`PINNED_IMPLEMENTATION_FILES` changes, and no held work touches them.
+`approved_main_sha` must equal the *resolved* `HEAD`, so any commit to `main`,
+documentation included, moves it. It was
+`4fc75b6be7419d369c3c72dac046f23842eb3f6d` when PR #44 merged; that value is a
+historical record, **not** a value to copy into a manifest.
+
+Manifests remain **operator-created only**. Nothing in this repository can emit
+one, and a manifest is single-use against a fresh, unretired Run ID.
 
 ## Why active protection cannot be inferred from schema
 
@@ -435,9 +464,10 @@ Milestone 9 is complete only when **all** of the following hold:
 
 1. ~~The offline foundation is reviewed and merged.~~ **Done** — PR #43.
 2. A reviewed attended read-only checkpoint executes against a real account,
-   performing only the permitted reads and zero writes. **Not done.** The
-   runtime and launcher exist and are tested against fakes; **nothing has been
-   executed against a real account.**
+   performing only the permitted reads and zero writes. **Not done — HELD at
+   the operator gate above.** The runtime and launcher exist, are merged, and
+   are tested against fakes; **nothing has been executed against a real
+   account.** This is a deliberate hold, not an unfinished task.
 3. Its sanitized observations are recorded, including `NOT_OBSERVED` if no safe
    protective order existed. **Not done** — follows from step 2.
 4. A human reviews those observations and explicitly approves zero or more
