@@ -62,6 +62,59 @@ def et(year, month, day, hour=0, minute=0):
 
 
 # --------------------------------------------------------------------------
+# Independent expectations.
+#
+# These are hand-written literals, transcribed from the published NYSE
+# schedule and cross-checked against the standard observance rules: nth
+# weekday for the Monday holidays, the fourth Thursday for Thanksgiving,
+# Easter minus two days for Good Friday, and Saturday -> preceding Friday /
+# Sunday -> following Monday for the fixed-date holidays, with New Year's Day
+# as the standing exception.
+#
+# They are deliberately NOT derived from FULL_HOLIDAYS, EARLY_CLOSE_DAYS, or
+# any production helper. Everything else in this file that touches the tables
+# reads them from the module, which means a transcription error would agree
+# with itself and pass. These two sets are the only place the dates are
+# asserted against something written independently, so a typo in the shipped
+# table fails here rather than shipping.
+#
+# Literals are appropriate because coverage is fixed at 2026-2027. Extending
+# coverage means extending these sets by hand too, which is the intended cost.
+# --------------------------------------------------------------------------
+
+EXPECTED_FULL_HOLIDAYS = {
+    # --- 2026 ---
+    date(2026, 1, 1),     # New Year's Day, Thursday
+    date(2026, 1, 19),    # Martin Luther King Jr. Day, 3rd Monday of January
+    date(2026, 2, 16),    # Washington's Birthday, 3rd Monday of February
+    date(2026, 4, 3),     # Good Friday (Easter 2026-04-05)
+    date(2026, 5, 25),    # Memorial Day, last Monday of May
+    date(2026, 6, 19),    # Juneteenth, Friday
+    date(2026, 7, 3),     # Independence Day observed; 4 July 2026 is a Saturday
+    date(2026, 9, 7),     # Labor Day, 1st Monday of September
+    date(2026, 11, 26),   # Thanksgiving, 4th Thursday of November
+    date(2026, 12, 25),   # Christmas Day, Friday
+    # --- 2027 ---
+    date(2027, 1, 1),     # New Year's Day, Friday
+    date(2027, 1, 18),    # Martin Luther King Jr. Day, 3rd Monday of January
+    date(2027, 2, 15),    # Washington's Birthday, 3rd Monday of February
+    date(2027, 3, 26),    # Good Friday (Easter 2027-03-28)
+    date(2027, 5, 31),    # Memorial Day, last Monday of May
+    date(2027, 6, 18),    # Juneteenth observed; 19 June 2027 is a Saturday
+    date(2027, 7, 5),     # Independence Day observed; 4 July 2027 is a Sunday
+    date(2027, 9, 6),     # Labor Day, 1st Monday of September
+    date(2027, 11, 25),   # Thanksgiving, 4th Thursday of November
+    date(2027, 12, 24),   # Christmas observed; 25 December 2027 is a Saturday
+}
+
+EXPECTED_EARLY_CLOSES = {
+    date(2026, 11, 27),   # day after Thanksgiving 2026
+    date(2026, 12, 24),   # Christmas Eve 2026, a Thursday
+    date(2027, 11, 26),   # day after Thanksgiving 2027
+}
+
+
+# --------------------------------------------------------------------------
 # 1. Ordinary trading days.
 # --------------------------------------------------------------------------
 
@@ -158,6 +211,40 @@ def test_every_supported_holiday_is_fully_closed(holiday):
         assert result.day_kind is DayKind.FULL_HOLIDAY
         assert result.reason is ClassificationReason.FULL_HOLIDAY
         assert result.is_regular_session is False
+
+
+def test_the_shipped_holidays_match_the_independent_expected_set_exactly():
+    """The only assertion that can catch a transcription error.
+
+    Compared both directions so neither a missing nor an extra date can hide,
+    and reported as sorted differences so a failure names the dates rather
+    than printing two opaque sets.
+    """
+    assert sorted(FULL_HOLIDAYS - EXPECTED_FULL_HOLIDAYS) == [], "unexpected holiday"
+    assert sorted(EXPECTED_FULL_HOLIDAYS - FULL_HOLIDAYS) == [], "missing holiday"
+    assert FULL_HOLIDAYS == EXPECTED_FULL_HOLIDAYS
+
+
+def test_the_shipped_early_closes_match_the_independent_expected_set_exactly():
+    assert sorted(set(EARLY_CLOSE_DAYS) - EXPECTED_EARLY_CLOSES) == [], "unexpected"
+    assert sorted(EXPECTED_EARLY_CLOSES - set(EARLY_CLOSE_DAYS)) == [], "missing"
+    assert set(EARLY_CLOSE_DAYS) == EXPECTED_EARLY_CLOSES
+
+
+def test_every_expected_holiday_is_individually_pinned_to_a_literal():
+    """Guards the guard: the expected set must stay a complete literal list.
+
+    If someone later replaces the literals with a comprehension over the
+    production table, the assertion above becomes tautological and this
+    catches the count drifting away from the reviewed 20.
+    """
+    assert len(EXPECTED_FULL_HOLIDAYS) == 20
+    assert len(EXPECTED_EARLY_CLOSES) == 3
+    assert sum(1 for day in EXPECTED_FULL_HOLIDAYS if day.year == 2026) == 10
+    assert sum(1 for day in EXPECTED_FULL_HOLIDAYS if day.year == 2027) == 10
+    assert EXPECTED_FULL_HOLIDAYS.isdisjoint(EXPECTED_EARLY_CLOSES)
+    assert all(day.weekday() < 5 for day in EXPECTED_FULL_HOLIDAYS)
+    assert all(day.weekday() < 5 for day in EXPECTED_EARLY_CLOSES)
 
 
 def test_there_are_exactly_twenty_reviewed_holidays():
@@ -786,12 +873,27 @@ def test_the_calendar_does_not_read_the_wall_clock_implicitly():
     assert "date.today(" not in source
 
 
-def test_the_calendar_agrees_with_the_table_still_used_by_the_runtime():
-    """Drift guard while delegation is deferred to the re-pin window.
+def test_the_calendar_agrees_with_the_legacy_runtime_table():
+    """TEMPORARY drift guard for the pre-integration period. Expected to die.
 
-    The runtime keeps its own copy until the pinned files can be changed. The
-    two must not diverge in the meantime, or the eventual delegation would
-    silently alter behaviour.
+    `src/read_only_observation_runtime.py` keeps its own private copy of the
+    holiday and early-close tables, because it is one of the five files in the
+    checkpoint implementation digest and cannot be edited while the
+    real-account checkpoint is held at its operator gate. Until delegation
+    happens, two copies of the same data exist and must not diverge — a
+    divergence would mean the eventual switch silently changed behaviour.
+
+    **This test must be removed or rewritten in the same re-pin window that
+    makes `classify_market_session` delegate to `src/exchange_calendar.py`.**
+    It deliberately imports private names (`_MARKET_HOLIDAYS`,
+    `_EARLY_CLOSE_DAYS`) from that module, and delegation will delete them.
+
+    **An `ImportError` here at that point is the expected, designed outcome —
+    not an unexplained regression.** Do not "fix" it by re-adding the private
+    names to the runtime; that would recreate the duplication this guard
+    exists to retire. Delete this test instead, and rely on
+    `test_the_shipped_holidays_match_the_independent_expected_set_exactly`,
+    which is independent of both modules and outlives the migration.
     """
     from src.read_only_observation_runtime import (
         _EARLY_CLOSE_DAYS as runtime_early,
