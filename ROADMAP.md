@@ -118,7 +118,31 @@ a first unattended run.
 Each milestone depends on the one before it. None may be skipped, and none is
 approved to begin before its predecessor is complete and reviewed.
 
-### Milestone 9 — Read-Only Broker-State Grounding — **IN PROGRESS**
+### Milestone 9 — Read-Only Broker-State Grounding — **IN PROGRESS, HELD AT AN OPERATOR GATE**
+
+> **⛔ OPERATOR GATE — the real-account read-only checkpoint is ON HOLD.**
+>
+> All software for step 2 of the definition of done is merged and verified.
+> **It has never been executed against a real account, and it will not be until
+> an operator explicitly lifts this hold.** Nothing in this repository may
+> execute it, open a broker session, or issue an authorization manifest.
+>
+> Required pins for the eventual run:
+>
+> | Pin | Value |
+> | --- | --- |
+> | `checkpoint_implementation_digest` | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` |
+> | `approved_main_sha` | **re-derive from `git rev-parse HEAD` at manifest-issue time** |
+>
+> The digest is the durable pin: it changes only when one of the five files in
+> `PINNED_IMPLEMENTATION_FILES` changes. `approved_main_sha` must equal the
+> resolved `HEAD`, so **any** commit to `main` — including documentation —
+> moves it. It was `4fc75b6be7419d369c3c72dac046f23842eb3f6d` at the moment PR
+> #44 merged. Do not copy that value forward; re-derive it.
+>
+> See [`MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md`](MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md)
+> for why work that would touch a pinned file is batched into a single re-pin
+> window rather than landed piecemeal.
 
 The offline foundation — provenance framework, sanitized snapshot model,
 fail-closed decision API, freshness policy, and the read-only checkpoint design
@@ -152,9 +176,43 @@ for the definition of done.
   identity, and an expiry window; it is validated and consumed before any
   read. It is not an always-yes mode and nothing auto-answers a prompt.
 
-Remaining: an operator must issue a manifest (or attend a terminal), execute
-the checkpoint, and review what it records. That is not software work, and
+Remaining: an operator must lift the hold above, issue a manifest, execute the
+checkpoint, and review what it records. That is not software work, and
 **approving zero states is a legitimate result.**
+
+### Work that proceeds while the checkpoint is held
+
+Every item below is buildable offline against fixtures and touches **no**
+pinned file, so none of it disturbs the held checkpoint's digest.
+
+| Order | Work | Lands in | Depends on |
+| --- | --- | --- | --- |
+| A | F2 design + re-pin policy | documentation | — |
+| B | Authoritative exchange calendar | `src/exchange_calendar.py` | — |
+| C | Order lifecycle model | `src/order_lifecycle_model.py` | — |
+| D | Offline reconciliation and restart recovery | new module | C |
+| E | Hard risk controls and kill switch | `src/risk_limits.py` | — |
+| F | Operational monitoring and privacy-safe alerts | new module | E |
+| G | Supervised-execution gate definition, **inert** | new module | — |
+| H | Limited-unattended gate definition, **inert** | same module as G | G |
+
+The gate definitions take already-decided facts rather than importing the risk,
+recovery, lifecycle, and monitoring modules. That keeps each review separate,
+and stops a gate from re-deriving inputs it could then silently disagree with.
+
+**Blocked by the real-account checkpoint** — steps 3–5 of the Milestone 9
+definition of done, anything requiring `VERIFIED_ACTIVE_PROTECTION` to be
+reachable, Milestone 11's live-shadow phase, and all of Milestone 12.
+
+**Deferred to a single re-pin window**, batched so the manifest is reissued
+once rather than per change: F2 detection wiring, calendar delegation from
+`classify_market_session`, and lifecycle-model adoption in
+`live_order_state_model.py`.
+
+**Disabled throughout, without exception:** `strategy.enabled` stays `false`;
+the approved-state count stays `0`; exactly three read tools remain permitted;
+no write capability, scheduler, or signal-to-execution bridge exists; and no
+authorization manifest is issued.
 
 ### Authorization policy, across milestones
 
