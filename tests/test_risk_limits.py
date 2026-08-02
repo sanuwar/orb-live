@@ -179,7 +179,7 @@ def test_the_kill_switch_is_checked_before_anything_else():
     the system stopped.
     """
     ledger = ActionLedger()
-    ledger.record("act-1")
+    ledger.record("act-1", 1)
     result = assess(
         prop=proposal(quantity=9999, order_value=Decimal("999999"),
                       observed_monotonic=0.0),
@@ -207,14 +207,14 @@ def test_a_missing_kill_switch_state_is_refused():
 
 def test_a_replayed_action_is_denied():
     ledger = ActionLedger()
-    ledger.record("act-1")
+    ledger.record("act-1", 1)
     assert assess(ledger=ledger).decision is RiskDecision.DENIED_DUPLICATE_ACTION
 
 
 def test_duplicate_detection_precedes_limit_arithmetic():
     """A replayed action is a different problem from an oversized one."""
     ledger = ActionLedger()
-    ledger.record("act-1")
+    ledger.record("act-1", 1)
     result = assess(
         prop=proposal(quantity=9999, order_value=Decimal("999999")), ledger=ledger
     )
@@ -223,9 +223,9 @@ def test_duplicate_detection_precedes_limit_arithmetic():
 
 def test_the_ledger_refuses_to_record_a_key_twice():
     ledger = ActionLedger()
-    ledger.record("k")
+    ledger.record("k", 1)
     with pytest.raises(RiskLimitError):
-        ledger.record("k")
+        ledger.record("k", 1)
     assert ledger.recorded_count == 1
 
 
@@ -556,3 +556,134 @@ def test_no_dollar_amount_is_hard_coded_as_a_permanent_limit():
     source = MODULE_PATH.read_text(encoding="utf-8")
     for amount in ("2680", "30000", "3000", "15", "45", "120", "300"):
         assert f'Decimal("{amount}")' not in source
+
+
+# --------------------------------------------------------------------------
+# 10. Cumulative exposure (review finding).
+# --------------------------------------------------------------------------
+
+
+def test_several_individually_legal_orders_cannot_cumulatively_exceed():
+    """Review finding: they used to.
+
+    Three four-unit orders against a ten-unit ceiling are each legal in
+    isolation. With a caller that never updates its reported position, all
+    three previously passed and twelve units were approved. The ledger now
+    accumulates what it approved, so the caller cannot walk past the ceiling
+    one legal step at a time.
+    """
+    lim = limits(maximum_position_quantity=10)
+    ledger = ActionLedger()
+    approved = 0
+    outcomes = []
+    for index in range(3):
+        result = assess(
+            prop=proposal(idempotency_key=f"a{index}", quantity=4),
+            lim=lim,
+            st=state(open_position_quantity=0),      # caller never updates
+            ledger=ledger,
+        )
+        outcomes.append(result.decision)
+        if result.decision is RiskDecision.WITHIN_LIMITS:
+            ledger.record(f"a{index}", 4)
+            approved += 4
+    assert outcomes == [
+        RiskDecision.WITHIN_LIMITS,
+        RiskDecision.WITHIN_LIMITS,
+        RiskDecision.DENIED_POSITION_SIZE,
+    ]
+    assert approved == 8
+    assert approved <= lim.maximum_position_quantity
+
+
+def test_the_bound_holds_when_the_caller_does_update_its_position():
+    lim = limits(maximum_position_quantity=10)
+    ledger = ActionLedger()
+    held = 0
+    for index in range(2):
+        result = assess(
+            prop=proposal(idempotency_key=f"b{index}", quantity=4),
+            lim=lim, st=state(open_position_quantity=held), ledger=ledger,
+        )
+        assert result.decision is RiskDecision.WITHIN_LIMITS
+        ledger.record(f"b{index}", 4)
+        held += 4
+    third = assess(
+        prop=proposal(idempotency_key="b2", quantity=4),
+        lim=lim, st=state(open_position_quantity=held), ledger=ledger,
+    )
+    assert third.decision is RiskDecision.DENIED_POSITION_SIZE
+
+
+def test_the_two_exposure_views_are_maxed_not_summed():
+    """They usually describe the same orders; summing would double-count."""
+    lim = limits(maximum_position_quantity=10)
+    ledger = ActionLedger()
+    ledger.record("prior", 6)
+    # Caller reports the same 6 units it holds. max(6, 6) + 4 = 10, allowed.
+    assert assess(
+        prop=proposal(quantity=4), lim=lim,
+        st=state(open_position_quantity=6), ledger=ledger,
+    ).decision is RiskDecision.WITHIN_LIMITS
+    # Summing would have given 16 and denied a legitimate top-up.
+
+
+def test_ledger_exposure_alone_bounds_a_caller_reporting_nothing():
+    lim = limits(maximum_position_quantity=10)
+    ledger = ActionLedger()
+    ledger.record("prior", 9)
+    assert assess(
+        prop=proposal(quantity=2), lim=lim,
+        st=state(open_position_quantity=0), ledger=ledger,
+    ).decision is RiskDecision.DENIED_POSITION_SIZE
+
+
+def test_caller_reported_exposure_alone_bounds_an_empty_ledger():
+    lim = limits(maximum_position_quantity=10)
+    assert assess(
+        prop=proposal(quantity=2), lim=lim,
+        st=state(open_position_quantity=9), ledger=ActionLedger(),
+    ).decision is RiskDecision.DENIED_POSITION_SIZE
+
+
+def test_approved_quantity_never_decreases():
+    ledger = ActionLedger()
+    ledger.record("x", 3)
+    ledger.record("y", 4)
+    assert ledger.approved_quantity == 7
+    assert ledger.recorded_count == 2
+
+
+def test_recording_requires_an_explicit_approved_quantity():
+    """A default of zero would silently restore the gap."""
+    ledger = ActionLedger()
+    with pytest.raises(TypeError):
+        ledger.record("z")
+
+
+@pytest.mark.parametrize("quantity", [-1, 1.5, True, "4", None])
+def test_an_invalid_approved_quantity_is_refused(quantity):
+    with pytest.raises(RiskLimitError):
+        ActionLedger().record("z", quantity)
+
+
+def test_a_rejected_proposal_adds_no_exposure():
+    """Only approvals accumulate; a denial must not consume headroom."""
+    lim = limits(maximum_position_quantity=10)
+    ledger = ActionLedger()
+    denied = assess(prop=proposal(quantity=99), lim=lim, ledger=ledger)
+    assert denied.decision is RiskDecision.DENIED_POSITION_SIZE
+    assert ledger.approved_quantity == 0
+    assert assess(
+        prop=proposal(idempotency_key="next", quantity=10), lim=lim, ledger=ledger
+    ).decision is RiskDecision.WITHIN_LIMITS
+
+
+def test_the_kill_switch_cannot_be_bypassed_by_a_nominally_valid_request():
+    """Every other check passes; the switch still wins."""
+    for extra in ({}, {"maximum_data_age_seconds": 1e9}):
+        result = assess(
+            prop=proposal(), switch=KillSwitchState.ENGAGED,
+            ledger=ActionLedger(), **extra
+        )
+        assert result.decision is RiskDecision.DENIED_KILL_SWITCH_ENGAGED

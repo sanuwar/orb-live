@@ -190,24 +190,49 @@ class AccountRiskState:
 
 
 class ActionLedger:
-    """Remembers idempotency keys so one action cannot be taken twice.
+    """Remembers idempotency keys, and how much exposure they approved.
 
     Deliberately has no removal method. "Forget this key" is indistinguishable
     from "let it happen again", and the whole point is that it cannot.
+
+    It accumulates approved quantity because the caller's reported position is
+    not a sufficient bound on its own. A caller that submits several
+    individually legal orders without updating what it holds would otherwise
+    walk past the ceiling one legal step at a time — three four-unit orders
+    against a ten-unit limit, each fine, twelve units held. Tracking what this
+    module has already approved closes that without asking the caller to
+    remember anything.
+
+    `record` requires the approved quantity rather than defaulting it. A
+    default of zero would silently restore the gap for any caller that forgot
+    the argument, which is precisely the caller this exists to protect against.
     """
 
     def __init__(self) -> None:
         self._seen: set[str] = set()
+        self._approved_quantity: int = 0
 
     def has_seen(self, key: str) -> bool:
         if not isinstance(key, str) or not key.strip():
             raise RiskLimitError("an idempotency key is required")
         return key in self._seen
 
-    def record(self, key: str) -> None:
+    def record(self, key: str, approved_quantity: int) -> None:
         if self.has_seen(key):
             raise RiskLimitError("action key has already been used")
+        if not isinstance(approved_quantity, int) or isinstance(
+            approved_quantity, bool
+        ):
+            raise RiskLimitError("approved quantity must be an int")
+        if approved_quantity < 0:
+            raise RiskLimitError("approved quantity must not be negative")
         self._seen.add(key)
+        self._approved_quantity += approved_quantity
+
+    @property
+    def approved_quantity(self) -> int:
+        """Total quantity this ledger has approved. Never decreases."""
+        return self._approved_quantity
 
     @property
     def recorded_count(self) -> int:
@@ -282,10 +307,18 @@ def evaluate(
         # Data from the future is as untrustworthy as data that is too old.
         return RiskAssessment(RiskDecision.DENIED_STALE_DATA)
 
-    # Judged against the *resulting* position, not the order alone. Checking
-    # the order in isolation would let several individually legal orders stack
-    # past the ceiling.
-    if state.open_position_quantity + proposal.quantity > limits.maximum_position_quantity:
+    # Judged against the *resulting* position, not the order alone, and
+    # against the larger of two independent views of current exposure:
+    #
+    #   * what the caller says it holds, and
+    #   * what this module has already approved.
+    #
+    # The max rather than the sum, because the two usually describe the same
+    # orders and adding them would double-count. Taking the larger keeps the
+    # bound correct whether or not the caller updates its own state, and
+    # whether or not approved orders have filled yet.
+    exposure = max(state.open_position_quantity, ledger.approved_quantity)
+    if exposure + proposal.quantity > limits.maximum_position_quantity:
         return RiskAssessment(RiskDecision.DENIED_POSITION_SIZE)
     if proposal.order_value > limits.maximum_order_value:
         return RiskAssessment(RiskDecision.DENIED_ORDER_VALUE)
