@@ -80,10 +80,12 @@ class GateVerdict(str, Enum):
 
 
 class GateMode(str, Enum):
-    """Who is watching. Named here so the limited-unattended gate has a
-    vocabulary to extend rather than inventing a parallel one."""
+    """Who is watching."""
 
     SUPERVISED = "SUPERVISED"
+    #: Nobody is watching. Everything the supervised mode requires still
+    #: applies, plus the conditions below — see `UNATTENDED_PRECONDITIONS`.
+    LIMITED_UNATTENDED = "LIMITED_UNATTENDED"
 
 
 #: Operator approvals that would permit a gate mode to open. Empty, and a test
@@ -162,6 +164,22 @@ REQUIRED_EVIDENCE: Mapping[str, frozenset[EvidenceSource]] = {
     "kill_switch_disengaged": frozenset({EvidenceSource.MEASURED}),
     "monitoring_healthy": frozenset({EvidenceSource.MEASURED, EvidenceSource.TESTED}),
     "market_session_valid": frozenset({EvidenceSource.MEASURED}),
+    # --- limited-unattended additions ---
+    # Capital, expiry, window and prior-run resolution are operator decisions
+    # recorded in reviewed configuration, not things a runtime can observe
+    # about itself.
+    "capital_tier_approved": frozenset({EvidenceSource.OPERATOR_ATTESTED}),
+    "deployment_not_expired": frozenset({EvidenceSource.OPERATOR_ATTESTED}),
+    "within_permitted_trading_window": frozenset({EvidenceSource.MEASURED}),
+    "no_unresolved_operator_action": frozenset({EvidenceSource.OPERATOR_ATTESTED}),
+    "supervised_evidence_reviewed": frozenset({EvidenceSource.OPERATOR_ATTESTED}),
+    # These three must have been *exercised*, not merely declared. "Alerting
+    # is reachable" and "the kill switch works remotely" and "suspension is
+    # armed" are each claims about machinery that has to fire when nobody is
+    # watching; a component asserting its own readiness proves nothing.
+    "alerting_verified_reachable": frozenset({EvidenceSource.TESTED}),
+    "kill_switch_remotely_operable": frozenset({EvidenceSource.TESTED}),
+    "automatic_suspension_armed": frozenset({EvidenceSource.TESTED}),
 }
 
 
@@ -252,6 +270,90 @@ REQUIRED_PRECONDITIONS: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------
+# Limited unattended operation.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UnattendedPreconditions:
+    """What unattended operation requires **in addition** to everything above.
+
+    The relationship is strictly additive and enforced by test: unattended can
+    only ever require *more* than supervised, never less. A mode that relaxed
+    a condition because nobody is watching would have the logic exactly
+    backwards — the absence of a human is the reason to require more.
+
+    `operator_present_and_acknowledged` stays in the base set and stays
+    required. That is not an oversight. Unattended means no human watches the
+    *session*; it does not mean no human ever authorized the deployment. The
+    acknowledgement moves earlier in time, it does not disappear.
+    """
+
+    #: A capital tier was approved by reviewed configuration, not derived.
+    capital_tier_approved: Attestation
+    #: The deployment's expiry has not passed.
+    deployment_not_expired: Attestation
+    #: Trading is inside the approved window for this deployment.
+    within_permitted_trading_window: Attestation
+    #: Alert delivery was verified reachable *before* the session began.
+    alerting_verified_reachable: Attestation
+    #: The kill switch can be operated without physical access to the host.
+    kill_switch_remotely_operable: Attestation
+    #: Automatic suspension is armed and was tested.
+    automatic_suspension_armed: Attestation
+    #: No prior run ended requiring operator attention.
+    no_unresolved_operator_action: Attestation
+    #: Supervised runs were reviewed and judged sufficient evidence.
+    supervised_evidence_reviewed: Attestation
+
+    def __post_init__(self) -> None:
+        for item in fields(self):
+            if not isinstance(getattr(self, item.name), Attestation):
+                raise ExecutionGateError(f"{item.name} must be an Attestation")
+
+    def unmet(
+        self,
+        *,
+        current_monotonic: float,
+        maximum_age_seconds: float = MAXIMUM_ATTESTATION_AGE_SECONDS,
+    ) -> tuple[str, ...]:
+        failing: list[str] = []
+        for item in fields(self):
+            attestation: Attestation = getattr(self, item.name)
+            age = current_monotonic - attestation.recorded_monotonic
+            if (
+                attestation.satisfied is not True
+                or not evidence_is_acceptable(item.name, attestation)
+                or age < 0
+                or age > maximum_age_seconds
+            ):
+                failing.append(item.name)
+        return tuple(failing)
+
+    def all_met(
+        self,
+        *,
+        current_monotonic: float,
+        maximum_age_seconds: float = MAXIMUM_ATTESTATION_AGE_SECONDS,
+    ) -> bool:
+        return not self.unmet(
+            current_monotonic=current_monotonic, maximum_age_seconds=maximum_age_seconds
+        )
+
+
+UNATTENDED_PRECONDITIONS: tuple[str, ...] = (
+    "capital_tier_approved",
+    "deployment_not_expired",
+    "within_permitted_trading_window",
+    "alerting_verified_reachable",
+    "kill_switch_remotely_operable",
+    "automatic_suspension_armed",
+    "no_unresolved_operator_action",
+    "supervised_evidence_reviewed",
+)
+
+
 @dataclass(frozen=True)
 class GateDecision:
     verdict: GateVerdict
@@ -321,12 +423,56 @@ def open_gate(
     return GateDecision(GateVerdict.OPEN, mode)
 
 
+def open_unattended_gate(
+    preconditions: GatePreconditions,
+    unattended: UnattendedPreconditions,
+    *,
+    current_monotonic: float,
+) -> GateDecision:
+    """The unattended gate. Requires everything supervised does, and more.
+
+    Both records are evaluated against the same evidence rules, and the unmet
+    count spans both — an operator reading "one unmet" should not have to ask
+    which of two lists it came from.
+
+    Nobody is watching in this mode, which is the reason the evidence bar is
+    higher rather than lower: alerting, remote kill, and automatic suspension
+    must each be `TESTED`, because a component asserting its own readiness
+    proves nothing about machinery that has to fire unattended.
+    """
+    if not isinstance(current_monotonic, (int, float)) or isinstance(
+        current_monotonic, bool
+    ):
+        raise ExecutionGateError("current time must be a number")
+    if not isinstance(unattended, UnattendedPreconditions):
+        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT, GateMode.LIMITED_UNATTENDED)
+    if not isinstance(preconditions, GatePreconditions):
+        return GateDecision(GateVerdict.CLOSED_MALFORMED_INPUT, GateMode.LIMITED_UNATTENDED)
+
+    unmet = len(preconditions.unmet(current_monotonic=current_monotonic)) + len(
+        unattended.unmet(current_monotonic=current_monotonic)
+    )
+    if GateMode.LIMITED_UNATTENDED not in ACTIVATION_APPROVALS:
+        return GateDecision(
+            GateVerdict.CLOSED_ACTIVATION_NOT_APPROVED, GateMode.LIMITED_UNATTENDED, unmet
+        )
+    if unmet:
+        return GateDecision(
+            GateVerdict.CLOSED_PRECONDITION_UNMET, GateMode.LIMITED_UNATTENDED, unmet
+        )
+    return GateDecision(GateVerdict.OPEN, GateMode.LIMITED_UNATTENDED)
+
+
 def gate_readiness_report() -> Mapping[str, object]:
     """What still stands between here and an openable gate."""
     return {
         "approved_modes": sorted(mode.value for mode in ACTIVATION_APPROVALS),
         "activation_approved": bool(ACTIVATION_APPROVALS),
         "required_precondition_count": len(REQUIRED_PRECONDITIONS),
+        "unattended_precondition_count": len(UNATTENDED_PRECONDITIONS),
+        "total_unattended_requirement_count": (
+            len(REQUIRED_PRECONDITIONS) + len(UNATTENDED_PRECONDITIONS)
+        ),
         "self_declared_evidence_accepted_anywhere": any(
             EvidenceSource.SELF_DECLARED in sources
             for sources in REQUIRED_EVIDENCE.values()
@@ -341,6 +487,7 @@ __all__ = [
     "MAXIMUM_ATTESTATION_AGE_SECONDS",
     "REQUIRED_EVIDENCE",
     "REQUIRED_PRECONDITIONS",
+    "UNATTENDED_PRECONDITIONS",
     "Attestation",
     "EvidenceSource",
     "ExecutionGateError",
@@ -348,7 +495,9 @@ __all__ = [
     "GateMode",
     "GatePreconditions",
     "GateVerdict",
+    "UnattendedPreconditions",
     "evidence_is_acceptable",
     "gate_readiness_report",
     "open_gate",
+    "open_unattended_gate",
 ]

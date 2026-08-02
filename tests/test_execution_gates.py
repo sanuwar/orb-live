@@ -482,8 +482,8 @@ def test_the_explanation_names_what_is_missing():
     assert "empty" in AUTHORITY_EXPLANATION
 
 
-def test_the_mode_vocabulary_is_closed():
-    assert {mode.value for mode in GateMode} == {"SUPERVISED"}
+def test_the_supervised_mode_is_present():
+    assert GateMode.SUPERVISED.value == "SUPERVISED"
 
 
 # --------------------------------------------------------------------------
@@ -653,3 +653,346 @@ def test_the_module_docstring_records_why_a_bare_true_is_not_evidence():
     source = MODULE_PATH.read_text(encoding="utf-8")
     assert "a bare `True` is not evidence" in source
     assert "SELF_DECLARED" in source
+
+
+# --------------------------------------------------------------------------
+# 11. Limited unattended operation (PR #53).
+# --------------------------------------------------------------------------
+
+from src.execution_gates import (  # noqa: E402
+    UNATTENDED_PRECONDITIONS,
+    UnattendedPreconditions,
+    open_unattended_gate,
+)
+
+#: Independently written, like EXPECTED_EVIDENCE above. Not read from
+#: REQUIRED_EVIDENCE, which is the mapping these tests are validating.
+EXPECTED_UNATTENDED_EVIDENCE = {
+    "capital_tier_approved": {"OPERATOR_ATTESTED"},
+    "deployment_not_expired": {"OPERATOR_ATTESTED"},
+    "within_permitted_trading_window": {"MEASURED"},
+    "no_unresolved_operator_action": {"OPERATOR_ATTESTED"},
+    "supervised_evidence_reviewed": {"OPERATOR_ATTESTED"},
+    "alerting_verified_reachable": {"TESTED"},
+    "kill_switch_remotely_operable": {"TESTED"},
+    "automatic_suspension_armed": {"TESTED"},
+}
+
+
+def unattended_source(name: str) -> EvidenceSource:
+    return EvidenceSource(sorted(EXPECTED_UNATTENDED_EVIDENCE[name])[0])
+
+
+def uatt(name: str, *, satisfied: bool = True, source=None, at: float = FRESH):
+    return Attestation(
+        satisfied=satisfied,
+        source=source if source is not None else unattended_source(name),
+        recorded_monotonic=at,
+    )
+
+
+def unattended(**overrides) -> UnattendedPreconditions:
+    values = {name: uatt(name) for name in UNATTENDED_PRECONDITIONS}
+    values.update(overrides)
+    return UnattendedPreconditions(**values)
+
+
+def ugate(pre=None, un=None, *, current_monotonic=NOW):
+    return open_unattended_gate(
+        pre if pre is not None else preconditions(),
+        un if un is not None else unattended(),
+        current_monotonic=current_monotonic,
+    )
+
+
+def test_unattended_mode_exists_and_is_not_approved():
+    assert GateMode.LIMITED_UNATTENDED not in ACTIVATION_APPROVALS
+
+
+def test_the_unattended_gate_cannot_open_with_perfect_evidence():
+    decision = ugate()
+    assert decision.verdict is GateVerdict.CLOSED_ACTIVATION_NOT_APPROVED
+    assert decision.is_open is False
+    assert decision.permits_automated_action is False
+    assert decision.unmet_precondition_count == 0
+
+
+def test_unattended_requires_strictly_more_than_supervised():
+    """The absence of a human is the reason to require more, not less."""
+    assert set(UNATTENDED_PRECONDITIONS).isdisjoint(REQUIRED_PRECONDITIONS)
+    assert len(REQUIRED_PRECONDITIONS) + len(UNATTENDED_PRECONDITIONS) == 17
+
+
+# --- caller booleans cannot reach eligibility -----------------------------
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_a_raw_boolean_is_rejected_for_every_unattended_precondition(name):
+    with pytest.raises(ExecutionGateError):
+        unattended(**{name: True})
+    with pytest.raises(ExecutionGateError):
+        unattended(**{name: False})
+
+
+def test_a_fully_boolean_unattended_record_cannot_be_constructed():
+    with pytest.raises(ExecutionGateError):
+        UnattendedPreconditions(**{name: True for name in UNATTENDED_PRECONDITIONS})
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_self_declared_is_rejected_for_every_unattended_precondition(name):
+    record = unattended(**{name: uatt(name, source=EvidenceSource.SELF_DECLARED)})
+    assert name in record.unmet(current_monotonic=NOW)
+
+
+def test_an_entirely_self_declared_unattended_record_satisfies_nothing():
+    record = UnattendedPreconditions(**{
+        name: uatt(name, source=EvidenceSource.SELF_DECLARED)
+        for name in UNATTENDED_PRECONDITIONS
+    })
+    assert len(record.unmet(current_monotonic=NOW)) == len(UNATTENDED_PRECONDITIONS)
+
+
+def test_eligibility_cannot_be_reached_from_caller_booleans_alone():
+    """The whole point of the mode: nobody is watching, so nothing is taken
+    on trust."""
+    self_declared_supervised = GatePreconditions(**{
+        name: att(name, source=EvidenceSource.SELF_DECLARED)
+        for name in REQUIRED_PRECONDITIONS
+    })
+    self_declared_unattended = UnattendedPreconditions(**{
+        name: uatt(name, source=EvidenceSource.SELF_DECLARED)
+        for name in UNATTENDED_PRECONDITIONS
+    })
+    decision = ugate(self_declared_supervised, self_declared_unattended)
+    assert decision.is_open is False
+    assert decision.unmet_precondition_count == 17
+
+
+# --- per-field evidence rules --------------------------------------------
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_each_unattended_precondition_accepts_exactly_its_expected_sources(name):
+    expected = {EvidenceSource(v) for v in EXPECTED_UNATTENDED_EVIDENCE[name]}
+    actual = {
+        source for source in EvidenceSource
+        if evidence_is_acceptable(name, uatt(name, source=source))
+    }
+    assert actual == expected
+
+
+def test_the_independent_unattended_table_is_complete():
+    assert set(EXPECTED_UNATTENDED_EVIDENCE) == set(UNATTENDED_PRECONDITIONS)
+
+
+def test_machinery_that_must_fire_unattended_requires_a_test_not_a_claim():
+    """A component asserting its own readiness proves nothing."""
+    for name in ("alerting_verified_reachable", "kill_switch_remotely_operable",
+                 "automatic_suspension_armed"):
+        assert EXPECTED_UNATTENDED_EVIDENCE[name] == {"TESTED"}, name
+        assert evidence_is_acceptable(
+            name, uatt(name, source=EvidenceSource.OPERATOR_ATTESTED)
+        ) is False
+        assert evidence_is_acceptable(
+            name, uatt(name, source=EvidenceSource.MEASURED)
+        ) is False
+
+
+def test_operator_decisions_require_a_human():
+    for name in ("capital_tier_approved", "deployment_not_expired",
+                 "no_unresolved_operator_action", "supervised_evidence_reviewed"):
+        assert EXPECTED_UNATTENDED_EVIDENCE[name] == {"OPERATOR_ATTESTED"}, name
+        assert evidence_is_acceptable(
+            name, uatt(name, source=EvidenceSource.MEASURED)
+        ) is False
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_a_wrong_source_fails_that_unattended_precondition(name):
+    wrong = next(
+        s for s in EvidenceSource
+        if s.value not in EXPECTED_UNATTENDED_EVIDENCE[name]
+    )
+    assert name in unattended(**{name: uatt(name, source=wrong)}).unmet(
+        current_monotonic=NOW
+    )
+
+
+# --- false, stale, future -------------------------------------------------
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_a_false_unattended_attestation_fails(name):
+    assert unattended(**{name: uatt(name, satisfied=False)}).unmet(
+        current_monotonic=NOW
+    ) == (name,)
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_a_stale_unattended_attestation_fails(name):
+    stale = NOW - MAXIMUM_ATTESTATION_AGE_SECONDS - 1.0
+    assert unattended(**{name: uatt(name, at=stale)}).unmet(
+        current_monotonic=NOW
+    ) == (name,)
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_a_future_dated_unattended_attestation_fails(name):
+    assert unattended(**{name: uatt(name, at=NOW + 1.0)}).unmet(
+        current_monotonic=NOW
+    ) == (name,)
+
+
+def test_the_unattended_age_boundary_is_exact():
+    exactly = NOW - MAXIMUM_ATTESTATION_AGE_SECONDS
+    assert unattended(
+        capital_tier_approved=uatt("capital_tier_approved", at=exactly)
+    ).all_met(current_monotonic=NOW) is True
+    assert "capital_tier_approved" in unattended(
+        capital_tier_approved=uatt("capital_tier_approved", at=exactly - 0.001)
+    ).unmet(current_monotonic=NOW)
+
+
+def test_unattended_current_monotonic_is_required():
+    with pytest.raises(TypeError):
+        open_unattended_gate(preconditions(), unattended())
+
+
+def test_a_malformed_unattended_current_time_is_refused():
+    for bad in ("now", None, True, []):
+        with pytest.raises(ExecutionGateError):
+            open_unattended_gate(preconditions(), unattended(), current_monotonic=bad)
+
+
+# --- supervised conditions still apply ------------------------------------
+
+
+@pytest.mark.parametrize("name", REQUIRED_PRECONDITIONS)
+def test_unattended_still_requires_every_supervised_precondition(name):
+    decision = ugate(preconditions(**{name: att(name, satisfied=False)}), unattended())
+    assert decision.is_open is False
+    assert decision.unmet_precondition_count == 1
+
+
+def test_operator_acknowledgement_is_still_required_unattended():
+    """Unattended means no human watches the session, not that none authorized
+    the deployment. The acknowledgement moves earlier; it does not vanish."""
+    assert "operator_present_and_acknowledged" in REQUIRED_PRECONDITIONS
+    decision = ugate(
+        preconditions(operator_present_and_acknowledged=att(
+            "operator_present_and_acknowledged", satisfied=False
+        )),
+        unattended(),
+    )
+    assert decision.unmet_precondition_count == 1
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_each_unattended_precondition_alone_registers_as_unmet(name):
+    decision = ugate(preconditions(), unattended(**{name: uatt(name, satisfied=False)}))
+    assert decision.unmet_precondition_count == 1
+    assert decision.is_open is False
+
+
+def test_the_unmet_count_spans_both_records():
+    decision = ugate(
+        preconditions(risk_within_limits=att("risk_within_limits", satisfied=False)),
+        unattended(alerting_verified_reachable=uatt(
+            "alerting_verified_reachable", satisfied=False
+        )),
+    )
+    assert decision.unmet_precondition_count == 2
+
+
+def test_the_unattended_precondition_set_covers_the_expected_ground():
+    assert set(UNATTENDED_PRECONDITIONS) == {
+        "capital_tier_approved",
+        "deployment_not_expired",
+        "within_permitted_trading_window",
+        "alerting_verified_reachable",
+        "kill_switch_remotely_operable",
+        "automatic_suspension_armed",
+        "no_unresolved_operator_action",
+        "supervised_evidence_reviewed",
+    }
+
+
+# --- inertness ------------------------------------------------------------
+
+
+def test_no_combination_of_unattended_preconditions_opens_the_gate():
+    """All 256 combinations, with supervised fully satisfied and well sourced."""
+    checked = 0
+    for combination in itertools.product(
+        [True, False], repeat=len(UNATTENDED_PRECONDITIONS)
+    ):
+        values = {
+            name: uatt(name, satisfied=flag)
+            for name, flag in zip(UNATTENDED_PRECONDITIONS, combination)
+        }
+        decision = ugate(preconditions(), UnattendedPreconditions(**values))
+        assert decision.is_open is False
+        assert decision.permits_automated_action is False
+        checked += 1
+    assert checked == 256
+
+
+def test_no_unattended_evidence_source_combination_opens_the_gate():
+    for name in UNATTENDED_PRECONDITIONS:
+        for source in EvidenceSource:
+            assert ugate(
+                preconditions(), unattended(**{name: uatt(name, source=source)})
+            ).is_open is False, (name, source)
+
+
+def test_an_open_unattended_decision_cannot_be_constructed():
+    with pytest.raises(ExecutionGateError):
+        GateDecision(GateVerdict.OPEN, GateMode.LIMITED_UNATTENDED)
+
+
+def test_there_are_no_default_unattended_preconditions():
+    for field in dataclasses.fields(UnattendedPreconditions):
+        assert field.default is dataclasses.MISSING, field.name
+    with pytest.raises(TypeError):
+        UnattendedPreconditions()
+
+
+@pytest.mark.parametrize("name", UNATTENDED_PRECONDITIONS)
+def test_omitting_any_single_unattended_precondition_is_refused(name):
+    values = {o: uatt(o) for o in UNATTENDED_PRECONDITIONS if o != name}
+    with pytest.raises(TypeError):
+        UnattendedPreconditions(**values)
+
+
+def test_malformed_unattended_input_closes_rather_than_raises():
+    assert ugate(preconditions(), "fine").verdict is GateVerdict.CLOSED_MALFORMED_INPUT
+    assert ugate("fine", unattended()).verdict is GateVerdict.CLOSED_MALFORMED_INPUT
+
+
+def test_the_readiness_report_counts_both_requirement_sets():
+    report = gate_readiness_report()
+    assert report["required_precondition_count"] == 9
+    assert report["unattended_precondition_count"] == 8
+    assert report["total_unattended_requirement_count"] == 17
+    assert report["gate_is_openable"] is False
+    assert report["self_declared_evidence_accepted_anywhere"] is False
+
+
+def test_no_unattended_result_can_enable_the_strategy():
+    decision = ugate()
+    for attribute in ("enable", "activate", "strategy", "execute", "place"):
+        assert not hasattr(decision, attribute)
+
+
+def test_unattended_facts_are_allowlisted():
+    facts = ugate().sanitized_facts()
+    assert set(facts) == set(ALLOWED_FACT_VALUES)
+    for key, value in facts.items():
+        assert value in ALLOWED_FACT_VALUES[key], (key, value)
+    assert facts["gate_mode"] == "LIMITED_UNATTENDED"
+
+
+def test_the_mode_vocabulary_is_closed_with_two_modes():
+    assert {mode.value for mode in GateMode} == {"SUPERVISED", "LIMITED_UNATTENDED"}
+    assert ACTIVATION_APPROVALS == frozenset()
