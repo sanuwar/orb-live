@@ -647,16 +647,28 @@ def test_a_dangling_parent_on_this_chain_is_still_refused():
     )
 
 
-def test_a_dangling_parent_reached_mid_walk_is_refused():
+def test_corrupting_a_mid_chain_link_severs_the_chain():
+    """Pinned to the one correct outcome, and the name now matches it.
+
+    An earlier version of this test asserted "refused" and accepted either
+    MISSING_PARENT or NO_REPLACEMENT. Both the name and the disjunction were
+    wrong: once B claims GHOST as its parent, B is no longer A's successor, so
+    A genuinely has none. NO_REPLACEMENT is the honest answer, and a
+    disjunctive assertion would have hidden a change in either direction.
+    """
     observations = {
         "A": obs("A", S.REPLACED),
-        "B": obs("B", S.REPLACED, replaces="A"),
+        "B": obs("B", S.REPLACED, replaces="GHOST"),
         "C": obs("C", S.WORKING, replaces="B"),
     }
-    # Corrupt B's history: it now claims a parent nobody holds.
-    observations["B"] = obs("B", S.REPLACED, replaces="GHOST")
     result = resolve_replacement_chain(observations, "A")
-    assert result.outcome in {ChainOutcome.MISSING_PARENT, ChainOutcome.NO_REPLACEMENT}
+    assert result.outcome is ChainOutcome.NO_REPLACEMENT
+    assert result.depth == 0
+    # Walking from B itself still reports the dangling parent.
+    assert (
+        resolve_replacement_chain(observations, "B").outcome
+        is ChainOutcome.MISSING_PARENT
+    )
 
 
 def test_a_duplicate_child_anywhere_still_fails_globally():
