@@ -146,9 +146,29 @@ for the definition of done.
   surface for a value the decision does not use.
 - Fail closed on unknown or conflicting states.
 
-Remaining: an operator must execute the attended checkpoint and review what it
-records. That is not software work, and **approving zero states is a legitimate
-result.**
+- Support **non-interactive authorization** so the checkpoint can run on a
+  schedule. An operator-issued manifest pins scope, commit, implementation
+  digest, capability list, zero write limits, one session, observation
+  identity, and an expiry window; it is validated and consumed before any
+  read. It is not an always-yes mode and nothing auto-answers a prompt.
+
+Remaining: an operator must issue a manifest (or attend a terminal), execute
+the checkpoint, and review what it records. That is not software work, and
+**approving zero states is a legitimate result.**
+
+### Authorization policy, across milestones
+
+The read-only manifest authorizes **reads only** and cannot be widened.
+Milestones 12 and 13 require a **separate** write-enabled policy carrying
+operator-approved capital tier, strategy version, symbol allowlist, position
+and exposure limits, daily/weekly/drawdown limits, permitted trading window,
+deployment expiry, and global kill-switch state. Its required fields are named
+in `src/read_only_authorization_manifest.py` as a specification only — nothing
+implements or honours them, and a read-only manifest carrying any of them is
+refused.
+
+**The trading agent may never create, renew, broaden, or raise its own
+authorization**, in any milestone. Authorization is always an operator input.
 
 *Why first:* every later milestone depends on being able to assert that a
 protective stop is genuinely armed. Today that assertion is unavailable — see

@@ -267,15 +267,111 @@ Run ID; this carries reviewed safety behaviour, so it belongs in review.
 Execution requires all of: the
 `--i-understand-this-performs-real-broker-reads` acknowledgment,
 `ENABLE_MILESTONE_9_READ_ONLY_OBSERVATION=1`, the authorization flag, an
-unused Run ID, and two hidden `y/N` answers. Only exact `y` or `Y` approves —
-empty, `yes`, `Y `, EOF, and an unreadable prompt all decline. Each stage may
-be asked once; a second request is a rejection, not a re-prompt.
+unused Run ID, and **exactly one** authorization mode.
 
-Both prompts are answered **before any read occurs**, pinned by a test that
-asserts the reader was never called on decline. The session object never
-leaves the launcher's session scope: the runtime receives only the restricted
-reader. The session factory is imported inside the function so that importing
-the launcher — which tests do — never reaches transport code.
+The session object never leaves the launcher's session scope: the runtime
+receives only the restricted reader. The session factory is imported inside
+the function so that importing the launcher — which tests do — never reaches
+transport code.
+
+## Authorization: two modes, no default
+
+Repeated `y/N` prompts do not survive contact with scheduled execution, and
+the approved destination is unattended operation. So there are two modes, and
+supplying **neither is refused** — a scheduled run must never silently fall
+back to a prompt nobody is present to answer, and a manual run must never
+silently skip the manifest. Supplying **both** is also refused.
+
+`ENABLE_MILESTONE_9_READ_ONLY_OBSERVATION=1` remains necessary and remains
+**insufficient**. Environment presence is never itself approval.
+
+### `--interactive` — manual development
+
+Two hidden `y/N` prompts, unchanged. Only exact `y`/`Y` approves; empty,
+`yes`, `Y `, EOF, and an unreadable prompt all decline. Each stage may be
+asked once; a second request is a rejection, not a re-prompt. Both are
+answered **before any read occurs**, pinned by a test asserting the reader is
+never called on decline.
+
+### `--authorization-manifest` — scheduled, unattended
+
+An operator-issued JSON document, validated and consumed **before** the
+checkpoint starts, so an invalid or spent manifest costs zero broker reads.
+
+`src/read_only_authorization_manifest.py` is deliberately **not** an
+always-yes mode. It authorizes one checkpoint identity, once. Nothing in it
+produces the string `y`, and a test parses the launcher's AST to assert no
+`"y"`, `"Y"`, or `"yes"` literal exists anywhere in it.
+
+Every field is pinned and independently enforced — each one alone can refuse:
+
+| Field | Rule |
+| --- | --- |
+| `scope` | exactly `READ_ONLY_BROKER_OBSERVATION` |
+| `approved_main_sha` | must equal resolved `HEAD` |
+| `checkpoint_implementation_digest` | must equal the digest over 5 pinned files |
+| `allowed_broker_operations` | exactly the three reviewed reads, no duplicates |
+| `write_limits` | all four counters exactly `0`, exact key set |
+| `maximum_sessions` | exactly `1` |
+| `checkpoint_observation_id` | must equal this run's identity |
+| `issued_at` / `expires_at` | timezone-aware, window ≤ 24h, currently valid |
+| `issued_by` | refused if it names an agent or automation |
+| field set | exact — missing **and** unexpected keys both refused |
+
+The implementation digest covers `read_only_observation_runtime`,
+`read_only_broker_state`, `read_only_authorization_manifest`,
+`live_order_state_model`, and the launcher. Change any of them and every
+previously issued manifest stops validating — an operator approved *this
+implementation*, not this file name.
+
+`HEAD` is resolved by reading the git directory directly. No subprocess: this
+is the authorization path, and shelling out there would add a process-spawn
+surface to the one module whose value is being small enough to audit.
+
+### One use, recorded outside evidence
+
+`ManifestConsumptionLedger` records spent identities in a directory supplied
+separately from `--evidence-root`. This is deliberate. Evidence records what a
+run *saw*; the ledger is a control input governing whether a run may *happen*.
+Storing the second inside the first would mean clearing evidence silently
+restores authorization — the same class of gap that retired Run IDs closed for
+commissioning. Consumption is directory creation, atomic on POSIX and Windows,
+so two concurrent launches cannot both win. A manifest that fails validation
+is **not** consumed: a refusal must not burn an identity the operator can
+legitimately reissue.
+
+### The agent never authors its own authorization
+
+There is no template generator, no renewal helper, and no serializer. A test
+walks the module's AST for any call that could *emit* a manifest — `open`,
+`write_text`, `write_bytes`, `json.dump`, `json.dumps` — and asserts there are
+none. The only permitted filesystem mutation is the ledger's `mkdir`, which
+*spends* authorization rather than granting it. A second test sweeps all of
+`src/` for anything that both mentions the scope and serializes JSON.
+
+### Unattended is a validated mode, not a skipped check
+
+`ReadOnlyCheckpointRequest` carries `authorization_mode`. `ATTENDED_MODE`
+requires an operator present; `UNATTENDED_MODE` does not, because its approval
+is a manifest issued earlier rather than a person now. An unrecognized mode is
+refused. "No operator at the keyboard" is therefore first-class and
+validated — not a precondition quietly bypassed.
+
+## What this manifest is not
+
+A future unattended **write** milestone needs a different, richer policy.
+`UNATTENDED_WRITE_POLICY_REQUIRED_FIELDS` names its required contents —
+capital tier, strategy version, symbol allowlist, position and exposure
+limits, daily/weekly/drawdown limits, permitted trading window, deployment
+expiry, global kill-switch state.
+
+That is a **specification, not an implementation**. Nothing reads or honours
+those fields today, none of them may appear in a read-only manifest, and
+`assert_not_write_authorization` refuses a manifest that carries one. This
+format cannot be widened into write authorization: a write-enabled runtime
+must be authorized by an object that does not exist yet, reviewed on its own
+terms. **The trading agent may never create, renew, broaden, or raise its own
+authorization.**
 
 ## Definition of done for Milestone 9
 

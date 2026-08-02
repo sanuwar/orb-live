@@ -962,6 +962,15 @@ class ReadOnlyEvidenceStore:
 # --------------------------------------------------------------------------
 
 
+#: How this run is authorized. Attended means a person answers two prompts;
+#: unattended means an operator issued a manifest in advance. Unattended is
+#: the approved destination, so "no operator at the keyboard" must be a
+#: first-class, validated mode — not a check quietly skipped.
+ATTENDED_MODE = "INTERACTIVE_ATTENDED"
+UNATTENDED_MODE = "MANIFEST_UNATTENDED"
+AUTHORIZATION_MODES: frozenset[str] = frozenset({ATTENDED_MODE, UNATTENDED_MODE})
+
+
 @dataclass(frozen=True)
 class ReadOnlyCheckpointRequest:
     run_id: str
@@ -971,13 +980,19 @@ class ReadOnlyCheckpointRequest:
     evidence_root: Path
     authorization_flag: str
     operator_present: bool
+    authorization_mode: str = ATTENDED_MODE
     plan: ReadOnlyObservationPlan = field(default_factory=ReadOnlyObservationPlan)
 
     def validate(self) -> None:
         if self.authorization_flag != READ_ONLY_AUTHORIZATION_FLAG:
             raise ReadOnlyRuntimeError("read-only authorization flag is absent")
-        if not self.operator_present:
-            raise ReadOnlyRuntimeError("an operator must be present")
+        if self.authorization_mode not in AUTHORIZATION_MODES:
+            raise ReadOnlyRuntimeError("authorization mode is invalid")
+        if self.authorization_mode == ATTENDED_MODE and not self.operator_present:
+            # Only the attended mode needs a person: its approval *is* the
+            # person. The unattended mode's approval is a manifest an operator
+            # issued earlier, validated and consumed before any read.
+            raise ReadOnlyRuntimeError("attended mode requires an operator present")
         if not isinstance(self.symbol, str) or not self.symbol.strip():
             raise ReadOnlyRuntimeError("one observed symbol is required")
         if not isinstance(self.expected_quantity, Decimal) or self.expected_quantity <= 0:
@@ -1162,7 +1177,10 @@ __all__ = [
     "ACKNOWLEDGMENT_PROMPT",
     "ACKNOWLEDGMENT_STAGE",
     "APPROVAL_INPUTS",
+    "ATTENDED_MODE",
+    "AUTHORIZATION_MODES",
     "AUTHORIZATION_STAGES",
+    "UNATTENDED_MODE",
     "AcquisitionResult",
     "AttributionResult",
     "COMPLETED_OUTCOMES",
