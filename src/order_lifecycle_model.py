@@ -579,14 +579,21 @@ def resolve_replacement_chain(
         return ChainResult(ChainOutcome.MISSING_PARENT)
 
     # A parent superseded by two children cannot be resolved: which one carries
-    # the intent is not knowable from here.
+    # the intent is not knowable from here. This check stays global — a
+    # duplicate anywhere means the correlation itself is unreliable, so it is
+    # not safe to trust any chain drawn from the same data.
+    #
+    # A dangling parent reference is deliberately *not* global. An unrelated
+    # order elsewhere in the mapping naming a parent we do not have says
+    # nothing about this chain, and reporting MISSING_PARENT for it would make
+    # a valid result depend on unrelated data — and would hide a real chain
+    # problem behind an unrelated one. It is checked per node during the walk
+    # instead.
     children: dict[str, list[str]] = {}
     for identifier, observation in observations.items():
         parent = observation.replaces_identifier
-        if parent is None:
+        if parent is None or parent not in observations:
             continue
-        if parent not in observations:
-            return ChainResult(ChainOutcome.MISSING_PARENT)
         children.setdefault(parent, []).append(identifier)
     for successors in children.values():
         if len(successors) > 1:
@@ -599,6 +606,11 @@ def resolve_replacement_chain(
         if current in seen:
             return ChainResult(ChainOutcome.CYCLE_DETECTED, depth)
         seen.add(current)
+        # A node on this chain that names a parent we do not hold means this
+        # chain's history is incomplete, which is a fact about this chain.
+        parent = observations[current].replaces_identifier
+        if parent is not None and parent not in observations:
+            return ChainResult(ChainOutcome.MISSING_PARENT, depth)
         successors = children.get(current, [])
         if not successors:
             state = observations[current].state

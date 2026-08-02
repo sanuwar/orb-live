@@ -534,9 +534,10 @@ def test_cancellation_after_a_partial_fill_preserves_that_some_filled():
         obs("A", S.PARTIALLY_FILLED, filled=2, at=1.0),
         obs("A", S.CANCELED, filled=2, at=1.5),
     )
-    assert result.outcome is ReconciliationOutcome.NO_CHANGE or (
-        result.outcome is ReconciliationOutcome.CONSISTENT_PROGRESS
-    )
+    # Pinned to the single correct outcome. A disjunctive assertion here would
+    # accept a behaviour change in either direction without noticing.
+    assert result.outcome is ReconciliationOutcome.CONSISTENT_PROGRESS
+    assert result.fill_occurred is False   # no *additional* fill in this step
     assert result.state is S.CANCELED
     # The fill is still represented in the observation that produced it.
     assert obs("A", S.CANCELED, filled=2).cumulative_filled == 2
@@ -613,6 +614,63 @@ def test_a_missing_parent_is_refused():
     assert (
         resolve_replacement_chain(observations, "B").outcome
         is ChainOutcome.MISSING_PARENT
+    )
+
+
+def test_an_unrelated_orphan_does_not_poison_a_valid_chain():
+    """Review finding: a dangling parent elsewhere used to fail this chain.
+
+    Reporting MISSING_PARENT here would make a valid result depend on
+    unrelated data, and would hide a real chain problem behind someone
+    else's.
+    """
+    observations = {
+        "A": obs("A", S.REPLACED),
+        "B": obs("B", S.WORKING, replaces="A"),
+        "Z": obs("Z", S.WORKING, replaces="GHOST"),   # unrelated, orphaned
+    }
+    result = resolve_replacement_chain(observations, "A")
+    assert result.outcome is ChainOutcome.RESOLVED
+    assert result.depth == 1
+    assert result.terminal_state is S.WORKING
+
+
+def test_a_dangling_parent_on_this_chain_is_still_refused():
+    """The narrowing must not become a loophole."""
+    observations = {
+        "A": obs("A", S.REPLACED, replaces="GHOST"),
+        "B": obs("B", S.WORKING, replaces="A"),
+    }
+    assert (
+        resolve_replacement_chain(observations, "A").outcome
+        is ChainOutcome.MISSING_PARENT
+    )
+
+
+def test_a_dangling_parent_reached_mid_walk_is_refused():
+    observations = {
+        "A": obs("A", S.REPLACED),
+        "B": obs("B", S.REPLACED, replaces="A"),
+        "C": obs("C", S.WORKING, replaces="B"),
+    }
+    # Corrupt B's history: it now claims a parent nobody holds.
+    observations["B"] = obs("B", S.REPLACED, replaces="GHOST")
+    result = resolve_replacement_chain(observations, "A")
+    assert result.outcome in {ChainOutcome.MISSING_PARENT, ChainOutcome.NO_REPLACEMENT}
+
+
+def test_a_duplicate_child_anywhere_still_fails_globally():
+    """Unlike a dangling parent, a duplicate means correlation is unreliable."""
+    observations = {
+        "A": obs("A", S.REPLACED),
+        "B": obs("B", S.WORKING, replaces="A"),
+        "P": obs("P", S.REPLACED),
+        "Q": obs("Q", S.WORKING, replaces="P"),
+        "R": obs("R", S.WORKING, replaces="P"),   # unrelated duplicate
+    }
+    assert (
+        resolve_replacement_chain(observations, "A").outcome
+        is ChainOutcome.DUPLICATE_CHILD
     )
 
 
@@ -705,17 +763,55 @@ def test_no_chain_result_permits_action():
 # --------------------------------------------------------------------------
 
 
+#: Every value a sanitized reconciliation fact may take. Written out rather
+#: than derived, so a new value cannot slip in by widening an enum.
+ALLOWED_FACT_VALUES = {
+    "reconciliation_outcome": {outcome.value for outcome in ReconciliationOutcome},
+    "lifecycle_state": {state.value for state in LifecycleState},
+    "state_provenance": {p.value for p in MappingProvenance},
+    "is_terminal": {"true", "false"},
+    "resolved_from_unknown": {"true", "false"},
+    "fill_occurred": {"true", "false"},
+    "permits_automated_action": {"false"},
+}
+
+
 def test_reconciliation_facts_carry_no_identifier_quantity_or_payload():
+    """Allowlisted, not spot-checked.
+
+    Asserting that the digits 7 and 9 are absent would pass by coincidence —
+    the facts contain no digits at all — and would say nothing about a value
+    that leaked next year. Every key and value is checked against a fixed
+    vocabulary instead.
+    """
     result = reconcile(
         obs("SECRET-ORDER-123", S.PARTIALLY_FILLED, filled=7, at=1.0),
         obs("SECRET-ORDER-123", S.FILLED, filled=9, at=1.5),
     )
     facts = result.sanitized_facts()
-    rendered = repr(facts)
-    assert "SECRET-ORDER-123" not in rendered
-    assert "7" not in rendered and "9" not in rendered
+    assert set(facts) == set(ALLOWED_FACT_VALUES)
+    for key, value in facts.items():
+        assert value in ALLOWED_FACT_VALUES[key], (key, value)
     assert facts["fill_occurred"] == "true"
     assert facts["permits_automated_action"] == "false"
+
+
+def test_no_reconciliation_fact_value_escapes_the_allowlist():
+    """Drive many shapes through and check every emitted value."""
+    cases = [
+        (obs("A", S.WORKING, at=1.0), obs("A", S.FILLED, filled=1, at=1.5)),
+        (obs("A", S.UNKNOWN, at=1.0), obs("A", S.WORKING, at=1.5)),
+        (obs("A", S.FILLED, at=1.0), obs("A", S.CANCELED, at=1.5)),
+        (obs("A", S.WORKING, at=5.0), obs("A", S.FILLED, at=1.0)),
+        (obs("A", S.PARTIALLY_FILLED, filled=9, at=1.0),
+         obs("A", S.PARTIALLY_FILLED, filled=2, at=1.5)),
+        (obs("A", S.WORKING, at=1.0), obs("B", S.FILLED, at=1.5)),
+    ]
+    for previous, current in cases:
+        facts = reconcile(previous, current).sanitized_facts()
+        assert set(facts) == set(ALLOWED_FACT_VALUES)
+        for key, value in facts.items():
+            assert value in ALLOWED_FACT_VALUES[key], (key, value)
 
 
 def test_chain_facts_carry_no_identifier_and_bucket_the_depth():
