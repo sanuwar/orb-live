@@ -111,6 +111,7 @@ def scenario(**overrides) -> Scenario:
         "observed_roles": {OrderRole.ENTRY: LifecycleState.FILLED},
         "preconditions": preconditions(),
         "current_monotonic": NOW,
+        "expected_run_id": RUN,
         "alert_policy": AlertPolicy(),
     }
     values.update(overrides)

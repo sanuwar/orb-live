@@ -114,6 +114,11 @@ class Scenario:
     observed_roles: Mapping[object, object]
     preconditions: GatePreconditions
     current_monotonic: float
+    #: The run this scenario believes it is resuming. Supplied rather than
+    #: read off the journal: deriving it from the record being checked made
+    #: the identity comparison compare a value with itself, so a journal for
+    #: an entirely different run could never be detected.
+    expected_run_id: str
     alert_policy: AlertPolicy = field(default_factory=AlertPolicy)
 
     def __post_init__(self) -> None:
@@ -125,6 +130,8 @@ class Scenario:
             raise ScenarioError("gate preconditions are required")
         if not isinstance(self.alert_policy, AlertPolicy):
             raise ScenarioError("an alert policy is required")
+        if not isinstance(self.expected_run_id, str) or not self.expected_run_id.strip():
+            raise ScenarioError("an expected run identity is required")
 
 
 @dataclass(frozen=True)
@@ -217,7 +224,7 @@ def run_scenario(scenario: Scenario) -> ScenarioResult:
     #    proceed even if everything about the *proposed* action is fine.
     recovery = recover(
         scenario.journal, scenario.observed_roles,
-        expected_run_id=(scenario.journal.run_id if scenario.journal else "absent"),
+        expected_run_id=scenario.expected_run_id,
         current_monotonic=scenario.current_monotonic,
     )
     if recovery.requires_operator:
