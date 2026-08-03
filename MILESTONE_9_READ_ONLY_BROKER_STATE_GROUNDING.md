@@ -1,34 +1,75 @@
 # Milestone 9 — Read-Only Broker-State Grounding
 
-**Status: IN PROGRESS — HELD AT AN OPERATOR GATE.** The offline foundation and
-the real read-only observation runtime are both implemented, merged, and
-verified. The attended checkpoint **has not been executed**, and no broker
-state has been approved for active protection.
+**Status: IN PROGRESS — the real-account checkpoint has been executed; steps 4
+and 5 remain.** The offline foundation and the real read-only observation
+runtime are both implemented, merged, and verified. The attended checkpoint
+**was executed once, successfully**, and recorded that no protective order
+existed. **No broker state has been approved for active protection**, and the
+approved mapping is still empty.
 
-## ⛔ Operator gate: the real-account checkpoint is ON HOLD
+## ✅ Operator gate lifted — the real-account checkpoint ran once
 
-Step 2 of the definition of done is **software-complete and deliberately not
-run**. Until an operator explicitly lifts this hold, nothing may:
+An operator lifted the hold and executed step 2 of the definition of done on
+**2026-08-03 at approximately 09:58 ET**, inside regular hours.
 
-- execute the checkpoint against a real account,
-- open a broker session,
-- create or issue an authorization manifest,
-- enable `strategy.enabled`, or
-- create or approve any write capability.
-
-### Pins preserved for the eventual run
-
-| Pin | Value |
+| Fact | Value |
 | --- | --- |
+| `approved_main_sha` | `a93d13f1027552b8d01194cf925438c916bb0ed6` |
 | `checkpoint_implementation_digest` | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` |
-| `approved_main_sha` | **re-derive from `git rev-parse HEAD` at manifest-issue time** |
+| Run ID | `m9-obs-20260803-01` |
+| Outcome | `NO_PROTECTIVE_ORDER_OBSERVED` |
+| Decision | `VERIFIED_FLAT` |
+| Freshness | `FRESH` |
+| Broker sessions | exactly 1, opened and closed cleanly |
+| Read calls | `get_accounts` 1 · `get_equity_positions` 1 · `get_equity_orders` 1 |
+| Write counters | all `0` |
+| Approved active-protection state count | `0` |
 
-The digest is the durable pin — it changes only when one of the five files in
-`PINNED_IMPLEMENTATION_FILES` changes, and no held work touches them.
-`approved_main_sha` must equal the *resolved* `HEAD`, so any commit to `main`,
-documentation included, moves it. It was
-`4fc75b6be7419d369c3c72dac046f23842eb3f6d` when PR #44 merged; that value is a
-historical record, **not** a value to copy into a manifest.
+The account was **verified flat**, with no position and no executable related
+sell order. Sanitized evidence was written to an untracked tree outside the
+repository and validated: every required field present, each permitted read
+exactly `1`, every write counter `0`, and no account identifier, symbol, order
+identifier, quantity, price, or balance persisted anywhere in it.
+
+### A flat account is a real result, not a failed run
+
+`NO_PROTECTIVE_ORDER_OBSERVED` is one of the two **completion** outcomes in
+`COMPLETED_OUTCOMES`. The checkpoint observes a protective stop only if one
+already exists from separate, safe circumstances; if none exists it reports
+`NOT_OBSERVED` and stops, which is exactly what step 3 of the definition of
+done contemplates. The run is complete and is not to be repeated in search of
+a different answer.
+
+**No active protection state was observed, and nothing was promoted.**
+`ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` remains empty, `strategy.enabled`
+remains `false`, and `ACTIVATION_APPROVALS` remains empty.
+
+### The Run ID and manifest are permanently spent
+
+`m9-obs-20260803-01` and the manifest issued against it are consumed. Neither
+may be reused, repointed, or reissued — the consumption ledger records the
+identity outside the evidence tree precisely so that clearing evidence cannot
+silently restore authorization.
+
+### Pins for any future checkpoint
+
+A later checkpoint is a **new** run, and every pin must be derived again at
+that time:
+
+| Pin | How it is obtained |
+| --- | --- |
+| Run ID | a fresh, never-used identity |
+| authorization manifest | newly authored by an operator, single-use |
+| `approved_main_sha` | re-derived from `git rev-parse HEAD` at manifest-issue time |
+| `checkpoint_implementation_digest` | the **then-current** digest over `PINNED_IMPLEMENTATION_FILES` |
+
+The digest above, `8516057134…31faf`, is a historical record of what was
+executed on 2026-08-03. So is `approved_main_sha`
+`a93d13f1027552b8d01194cf925438c916bb0ed6`, and so is the pre-execution value
+`4fc75b6be7419d369c3c72dac046f23842eb3f6d` from when PR #44 merged. **None of
+them is a value to copy into a future manifest.** `approved_main_sha` must
+equal the resolved `HEAD`, so any commit to `main` — this documentation
+included — moves it.
 
 Manifests remain **operator-created only**. Nothing in this repository can emit
 one, and a manifest is single-use against a fresh, unretired Run ID.
@@ -60,7 +101,8 @@ indeterminate.
 
 `src/read_only_broker_state.py` derives its approved set from a provenance
 registry rather than restating it, and a test asserts the two agree. Today both
-are empty.
+are empty, and the completed 2026-08-03 checkpoint did not change that: it
+observed a flat account, so it had nothing to propose and promoted nothing.
 
 Attended commissioning is unaffected: it uses a separate
 `assess_provisional_protection`, which is what the three completed live runs
@@ -157,11 +199,11 @@ Never represented: account numbers, buying-power amounts, balances, order
 identifiers, broker symbols, prices, tokens, headers, raw exception text, raw
 responses, or request arguments.
 
-## The later read-only observation checkpoint
+## The read-only observation checkpoint
 
-Designed here, **not executed**. `ReadOnlyObservationPlan` encodes the
-constraints in tracked code so they are reviewable now rather than argued about
-next to a live terminal.
+Designed here, and **executed once on 2026-08-03** — see the completion record
+above. `ReadOnlyObservationPlan` encodes the constraints in tracked code so they
+were reviewable in advance rather than argued about next to a live terminal.
 
 - Permitted tools: `get_accounts`, `get_equity_positions`, `get_equity_orders` —
   one call each.
@@ -176,6 +218,15 @@ It observes a protective stop **only if one already exists** from separate,
 safe circumstances. If none exists it reports `NOT_OBSERVED` and stops.
 `manufactures_observation=True` raises: **a live trade placed to generate an
 observation would be a write, and this milestone performs none.**
+
+This constraint is permanent and survives the completed run. The 2026-08-03
+checkpoint found a flat account and therefore observed nothing, and the correct
+response to that is to **wait for naturally occurring protective state** — not
+to open a position, place a stop, or otherwise manufacture something to look
+at. **A protective order must never be created merely to generate an
+observation.** Doing so would be a broker write, would defeat the entire claim
+of this milestone, and would produce evidence about a stop the system itself
+arranged rather than about how the broker behaves.
 
 ## Zero-write guarantee
 
@@ -463,22 +514,72 @@ authorization.**
 Milestone 9 is complete only when **all** of the following hold:
 
 1. ~~The offline foundation is reviewed and merged.~~ **Done** — PR #43.
-2. A reviewed attended read-only checkpoint executes against a real account,
-   performing only the permitted reads and zero writes. **Not done — HELD at
-   the operator gate above.** The runtime and launcher exist, are merged, and
-   are tested against fakes; **nothing has been executed against a real
-   account.** This is a deliberate hold, not an unfinished task.
-3. Its sanitized observations are recorded, including `NOT_OBSERVED` if no safe
-   protective order existed. **Not done** — follows from step 2.
+2. ~~A reviewed attended read-only checkpoint executes against a real account,
+   performing only the permitted reads and zero writes.~~ **Done** —
+   2026-08-03, run `m9-obs-20260803-01`: one session, three permitted reads,
+   zero writes.
+3. ~~Its sanitized observations are recorded, including `NOT_OBSERVED` if no
+   safe protective order existed.~~ **Done** — the account was verified flat,
+   `NOT_OBSERVED` was recorded, and the evidence passed privacy validation.
+   This is the branch of step 3 the definition explicitly allows for.
 4. A human reviews those observations and explicitly approves zero or more
-   states, promoting them to `APPROVED_FOR_ACTIVE_PROTECTION`. **Not done.**
+   states, promoting them to `APPROVED_FOR_ACTIVE_PROTECTION`. **Not done, and
+   not yet actionable** — the completed run observed no protective state, so
+   there is nothing to review for promotion. This step is now waiting on
+   **naturally occurring** protective state from a future checkpoint, not on
+   software.
 5. `ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` is updated to match, with the
-   consistency test still passing. **Not done** — the set is still empty.
+   consistency test still passing. **Not done** — the set is still empty, which
+   is the correct state given step 4.
 6. ~~Reliable position, order, buying-power, and market-session snapshot
    acquisition is wired to real reads.~~ **Done**, with buying power closed
    honestly as `UNKNOWN` rather than by widening the read surface — see above.
 
-Steps 2 through 5 require an operator at a terminal and are **not** software
-work. Approving zero states remains a legitimate outcome: if the observations
-do not justify approval, the mapping stays empty and unattended operation
-stays blocked on it.
+Steps 4 and 5 require an operator at a terminal and are **not** software work.
+Approving zero states remains a legitimate outcome: if the observations do not
+justify approval — including because there were none — the mapping stays empty
+and unattended operation stays blocked on it. **Protection grounding is not
+complete**, and the completed checkpoint did not advance it; it established
+that the read path works end to end against a real account and that the account
+was flat.
+
+## Follow-up: manifest file encoding on Windows
+
+Not a safety defect. Recorded so it is not rediscovered at a live terminal.
+
+`load_manifest` reads with `encoding="utf-8"`, so a manifest saved with a UTF-8
+byte-order mark is refused as `manifest is not valid JSON`. PowerShell's `>`,
+`Out-File`, and `Set-Content` all emit a BOM by default, which makes this the
+default outcome of authoring a manifest the obvious way on Windows. It occurred
+during preparation for the 2026-08-03 run.
+
+**It fails closed, and it fails closed early.** The refusal happens in
+`load_manifest`, before `ManifestAuthorization` is constructed, so the ledger is
+never touched and neither the manifest nor the Run ID is consumed. An operator
+can fix the encoding and reuse the same identity.
+
+**No runtime change was made, and none should be made casually.**
+`src/read_only_authorization_manifest.py` is one of the five files in
+`PINNED_IMPLEMENTATION_FILES`. Switching the loader to `utf-8-sig` would change
+`checkpoint_implementation_digest` and invalidate every manifest issued against
+the current digest. It therefore belongs in the **re-pin window** described in
+[`MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md`](MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md),
+batched with the other pinned-file changes so the pin moves once, deliberately.
+
+Until then, the workaround is to author manifests without a BOM — on Windows,
+`[IO.File]::WriteAllText(path, json, (New-Object Text.UTF8Encoding $false))`.
+
+### A second ordering hazard worth knowing before the next run
+
+`main()` resolves authorization **before** the checkpoint validates its request:
+`build_authorization` loads *and consumes* the manifest, while the account
+identity is not checked until `ReadOnlyCheckpointRequest.validate()` runs inside
+the runner. An empty or blank account argument alongside an otherwise-valid
+manifest therefore spends the manifest and the Run ID and then finishes as
+`PRECONDITION_REJECTED`.
+
+This is consistent with the design — authorization is deliberately resolved
+before any transport exists, which is what F5 fixed — but it means operator
+inputs should be checked for presence *before* invoking the launcher. A manifest
+can be validated in advance with `load_manifest` and `validate_manifest`, which
+do not consume; only constructing `ManifestAuthorization` does.

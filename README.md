@@ -142,8 +142,11 @@ ahead of its milestone:
   `VERIFIED_ACTIVE_PROTECTION` is not available from that adapter mapping.
   Attended commissioning uses a provisional-protection assessment instead. This
   is dormant today and is a hard blocker for unattended operation, where no
-  operator is watching the stop. *(Milestone 9 — the first automation
-  milestone.)*
+  operator is watching the stop. The read-only observation checkpoint has now
+  run once against a real account (2026-08-03) and found the account flat with
+  no protective order, so it recorded `NOT_OBSERVED` and promoted nothing — the
+  mapping is still empty and grounding is still incomplete. *(Milestone 9 — the
+  first automation milestone.)*
 - **`site/` is documentation and journal only.** The React dashboard is
   statically bundled, has no backend connection, no broker integration, no live
   data, and no trading controls.
