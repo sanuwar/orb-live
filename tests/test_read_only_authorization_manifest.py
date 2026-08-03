@@ -820,3 +820,79 @@ def test_the_manifest_module_imports_nothing_write_capable():
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             assert not any(word in node.module.lower() for word in forbidden), node.module
+
+
+# --------------------------------------------------------------------------
+# D: encoding. A BOM is the Windows default, not a malformed manifest.
+# --------------------------------------------------------------------------
+
+
+def _write(path, payload, *, encoding):
+    path.write_text(json.dumps(payload), encoding=encoding)
+    return path
+
+
+def test_a_manifest_with_a_utf8_bom_loads(tmp_path):
+    """PowerShell's `>`, `Out-File`, and `Set-Content` all emit a BOM by
+    default, so this was the default outcome of authoring a manifest the
+    obvious way on Windows. It cost a real checkpoint preparation."""
+    path = _write(tmp_path / "m.json", payload(), encoding="utf-8-sig")
+    assert path.read_bytes().startswith(b"\xef\xbb\xbf")
+    manifest = load_manifest(path)
+    assert manifest.scope == READ_ONLY_SCOPE
+
+
+def test_a_manifest_without_a_bom_still_loads(tmp_path):
+    path = _write(tmp_path / "m.json", payload(), encoding="utf-8")
+    assert not path.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert load_manifest(path).scope == READ_ONLY_SCOPE
+
+
+def test_both_encodings_parse_to_the_same_manifest(tmp_path):
+    with_bom = _write(tmp_path / "a.json", payload(), encoding="utf-8-sig")
+    without = _write(tmp_path / "b.json", payload(), encoding="utf-8")
+    assert load_manifest(with_bom) == load_manifest(without)
+
+
+def test_the_bom_allowance_relaxes_nothing_else(tmp_path):
+    """Only a leading BOM is tolerated. Every other refusal is unchanged."""
+    broken = tmp_path / "broken.json"
+    broken.write_text("\ufeff{not json", encoding="utf-8")
+    with pytest.raises(AuthorizationManifestError):
+        load_manifest(broken)
+
+    missing = payload()
+    del missing["scope"]
+    with pytest.raises(AuthorizationManifestError):
+        load_manifest(_write(tmp_path / "missing.json", missing, encoding="utf-8-sig"))
+
+    extra = payload()
+    extra["extra_key"] = "x"
+    with pytest.raises(AuthorizationManifestError):
+        load_manifest(_write(tmp_path / "extra.json", extra, encoding="utf-8-sig"))
+
+
+def test_a_file_that_is_not_utf8_at_all_is_refused_not_raised(tmp_path):
+    path = tmp_path / "binary.json"
+    path.write_bytes(b"\xff\xfe{\x00")
+    with pytest.raises(AuthorizationManifestError):
+        load_manifest(path)
+
+
+def test_a_bom_manifest_that_fails_validation_consumes_nothing(tmp_path):
+    """The refusal must not burn an identity the operator can reissue."""
+    body = payload()
+    body["approved_main_sha"] = "0" * 40
+    path = _write(tmp_path / "m.json", body, encoding="utf-8-sig")
+    ledger_root = tmp_path / "ledger"
+    manifest = load_manifest(path)
+    with pytest.raises(AuthorizationManifestError):
+        validate_manifest(
+            manifest,
+            repository_root=pathlib.Path("."),
+            checkpoint_observation_id=body["checkpoint_observation_id"],
+            now=datetime.now(tz=timezone.utc),
+            head_sha="a" * 40,
+            implementation_digest=body["checkpoint_implementation_digest"],
+        )
+    assert not ledger_root.exists()

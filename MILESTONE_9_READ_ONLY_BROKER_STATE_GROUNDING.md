@@ -63,13 +63,24 @@ that time:
 | `approved_main_sha` | re-derived from `git rev-parse HEAD` at manifest-issue time |
 | `checkpoint_implementation_digest` | the **then-current** digest over `PINNED_IMPLEMENTATION_FILES` |
 
-The digest above, `8516057134…31faf`, is a historical record of what was
-executed on 2026-08-03. So is `approved_main_sha`
-`a93d13f1027552b8d01194cf925438c916bb0ed6`, and so is the pre-execution value
-`4fc75b6be7419d369c3c72dac046f23842eb3f6d` from when PR #44 merged. **None of
-them is a value to copy into a future manifest.** `approved_main_sha` must
-equal the resolved `HEAD`, so any commit to `main` — this documentation
-included — moves it.
+### The re-pin window has since moved the digest
+
+| Digest | Value | Status |
+| --- | --- | --- |
+| Pre-re-pin (historical) | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` | What run `m9-obs-20260803-01` actually executed. **Never valid again.** |
+| Current | `3c972092693a41524d2406fb700ff9cdab4f635bad3474630a6882c3ac6b3b1c` | The digest a new manifest must carry |
+
+All five pinned files changed in the re-pin window described below, so
+**every manifest issued against the old digest is now invalid** — including
+the one already spent. That is the mechanism working as designed: an operator
+approved *that* implementation, and this is no longer that implementation.
+
+The historical values are records, not values to copy forward. That applies to
+the old digest, to `approved_main_sha`
+`a93d13f1027552b8d01194cf925438c916bb0ed6`, and to the pre-execution
+`4fc75b6be7419d369c3c72dac046f23842eb3f6d` from when PR #44 merged.
+`approved_main_sha` must equal the resolved `HEAD`, so any commit to `main` —
+this documentation included — moves it.
 
 Manifests remain **operator-created only**. Nothing in this repository can emit
 one, and a manifest is single-use against a fresh, unretired Run ID.
@@ -543,43 +554,122 @@ complete**, and the completed checkpoint did not advance it; it established
 that the read path works end to end against a real account and that the account
 was flat.
 
-## Follow-up: manifest file encoding on Windows
+## The re-pin window
 
-Not a safety defect. Recorded so it is not rediscovered at a live terminal.
+Four deferred changes to the digest-pinned files were batched and landed
+together, so the pin moved **once** rather than once per improvement. The
+window was opened deliberately at the cheapest possible moment: the only
+manifest ever issued was already spent, so no outstanding authorization was
+invalidated by moving the digest.
 
-`load_manifest` reads with `encoding="utf-8"`, so a manifest saved with a UTF-8
-byte-order mark is refused as `manifest is not valid JSON`. PowerShell's `>`,
-`Out-File`, and `Set-Content` all emit a BOM by default, which makes this the
-default outcome of authoring a manifest the obvious way on Windows. It occurred
-during preparation for the 2026-08-03 run.
+### F2 — the confirmation read
 
-**It fails closed, and it fails closed early.** The refusal happens in
-`load_manifest`, before `ManifestAuthorization` is constructed, so the ledger is
-never touched and neither the manifest nor the Run ID is consumed. An operator
-can fix the encoding and reuse the same identity.
+Positions and orders were each read once, and
+`order_state_changed_during_acquisition` was populated from the *market
+session* rather than from any comparison of orders. The name asserted something
+the code did not measure.
 
-**No runtime change was made, and none should be made casually.**
-`src/read_only_authorization_manifest.py` is one of the five files in
-`PINNED_IMPLEMENTATION_FILES`. Switching the loader to `utf-8-sig` would change
-`checkpoint_implementation_digest` and invalidate every manifest issued against
-the current digest. It therefore belongs in the **re-pin window** described in
-[`MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md`](MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md),
-batched with the other pinned-file changes so the pin moves once, deliberately.
+Orders are now read twice and the two are compared on an attributed, normalized
+projection — the set of `(identifier, normalized state)` pairs for the observed
+symbol, plus the executable-sell and protective-candidate counts. Raw payloads
+are never compared: they differ every cycle in fields nothing depends on.
 
-Until then, the workaround is to author manifests without a BOM — on Windows,
-`[IO.File]::WriteAllText(path, json, (New-Object Text.UTF8Encoding $false))`.
+- Any difference sets the flag truthfully and yields `UNKNOWN_BROKER_STATE`.
+- A change on an unrelated symbol does not set it.
+- Read ordering does not set it — the projection is a set.
+- A failed confirmation read degrades orders to `UNAVAILABLE`, never "no
+  change": not knowing whether the set moved is not knowing that it did not.
+- **Report, never retry.** A detected change ends the cycle. Retrying would
+  widen the span, and deciding whether to back off belongs to the Milestone 10
+  scheduler, not to an observation primitive.
 
-### A second ordering hazard worth knowing before the next run
+Fields now say what they measure: `position_observations_disagreed` became
+`position_response_self_contradictory` (positions are read once; the flag only
+ever described a self-contradictory single response), and
+`market_session_changed_during_acquisition` is its own field.
 
-`main()` resolves authorization **before** the checkpoint validates its request:
-`build_authorization` loads *and consumes* the manifest, while the account
-identity is not checked until `ReadOnlyCheckpointRequest.validate()` runs inside
-the runner. An empty or blank account argument alongside an otherwise-valid
-manifest therefore spends the manifest and the Run ID and then finishes as
-`PRECONDITION_REJECTED`.
+**Positions are still read once**, so intra-cycle *position* consistency
+remains outside the guarantee, exactly as the accepted design specifies. Order
+changes are the leading indicator — position changes are a consequence of order
+execution — and re-reading positions would double the added span for a strictly
+weaker signal.
 
-This is consistent with the design — authorization is deliberately resolved
-before any transport exists, which is what F5 fixed — but it means operator
-inputs should be checked for presence *before* invoking the launcher. A manifest
-can be validated in advance with `load_manifest` and `validate_manifest`, which
-do not consume; only constructing `ManifestAuthorization` does.
+The budget is four calls: `get_equity_orders` twice, the other two once each.
+The ceiling is **per tool**, not uniform, so a change here cannot silently grant
+`get_accounts` or `get_equity_positions` a second call. No new tool was added —
+the confirmation reuses an already-permitted read — and the module still has
+exactly three literal `call_tool` sites. The span cap still wins: four reads
+that do not fit inside it are `SPAN_TOO_WIDE`.
+
+Order identifiers are held in memory to make the comparison possible. They are
+never persisted, and a test asserts one cannot reach evidence.
+
+### Authoritative calendar delegation
+
+`classify_market_session` no longer keeps a private copy of the holiday and
+early-close tables; it delegates to `src/exchange_calendar.py`. The temporary
+drift guard that kept the two copies in step is retired in the same change, as
+its own docstring required — replaced by a test asserting the private names are
+gone.
+
+Behaviour is preserved and is stricter in one respect: a wall time that does not
+name a single instant across a DST fold is now `UNKNOWN` rather than classified.
+Unsupported, expired, malformed, ambiguous, and naive inputs remain
+non-tradeable; early closes remain correct. Evidence metadata is preserved and
+now derived from `SCHEDULE_METADATA`, so a calendar extension cannot leave a
+stale claim behind; `calendar_source` reads
+`authoritative_static_exchange_calendar`.
+
+### Lifecycle-model adoption
+
+`src/order_lifecycle_model.py` is adopted in the narrowest way that is still
+load-bearing: it may **veto** a protection claim and may never grant one.
+
+If the two vocabularies disagree — this module reading a label as live and
+workable while the lifecycle model positively refuses it as terminal, replaced,
+or unrecognized — the disagreement is itself disqualifying and the safe reading
+wins.
+
+It deliberately does **not** veto `WORKING`. `WORKING` is the state a future
+grounded approval would legitimately name, and vetoing it would make step 5 of
+the definition of done unreachable: populating
+`ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` would no longer enable anything.
+Adoption must not quietly foreclose the milestone it serves. A test proves an
+approval of `confirmed` still works end to end.
+
+Nothing was promoted. The approved set, the lifecycle-approved set, and
+`PROVENANCE_SUFFICIENT_FOR_PROTECTION` are all still empty, and no projection
+can assert protection or permit automated action.
+
+### Manifest encoding, and the ordering hazard behind it
+
+`load_manifest` read with `encoding="utf-8"`, so a manifest saved with a UTF-8
+byte-order mark was refused as `manifest is not valid JSON`. PowerShell's `>`,
+`Out-File`, and `Set-Content` all emit a BOM by default, which made this the
+default outcome of authoring a manifest the obvious way on Windows. It cost a
+preparation attempt on 2026-08-03.
+
+It is now read with `utf-8-sig`, which accepts UTF-8 with or without a BOM and
+is otherwise identical. **Nothing else is relaxed**: malformed JSON, a missing
+key, an unexpected key, a wrong commit, and a wrong digest all still refuse, and
+a file that is not UTF-8 at all is refused rather than escaping as a decoding
+traceback. This was never a safety defect — it failed closed in `load_manifest`,
+before `ManifestAuthorization` is constructed, so nothing was consumed and the
+identity stayed reusable.
+
+The same preparation exposed a real ordering hazard. `main()` ran
+`build_authorization` — which loads **and consumes** the manifest — before the
+request was validated, so a blank account number alongside a perfectly good
+manifest would spend the manifest and the Run ID and then finish as
+`PRECONDITION_REJECTED`. The authorization would have been burned to discover a
+typo.
+
+Everything checkable without a broker, a session, or a secret is now checked
+first, in `assert_preconditions_before_authorization`: authorization flag, mode,
+operator presence, account identity, symbol, quantity, plan, Run ID path safety,
+and whether the Run ID is already used. A refusal there costs nothing. The
+in-runner `validate()` still runs — this is an earlier gate, not a replacement,
+because a caller reaching the runner by another path must still be validated.
+
+Authorization is still resolved **before** any transport exists, which is what
+F5 fixed and which this preserves.

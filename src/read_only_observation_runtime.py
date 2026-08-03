@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
@@ -37,9 +37,15 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
+from src.exchange_calendar import (
+    SCHEDULE_METADATA,
+    CalendarSession,
+    classify as classify_calendar_session,
+)
 from src.live_order_state_model import normalize_state
 from src.read_only_broker_state import (
     DEFAULT_FRESHNESS_POLICY,
+    READ_ONLY_CALL_CEILINGS,
     BrokerStateAssessment,
     BrokerStateDecision,
     CashAvailability,
@@ -240,51 +246,48 @@ CASH_AVAILABILITY_IS_NOT_READ = CashAvailability.UNKNOWN
 
 
 # --------------------------------------------------------------------------
-# Market session, from an exchange-calendar equivalent rather than a read.
+# Market session, delegated to the authoritative exchange calendar.
 # --------------------------------------------------------------------------
+#
+# This module used to carry its own private copy of the holiday and
+# early-close tables. Two copies of the same data is one copy too many: they
+# were kept in step only by a temporary drift guard in the calendar's test
+# module, which existed solely because this file is digest-pinned and could
+# not be edited while the real-account checkpoint was held.
+#
+# That checkpoint has run, so the duplication is retired here. There is now
+# exactly one table, in `src/exchange_calendar.py`, which validates itself at
+# import and carries its own provenance and review date.
 
-_REGULAR_OPEN = time(9, 30)
-_REGULAR_CLOSE = time(16, 0)
-_EXTENDED_OPEN = time(4, 0)
-_EXTENDED_CLOSE = time(20, 0)
+#: Where a `market_session` value comes from and what it does not cover.
+#: Every field is derived from `SCHEDULE_METADATA` rather than restated, so a
+#: calendar extension cannot leave a stale claim behind in evidence.
+CALENDAR_SOURCE = "authoritative_static_exchange_calendar"
+CALENDAR_SUPPORTED_RANGE = (
+    f"{SCHEDULE_METADATA.supported_years[0]}-{SCHEDULE_METADATA.supported_years[-1]}"
+)
+CALENDAR_LIMITATION = (
+    "no_authoritative_feed_expires_after_"
+    f"{SCHEDULE_METADATA.last_supported_date.year}"
+)
 
-#: Early-close (half-day) regular-session close. 13:00 ET.
-_EARLY_REGULAR_CLOSE = time(13, 0)
-
-#: US equity market full holidays for the years this checkpoint may run in.
-#: A date outside the covered years yields UNKNOWN rather than a guess.
-_COVERED_CALENDAR_YEARS: frozenset[int] = frozenset({2026, 2027})
-
-#: Where this calendar comes from and what it does not cover. Recorded in
-#: evidence and printed by the launcher so a reviewer never has to infer the
-#: provenance of a `market_session` value from source code.
-CALENDAR_SOURCE = "static_tracked_table"
-CALENDAR_SUPPORTED_RANGE = "2026-2027"
-CALENDAR_LIMITATION = "no_authoritative_feed_expires_after_2027"
-
-#: The last date this table can classify. Past it, every classification is
+#: The last date the calendar can classify. Past it every classification is
 #: UNKNOWN — the table cannot silently age into supporting a later year.
-CALENDAR_EXPIRES_AFTER = date(2027, 12, 31)
-
-_MARKET_HOLIDAYS: frozenset[date] = frozenset({
-    date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
-    date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3), date(2026, 9, 7),
-    date(2026, 11, 26), date(2026, 12, 25),
-    date(2027, 1, 1), date(2027, 1, 18), date(2027, 2, 15), date(2027, 3, 26),
-    date(2027, 5, 31), date(2027, 6, 18), date(2027, 7, 5), date(2027, 9, 6),
-    date(2027, 11, 25), date(2027, 12, 24),
-})
+CALENDAR_EXPIRES_AFTER: date = SCHEDULE_METADATA.last_supported_date
 
 
-#: Half-days: the regular session ends at 13:00 ET, not 16:00. Before this
-#: was modelled, a 14:00 ET observation on one of these dates classified as
-#: REGULAR_HOURS while the market was shut — a review finding, and exactly
-#: the kind of quiet wrongness a static table produces as it ages.
-_EARLY_CLOSE_DAYS: frozenset[date] = frozenset({
-    date(2026, 11, 27),   # day after Thanksgiving
-    date(2026, 12, 24),   # Christmas Eve
-    date(2027, 11, 26),   # day after Thanksgiving
-})
+#: Calendar session -> snapshot session. Pre- and post-market both collapse to
+#: EXTENDED_HOURS because this snapshot does not distinguish them and inventing
+#: a distinction it does not use would be one more thing to keep true.
+_SESSION_BY_CALENDAR_SESSION: Mapping[CalendarSession, MarketSession] = (
+    MappingProxyType({
+        CalendarSession.REGULAR: MarketSession.REGULAR_HOURS,
+        CalendarSession.PRE_MARKET: MarketSession.EXTENDED_HOURS,
+        CalendarSession.POST_MARKET: MarketSession.EXTENDED_HOURS,
+        CalendarSession.CLOSED: MarketSession.CLOSED,
+        CalendarSession.UNKNOWN: MarketSession.UNKNOWN,
+    })
+)
 
 
 def calendar_metadata() -> dict[str, str]:
@@ -298,40 +301,28 @@ def calendar_metadata() -> dict[str, str]:
 
 
 def classify_market_session(moment: datetime) -> MarketSession:
-    """Exchange-calendar equivalent. No broker read, no market-data tool.
+    """Delegate to the authoritative calendar. No broker or market-data read.
 
-    Deliberately conservative: an uncovered year, a date past the table's
-    expiry, or a naive timestamp yields UNKNOWN. The caller treats UNKNOWN as
-    unusable, so an unmodelled day cannot be mistaken for an open one.
+    Every fail-closed property of the previous private table is preserved by
+    the calendar and is stricter in one respect: a wall time that does not name
+    a single instant across a DST fold is `UNKNOWN` here, where the old table
+    would have classified it.
 
-    Half-days end the regular session at 13:00 ET. After an early close this
-    reports CLOSED rather than EXTENDED_HOURS: post-close extended trading
-    does exist on those days, but this table does not model its bounds, and
-    reporting a session it cannot bound would be the same class of error the
-    early-close gap was.
+    Unsupported, expired, malformed, ambiguous, and naive inputs are all
+    UNKNOWN. Weekends and full holidays are CLOSED. Half-days end the regular
+    session at 13:00 ET and read CLOSED afterwards rather than EXTENDED_HOURS:
+    post-close extended trading does exist on those days, but the table does
+    not model its bounds, and reporting a session it cannot bound would be the
+    same class of error the early-close gap was.
+
+    A calendar session this mapping does not recognise is UNKNOWN, so a future
+    `CalendarSession` member cannot reach a caller as a tradeable answer before
+    it is reviewed here.
     """
-    if not isinstance(moment, datetime) or moment.tzinfo is None:
-        return MarketSession.UNKNOWN
-    eastern = moment.astimezone(EASTERN)
-    if eastern.year not in _COVERED_CALENDAR_YEARS:
-        return MarketSession.UNKNOWN
-    day = eastern.date()
-    if day > CALENDAR_EXPIRES_AFTER:
-        return MarketSession.UNKNOWN
-    if eastern.weekday() >= 5 or day in _MARKET_HOLIDAYS:
-        return MarketSession.CLOSED
-    clock = eastern.timetz().replace(tzinfo=None)
-    if day in _EARLY_CLOSE_DAYS:
-        if _REGULAR_OPEN <= clock < _EARLY_REGULAR_CLOSE:
-            return MarketSession.REGULAR_HOURS
-        if _EXTENDED_OPEN <= clock < _REGULAR_OPEN:
-            return MarketSession.EXTENDED_HOURS
-        return MarketSession.CLOSED
-    if _REGULAR_OPEN <= clock < _REGULAR_CLOSE:
-        return MarketSession.REGULAR_HOURS
-    if _EXTENDED_OPEN <= clock < _EXTENDED_CLOSE:
-        return MarketSession.EXTENDED_HOURS
-    return MarketSession.CLOSED
+    classification = classify_calendar_session(moment)
+    return _SESSION_BY_CALENDAR_SESSION.get(
+        classification.session, MarketSession.UNKNOWN
+    )
 
 
 # --------------------------------------------------------------------------
@@ -353,6 +344,12 @@ class ObservedPosition:
 
 @dataclass(frozen=True)
 class ObservedOrder:
+    #: Broker order identifier. Held **in memory only**, for one purpose: to
+    #: tell whether the same order was seen in both reads of a cycle. It is
+    #: never persisted, never logged, never bucketed into evidence, and never
+    #: reaches a snapshot — `ReadOnlyBrokerSnapshot` has no field capable of
+    #: carrying it, and a test asserts it never appears on disk.
+    identity: str
     symbol: str
     side: str
     order_type: str
@@ -434,38 +431,45 @@ class RestrictedReadOnlyReader:
 
     Tool names are module constants, not parameters and not data — there is no
     code path where a caller-supplied or response-supplied string becomes a
-    tool name. Each permitted read may be performed at most
-    `maximum_calls_per_tool` times, so even a looping caller cannot amplify
-    the surface.
+    tool name. Each permitted read may be performed at most `call_ceilings[tool]`
+    times, so even a looping caller cannot amplify the surface.
+
+    The ceiling is **per tool**, not uniform. `get_equity_orders` is allowed two
+    calls so the cycle can confirm nothing moved between them; the other two
+    reads stay at one and cannot gain a second call as a side effect.
     """
 
-    __slots__ = ("_session", "account_number", "maximum_calls_per_tool", "call_counts")
+    __slots__ = ("_session", "account_number", "call_ceilings", "call_counts")
 
     def __init__(
         self,
         session: Any,
         account_number: str,
-        maximum_calls_per_tool: int = 1,
+        call_ceilings: Mapping[str, int] = READ_ONLY_CALL_CEILINGS,
         call_counts: dict[str, int] | None = None,
     ) -> None:
         if session is None or not callable(getattr(session, "call_tool", None)):
             raise ReadOnlyRuntimeError("one injected session is required")
         if not isinstance(account_number, str) or not account_number.strip():
             raise ReadOnlyRuntimeError("one account identity is required")
-        if not isinstance(maximum_calls_per_tool, int) or isinstance(
-            maximum_calls_per_tool, bool
-        ) or maximum_calls_per_tool < 1:
-            raise ReadOnlyRuntimeError("per-tool call ceiling must be a positive int")
+        if not isinstance(call_ceilings, Mapping) or not call_ceilings:
+            raise ReadOnlyRuntimeError("per-tool call ceilings are required")
+        for tool, ceiling in call_ceilings.items():
+            assert_read_only_tool(tool)
+            if not isinstance(ceiling, int) or isinstance(ceiling, bool) or ceiling < 1:
+                raise ReadOnlyRuntimeError(
+                    "per-tool call ceiling must be a positive int"
+                )
         self._session = session
         self.account_number = account_number
-        self.maximum_calls_per_tool = maximum_calls_per_tool
+        self.call_ceilings: Mapping[str, int] = dict(call_ceilings)
         self.call_counts: dict[str, int] = dict(call_counts or {})
 
     def __repr__(self) -> str:
         # Never renders the session: a repr lands in logs and tracebacks.
         return (
             f"RestrictedReadOnlyReader(reads={sorted(self.call_counts)}, "
-            f"maximum_calls_per_tool={self.maximum_calls_per_tool})"
+            f"call_ceilings={sorted(self.call_ceilings.items())})"
         )
 
     @property
@@ -474,10 +478,17 @@ class RestrictedReadOnlyReader:
         return 0
 
     def _reserve(self, tool_name: str) -> None:
-        """Charge one read against the per-tool ceiling, or refuse."""
+        """Charge one read against this tool's own ceiling, or refuse.
+
+        A tool with no configured ceiling gets none — absent capability fails
+        closed rather than defaulting to one free call.
+        """
         allowed = assert_read_only_tool(tool_name)
+        ceiling = self.call_ceilings.get(allowed)
+        if ceiling is None:
+            raise ReadOnlyCapabilityError("tool has no configured call ceiling")
         used = self.call_counts.get(allowed, 0)
-        if used >= self.maximum_calls_per_tool:
+        if used >= ceiling:
             raise ReadOnlyCapabilityError("read call ceiling reached")
         self.call_counts[allowed] = used + 1
 
@@ -564,7 +575,11 @@ class RestrictedReadOnlyReader:
             trigger = _text(record, "trigger").strip().lower()
             base_type = _text(record, "type").strip().lower()
             is_stop = trigger == "stop"
+            identity = _text(record, "id").strip()
+            if not identity:
+                raise ReadOnlyRuntimeError("order identifier is empty")
             observed.append(ObservedOrder(
+                identity=identity,
                 symbol=symbol,
                 side=_text(record, "side").strip().lower(),
                 order_type=f"stop_{base_type}" if is_stop else base_type,
@@ -599,6 +614,59 @@ KNOWN_ORDER_STATES: frozenset[str] = frozenset({
     "new", "queued", "unconfirmed", "confirmed", "partially_filled",
     "pending_cancelled", "partially_filled_rest_cancelled",
 }) | TERMINAL_ORDER_STATES
+
+
+# --------------------------------------------------------------------------
+# F2: confirming that the order set did not move mid-cycle.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OrderProjection:
+    """The comparable shape of one orders read, attributed to one symbol.
+
+    Deliberately a *projection*, never the raw payload. Two broker responses
+    differ constantly in fields nothing here depends on — timestamps, cursors,
+    fee breakdowns — and comparing them raw would report change on every
+    cycle while telling a reviewer nothing. This compares only what a decision
+    is actually drawn from.
+
+    It holds order identifiers, so it is an in-memory value: it is never
+    persisted, and the only thing derived from it that escapes is a single
+    boolean.
+    """
+
+    #: (identifier, normalized state) for each related order. A set, so read
+    #: ordering cannot masquerade as change.
+    identities: frozenset[tuple[str, str]]
+    executable_sell_count: int
+    protective_candidate_count: int
+
+
+def project_related_orders(
+    symbol: str, orders: Sequence[ObservedOrder]
+) -> OrderProjection:
+    """Project one orders read down to what the decision depends on.
+
+    Attribution is by exact normalized symbol, matching `attribute_observations`
+    — so a change on an unrelated symbol is not this cycle's business and does
+    not register as instability.
+    """
+    target = symbol.strip().upper()
+    if not target:
+        raise ReadOnlyRuntimeError("attribution symbol is empty")
+    related = [record for record in orders if record.symbol == target]
+    live = [record for record in related if record.state not in TERMINAL_ORDER_STATES]
+    executable_sells = [record for record in live if record.side == "sell"]
+    return OrderProjection(
+        identities=frozenset(
+            (record.identity, normalize_state(record.state)) for record in related
+        ),
+        executable_sell_count=len(executable_sells),
+        protective_candidate_count=sum(
+            1 for record in executable_sells if record.is_stop
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -715,13 +783,26 @@ async def acquire_read_only_snapshot(
     now: Callable[[], datetime],
     freshness_policy: SnapshotFreshnessPolicy = DEFAULT_FRESHNESS_POLICY,
 ) -> AcquisitionResult:
-    """One coherent cycle: account, positions, orders, session — then decide.
+    """One coherent cycle: account, positions, orders, confirm, session.
 
-    Every read is bounded to a single attempt. There is no retry: a retry
-    would widen the read span and produce a snapshot describing a moment that
-    never existed, which is precisely what the freshness policy exists to
-    reject. A failed component is recorded UNAVAILABLE and the cycle
-    continues, so the decision sees the whole picture including the hole.
+    Every read is bounded: one attempt each, and orders twice by design. There
+    is no *retry* — a retry would widen the read span and produce a snapshot
+    describing a moment that never existed, which is precisely what the
+    freshness policy exists to reject. A failed component is recorded
+    UNAVAILABLE and the cycle continues, so the decision sees the whole picture
+    including the hole.
+
+    The second orders read is a **confirmation**, not a retry: it runs after a
+    successful first read and exists to answer "did this move while I was
+    looking?". Detecting change and observing one coherent moment pull against
+    each other — the fourth read widens the span the freshness policy caps —
+    and the resolution is that the span cap still wins. Four reads that do not
+    fit inside it are `SPAN_TOO_WIDE`, which is the correct answer.
+
+    On detected change this reports and stops. It never re-reads until the
+    numbers agree: that would consume an unbounded number of calls against a
+    genuinely churning account, and deciding whether to back off and try again
+    is the unattended scheduler's judgement, not an observation primitive's.
     """
     first = monotonic()
     session_start = classify_market_session(now())
@@ -733,6 +814,7 @@ async def acquire_read_only_snapshot(
     identity_match = False
     positions: tuple[ObservedPosition, ...] = ()
     orders: tuple[ObservedOrder, ...] = ()
+    order_set_changed = False
 
     # Only a *recognized* read failure degrades a component to UNAVAILABLE.
     # A capability violation and an unrecognized exception both escape: the
@@ -760,15 +842,26 @@ async def acquire_read_only_snapshot(
 
     try:
         orders = tuple(await reader.read_orders())
+        # The confirmation read. A failure here degrades the order component
+        # to UNAVAILABLE rather than being quietly treated as "no change":
+        # not knowing whether the order set moved is not the same as knowing
+        # it did not, and only one of those is safe to act on.
+        confirmation = tuple(await reader.read_orders())
         order_read = ReadAvailability.AVAILABLE
+        order_set_changed = project_related_orders(
+            symbol, orders
+        ) != project_related_orders(symbol, confirmation)
     except ReadOnlyCapabilityError:
         raise
     except ReadOnlyRuntimeError:
         order_read = ReadAvailability.UNAVAILABLE
+        orders = ()
+        order_set_changed = False
 
     last = monotonic()
     session_end = classify_market_session(now())
-    if session_start is not session_end:
+    session_changed = session_start is not session_end
+    if session_changed:
         market_session = MarketSession.CHANGED_DURING_ACQUISITION
         session_read = ReadAvailability.AVAILABLE
     elif session_start is MarketSession.UNKNOWN:
@@ -810,10 +903,12 @@ async def acquire_read_only_snapshot(
         first_read_monotonic=first,
         last_read_monotonic=last,
         evaluated_monotonic=monotonic(),
-        order_state_changed_during_acquisition=(
-            market_session is MarketSession.CHANGED_DURING_ACQUISITION
-        ),
-        position_observations_disagreed=attribution.ambiguous,
+        # Now populated from the actual A/B comparison, not from the market
+        # session. Before F2 this field carried the session signal, which made
+        # its name assert something the code never measured.
+        order_state_changed_during_acquisition=order_set_changed,
+        position_response_self_contradictory=attribution.ambiguous,
+        market_session_changed_during_acquisition=session_changed,
     )
     return AcquisitionResult(
         snapshot=snapshot,
@@ -1381,6 +1476,8 @@ __all__ = [
     "ObservedAccount",
     "ObservedOrder",
     "ObservedPosition",
+    "OrderProjection",
+    "project_related_orders",
     "CALENDAR_EXPIRES_AFTER",
     "CALENDAR_LIMITATION",
     "CALENDAR_SOURCE",

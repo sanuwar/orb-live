@@ -35,12 +35,28 @@ try:
         QuantityDerivationError,
         derive_quantities,
     )
+    from .order_lifecycle_model import (
+        LifecycleState,
+        MappingProvenance,
+        ProtectionVerdictReason,
+        assess_protection,
+        label_provenance,
+        normalize_label,
+    )
 except ImportError:  # pragma: no cover - direct-module import fallback
     from live_broker_capabilities import APPROVED_PROTECTION_INVARIANT
     from live_order_contract import (
         ADVERTISED_ORDER_OUTPUT_STATES,
         QuantityDerivationError,
         derive_quantities,
+    )
+    from order_lifecycle_model import (
+        LifecycleState,
+        MappingProvenance,
+        ProtectionVerdictReason,
+        assess_protection,
+        label_provenance,
+        normalize_label,
     )
 
 
@@ -179,6 +195,91 @@ class ProtectiveCoverage(str, Enum):
 ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES: frozenset[str] = frozenset()
 
 
+# --------------------------------------------------------------------------
+# Independent second opinion from the canonical lifecycle model.
+# --------------------------------------------------------------------------
+#
+# `src/order_lifecycle_model.py` answers *what happened to an order* from a
+# separate vocabulary, with its own per-mapping provenance. It is adopted here
+# in the narrowest way that is still load-bearing: it may **veto** a protection
+# claim, and it may never grant one.
+#
+# The asymmetry is the point. A model that could grant would need evidence
+# nothing here has, and `PROVENANCE_SUFFICIENT_FOR_PROTECTION` in that module
+# is empty precisely because no provenance level qualifies. A model that can
+# only subtract adds a real barrier without inventing authority: if the two
+# vocabularies disagree — this module classifying a label as working while the
+# lifecycle model reads it as canceled, replaced, or unrecognized — the
+# disagreement itself is disqualifying, and the safe reading wins.
+#
+# It also deliberately does NOT veto `WORKING`. `WORKING` is the state a future
+# grounded approval would legitimately name, and vetoing it here would make
+# step 5 of the Milestone 9 definition of done unreachable — populating
+# ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES would no longer be able to enable
+# anything. Adoption must not quietly foreclose the milestone it serves.
+
+
+@dataclass(frozen=True)
+class LifecycleProjection:
+    """What the canonical lifecycle model says about one broker label.
+
+    Reporting only. `is_protective` and `permits_automated_action` are fixed
+    `False` and are asserted rather than computed hopefully: nothing in this
+    projection may become an authority to act.
+    """
+
+    lifecycle_state: LifecycleState
+    provenance: MappingProvenance
+    cannot_protect: bool
+    is_protective: bool = False
+    permits_automated_action: bool = False
+
+    def __post_init__(self) -> None:
+        if self.is_protective or self.permits_automated_action:
+            raise ValueError(
+                "a lifecycle projection may never assert protection or action"
+            )
+
+    def sanitized_facts(self) -> dict[str, str]:
+        """Fixed keys and values. No identifier, symbol, quantity, or price."""
+        return {
+            "lifecycle_state": self.lifecycle_state.value,
+            "lifecycle_provenance": self.provenance.value,
+            "lifecycle_cannot_protect": "true" if self.cannot_protect else "false",
+            "permits_automated_action": "false",
+        }
+
+
+#: The lifecycle verdicts that constitute a positive refusal — the model knows
+#: this order is not protecting anything. `LIFECYCLE_STATE_CANNOT_ESTABLISH_
+#: PROTECTION`, which is where `WORKING` lands, is deliberately absent: it
+#: means "cannot tell from lifecycle alone", not "definitely not".
+LIFECYCLE_REFUSAL_REASONS: frozenset[ProtectionVerdictReason] = frozenset({
+    ProtectionVerdictReason.ORDER_IS_TERMINAL,
+    ProtectionVerdictReason.ORDER_WAS_REPLACED,
+    ProtectionVerdictReason.STATE_IS_UNKNOWN,
+})
+
+
+def lifecycle_projection(state: Any) -> LifecycleProjection:
+    """Project a broker label onto the canonical lifecycle model.
+
+    An unrecognized label yields `UNKNOWN` with `ABSENT` provenance and is
+    refused — never a guessed canonical state.
+    """
+    lifecycle_state = normalize_label(state)
+    verdict = assess_protection(lifecycle_state)
+    # Structural, not conventional: if the lifecycle model ever returned a
+    # protective verdict, this module must not silently pass it through.
+    if verdict.is_protective:  # pragma: no cover - unreachable by construction
+        raise ValueError("the lifecycle model may not grant protection here")
+    return LifecycleProjection(
+        lifecycle_state=lifecycle_state,
+        provenance=label_provenance(state),
+        cannot_protect=verdict.reason in LIFECYCLE_REFUSAL_REASONS,
+    )
+
+
 class ProtectionEvidenceGap(str, Enum):
     """Why coverage could not be verified. Reason codes only, no values."""
 
@@ -194,6 +295,10 @@ class ProtectionEvidenceGap(str, Enum):
     STATE_NOT_GROUNDED_AS_ACTIVE_PROTECTION = (
         "STATE_NOT_GROUNDED_AS_ACTIVE_PROTECTION"
     )
+    #: The canonical lifecycle model positively refuses this state — terminal,
+    #: replaced, or unrecognized. Raised independently of the class mapping
+    #: above, so a disagreement between the two vocabularies fails closed.
+    LIFECYCLE_MODEL_REFUSES_PROTECTION = "LIFECYCLE_MODEL_REFUSES_PROTECTION"
 
 
 @dataclass(frozen=True)
@@ -313,6 +418,17 @@ def assess_protective_coverage(
         gaps.append(ProtectionEvidenceGap.UNRECOGNIZED_STATE)
         return _assessment(
             ProtectiveCoverage.INDETERMINATE, state_class, tuple(gaps)
+        )
+
+    # An independent second opinion, from a separate vocabulary. Reaching here
+    # means the class mapping above reads this state as live and workable; if
+    # the canonical lifecycle model positively refuses it — terminal, replaced,
+    # or unrecognized — the two disagree about what the label means, and a
+    # disagreement about protection is settled by the safe reading.
+    if lifecycle_projection(state).cannot_protect:
+        gaps.append(ProtectionEvidenceGap.LIFECYCLE_MODEL_REFUSES_PROTECTION)
+        return _assessment(
+            ProtectiveCoverage.NOT_PROTECTED, state_class, tuple(gaps)
         )
 
     # ---- definite failures of the order's own shape ----

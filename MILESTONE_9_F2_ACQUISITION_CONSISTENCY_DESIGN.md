@@ -173,11 +173,26 @@ it, `SPAN_TOO_WIDE` is the correct answer.
 
 ## Sequencing
 
-Belongs to the **re-pin window**, batched with the authoritative-calendar
-delegation and lifecycle-model adoption. Landing it requires reissuing the
-checkpoint manifest against a new digest, which is the correct cost to pay
-once, for several improvements, rather than repeatedly.
+**IMPLEMENTED.** This design landed in the re-pin window, batched with the
+authoritative-calendar delegation, lifecycle-model adoption, the manifest BOM
+fix, and the authorization-ordering correction, so the digest moved once for
+all five.
 
-Until then F2 stands as an accepted, documented, non-blocking limitation of the
-attended read-only checkpoint, and a **blocker** for any unattended operation
-that relies on intra-acquisition consistency.
+The window was opened at the cheapest possible moment: the only authorization
+manifest ever issued had already been spent by the completed 2026-08-03
+checkpoint, so reissuing against a new digest invalidated nothing outstanding.
+
+| Digest | Value |
+| --- | --- |
+| Pre-re-pin (historical) | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` |
+| Current | `3c972092693a41524d2406fb700ff9cdab4f635bad3474630a6882c3ac6b3b1c` |
+
+Shipped as designed: the confirmation read is orders-only, the comparison is on
+the attributed normalized projection, the per-tool ceiling is 2 for
+`get_equity_orders` and 1 for the others, detected change reports rather than
+retries, and the span cap still wins over the fourth read. Every acceptance test
+listed above ships with it.
+
+**What remains outside the guarantee, deliberately:** positions are still read
+once, so intra-cycle *position* consistency is not established — only order
+consistency is. An unattended caller that needs the former does not have it.

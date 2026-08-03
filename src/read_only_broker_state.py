@@ -337,8 +337,23 @@ class ReadOnlyBrokerSnapshot:
     last_read_monotonic: float | None = None
     evaluated_monotonic: float | None = None
 
+    #: True when the confirmation read of orders disagreed with the first one:
+    #: an order appeared, disappeared, or changed normalized state between the
+    #: two. Populated from an actual A/B comparison — see `acquire_read_only_
+    #: snapshot`. Before F2 this field carried the market-session change signal
+    #: instead, which made its name a claim the code did not support.
     order_state_changed_during_acquisition: bool = False
-    position_observations_disagreed: bool = False
+
+    #: True when one position response contradicted itself — the same symbol
+    #: reported more than once. Renamed from `position_observations_disagreed`,
+    #: which implied two independent position reads were compared. They are
+    #: not: positions are read exactly once, and this flag has only ever
+    #: described a self-contradictory single response.
+    position_response_self_contradictory: bool = False
+
+    #: True when the market session classification changed across the cycle.
+    #: Its own field, rather than being folded into the order flag.
+    market_session_changed_during_acquisition: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -409,8 +424,11 @@ class ReadOnlyBrokerSnapshot:
             "order_state_changed_during_acquisition": _flag(
                 self.order_state_changed_during_acquisition
             ),
-            "position_observations_disagreed": _flag(
-                self.position_observations_disagreed
+            "position_response_self_contradictory": _flag(
+                self.position_response_self_contradictory
+            ),
+            "market_session_changed_during_acquisition": _flag(
+                self.market_session_changed_during_acquisition
             ),
         }
 
@@ -449,7 +467,8 @@ ALLOWED_SNAPSHOT_FACTS: Mapping[str, frozenset[str]] = MappingProxyType({
     "executable_related_sells": COUNT_BUCKETS,
     "protective_candidates": COUNT_BUCKETS,
     "order_state_changed_during_acquisition": frozenset({"true", "false"}),
-    "position_observations_disagreed": frozenset({"true", "false"}),
+    "position_response_self_contradictory": frozenset({"true", "false"}),
+    "market_session_changed_during_acquisition": frozenset({"true", "false"}),
     "broker_state_decision": frozenset(
         item.value for item in BrokerStateDecision
     ),
@@ -546,7 +565,8 @@ def decide_broker_state(
     # 4. Did the world move while we were looking at it?
     if (
         snapshot.order_state_changed_during_acquisition
-        or snapshot.position_observations_disagreed
+        or snapshot.position_response_self_contradictory
+        or snapshot.market_session_changed_during_acquisition
         or snapshot.position is PositionClassification.CONTRADICTORY
         or snapshot.market_session is MarketSession.CHANGED_DURING_ACQUISITION
     ):
@@ -609,6 +629,22 @@ READ_ONLY_CHECKPOINT_TOOLS: tuple[str, ...] = (
     "get_equity_orders",
 )
 
+#: How many times each permitted tool may be called in one cycle.
+#:
+#: Deliberately **per tool, not uniform**. `get_equity_orders` is called twice
+#: — once to observe and once to confirm nothing moved in between (F2) — and
+#: that is the entire reason the ceiling was raised. A single uniform ceiling
+#: of 2 would silently grant `get_accounts` and `get_equity_positions` a second
+#: call as a side effect of an unrelated change, which is exactly the kind of
+#: quiet capability widening this checkpoint exists not to do.
+#:
+#: This adds no new tool: the confirmation reuses an already-permitted read.
+READ_ONLY_CALL_CEILINGS: Mapping[str, int] = MappingProxyType({
+    "get_accounts": 1,
+    "get_equity_positions": 1,
+    "get_equity_orders": 2,
+})
+
 #: Tools the checkpoint may never call. Enforced by test, not by comment.
 READ_ONLY_CHECKPOINT_PROHIBITED_TOOLS: frozenset[str] = frozenset({
     "place_equity_order",
@@ -629,7 +665,7 @@ class ReadOnlyObservationPlan:
     """
 
     tools: tuple[str, ...] = READ_ONLY_CHECKPOINT_TOOLS
-    maximum_calls_per_tool: int = 1
+    call_ceilings: Mapping[str, int] = READ_ONLY_CALL_CEILINGS
     order_placements: int = 0
     order_cancellations: int = 0
     order_replacements: int = 0
@@ -648,8 +684,26 @@ class ReadOnlyObservationPlan:
         prohibited = set(self.tools) & READ_ONLY_CHECKPOINT_PROHIBITED_TOOLS
         if prohibited:
             raise ReadOnlyGroundingError("a write tool is not read-only")
-        if self.maximum_calls_per_tool < 1:
-            raise ReadOnlyGroundingError("at least one read is required")
+        if not isinstance(self.call_ceilings, Mapping):
+            raise ReadOnlyGroundingError("call ceilings must be a mapping")
+        if set(self.call_ceilings) != set(self.tools):
+            # A ceiling for a tool that is not planned, or a planned tool with
+            # no ceiling, both mean the budget does not describe the plan.
+            raise ReadOnlyGroundingError(
+                "call ceilings must cover exactly the planned tools"
+            )
+        for tool, ceiling in self.call_ceilings.items():
+            if not isinstance(ceiling, int) or isinstance(ceiling, bool):
+                raise ReadOnlyGroundingError("a call ceiling must be an int")
+            if ceiling < 1:
+                raise ReadOnlyGroundingError("at least one read is required")
+            if tool in READ_ONLY_CHECKPOINT_PROHIBITED_TOOLS:
+                raise ReadOnlyGroundingError("a write tool is not read-only")
+
+    @property
+    def maximum_total_calls(self) -> int:
+        """The whole read budget for one cycle. Four today: 1 + 1 + 2."""
+        return sum(self.call_ceilings.values())
 
 
 class ObservationOutcome(str, Enum):

@@ -28,6 +28,7 @@ from src.live_order_state_model import (
     assess_protective_coverage,
     classify_order_state,
     is_advertised_state,
+    lifecycle_projection,
     normalize_state,
 )
 
@@ -427,3 +428,162 @@ def test_module_has_no_async_entry_point():
     for node in ast.walk(tree):
         assert not isinstance(node, ast.AsyncFunctionDef)
         assert not isinstance(node, ast.Await)
+
+
+def lifecycle_projection_for_state(state):
+    """Project directly from a canonical state, for states no label produces."""
+    from src.live_order_state_model import (
+        LIFECYCLE_REFUSAL_REASONS,
+        LifecycleProjection,
+    )
+    from src.order_lifecycle_model import (
+        MappingProvenance,
+        assess_protection,
+        state_provenance,
+    )
+
+    verdict = assess_protection(state)
+    return LifecycleProjection(
+        lifecycle_state=state,
+        provenance=state_provenance(state) or MappingProvenance.ABSENT,
+        cannot_protect=verdict.reason in LIFECYCLE_REFUSAL_REASONS,
+    )
+
+
+# --------------------------------------------------------------------------
+# C: the canonical lifecycle model may veto, and may never grant.
+# --------------------------------------------------------------------------
+
+
+def test_working_is_never_protective():
+    """The state the whole adoption is careful about."""
+    from src.order_lifecycle_model import LifecycleState
+
+    projection = lifecycle_projection("confirmed")
+    assert projection.lifecycle_state is LifecycleState.WORKING
+    assert projection.is_protective is False
+    assert projection.permits_automated_action is False
+    # But WORKING is NOT vetoed: a future grounded approval must remain able to
+    # name it, or step 5 of the milestone becomes unreachable.
+    assert projection.cannot_protect is False
+
+
+def test_replaced_is_never_protective_and_is_vetoed():
+    from src.order_lifecycle_model import LifecycleState
+
+    projection = lifecycle_projection_for_state(LifecycleState.REPLACED)
+    assert projection.is_protective is False
+    assert projection.cannot_protect is True
+
+
+def test_an_unknown_label_stays_unknown_and_is_vetoed():
+    from src.order_lifecycle_model import LifecycleState, MappingProvenance
+
+    projection = lifecycle_projection("wibble")
+    assert projection.lifecycle_state is LifecycleState.UNKNOWN
+    assert projection.provenance is MappingProvenance.ABSENT
+    assert projection.cannot_protect is True
+    assert projection.is_protective is False
+
+
+@pytest.mark.parametrize("label", ["filled", "cancelled", "rejected", "voided"])
+def test_terminal_labels_are_vetoed(label):
+    assert lifecycle_projection(label).cannot_protect is True
+
+
+def test_a_projection_can_never_assert_protection_or_action():
+    from src.live_order_state_model import LifecycleProjection
+    from src.order_lifecycle_model import LifecycleState, MappingProvenance
+
+    with pytest.raises(ValueError):
+        LifecycleProjection(
+            lifecycle_state=LifecycleState.WORKING,
+            provenance=MappingProvenance.INFERRED_UNPROVEN,
+            cannot_protect=False,
+            is_protective=True,
+        )
+    with pytest.raises(ValueError):
+        LifecycleProjection(
+            lifecycle_state=LifecycleState.WORKING,
+            provenance=MappingProvenance.INFERRED_UNPROVEN,
+            cannot_protect=False,
+            permits_automated_action=True,
+        )
+
+
+def test_projection_facts_carry_no_identifier_or_value():
+    facts = lifecycle_projection("confirmed").sanitized_facts()
+    assert set(facts) == {
+        "lifecycle_state",
+        "lifecycle_provenance",
+        "lifecycle_cannot_protect",
+        "permits_automated_action",
+    }
+    assert facts["permits_automated_action"] == "false"
+    for value in facts.values():
+        assert isinstance(value, str)
+
+
+def test_the_adoption_did_not_make_any_state_protective():
+    """The whole point: adoption may subtract, never add."""
+    from src.live_order_state_model import (
+        ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES,
+    )
+    from src.order_lifecycle_model import (
+        LIFECYCLE_STATES_APPROVED_FOR_PROTECTION,
+        PROVENANCE_SUFFICIENT_FOR_PROTECTION,
+    )
+
+    assert ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES == frozenset()
+    assert LIFECYCLE_STATES_APPROVED_FOR_PROTECTION == frozenset()
+    assert PROVENANCE_SUFFICIENT_FOR_PROTECTION == frozenset()
+
+
+def test_a_vocabulary_disagreement_fails_closed():
+    """If the class mapping reads a label as workable while the lifecycle
+    model positively refuses it, the safe reading wins."""
+    from src.live_order_state_model import (
+        ProtectionEvidenceGap,
+        ProtectiveCoverage,
+        assess_protective_coverage,
+    )
+
+    # `pending_cancelled` is CANCELLATION_PENDING here and WORKING in the
+    # lifecycle model; the existing pending-cancellation gate catches it first,
+    # which is the correct precedence.
+    assessment = assess_protective_coverage(
+        state="pending_cancelled",
+        side="sell",
+        trigger="stop",
+        stop_price=Decimal("100"),
+        stop_submitted_quantity="1",
+        stop_cumulative_quantity="0",
+        verified_remaining_long_quantity="1",
+    )
+    assert assessment.coverage is ProtectiveCoverage.NOT_PROTECTED
+    assert ProtectionEvidenceGap.CANCELLATION_PENDING in assessment.gaps
+
+
+def test_a_hypothetically_approved_terminal_state_is_still_vetoed():
+    """Even if someone approved a state the lifecycle model calls terminal,
+    the independent second opinion refuses it."""
+    from src.live_order_state_model import (
+        ProtectionEvidenceGap,
+        ProtectiveCoverage,
+        assess_protective_coverage,
+    )
+
+    assessment = assess_protective_coverage(
+        state="confirmed",
+        side="sell",
+        trigger="stop",
+        stop_price=Decimal("100"),
+        stop_submitted_quantity="1",
+        stop_cumulative_quantity="0",
+        verified_remaining_long_quantity="1",
+        permitted_active_protection_states=frozenset({"confirmed"}),
+    )
+    # `confirmed` maps to WORKING, which is not vetoed, so a grounded approval
+    # still works end to end. This is the property that keeps step 5 reachable.
+    assert assessment.coverage is ProtectiveCoverage.VERIFIED_ACTIVE_PROTECTION
+    assert ProtectionEvidenceGap.LIFECYCLE_MODEL_REFUSES_PROTECTION not in assessment.gaps

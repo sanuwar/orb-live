@@ -248,9 +248,28 @@ def parse_manifest(payload: Any) -> AuthorizationManifest:
 
 
 def load_manifest(path: Path) -> AuthorizationManifest:
+    """Read and parse a manifest file. Never consumes anything.
+
+    Decoded with ``utf-8-sig``, which accepts UTF-8 both with and without a
+    byte-order mark. This is not laxity: the operator authoring a manifest is
+    frequently on Windows, where PowerShell's ``>``, ``Out-File``, and
+    ``Set-Content`` all emit a BOM by default, so a BOM was the *default*
+    outcome of writing this file the obvious way. It cost a real checkpoint
+    preparation on 2026-08-03, where a correctly-authored manifest was refused
+    as malformed JSON.
+
+    Nothing else is relaxed. ``utf-8-sig`` strips a leading BOM and is
+    otherwise identical to ``utf-8``, so malformed JSON, a wrong field set, a
+    wrong commit, a wrong digest, and every other refusal are unchanged. A
+    manifest that fails here is **not** consumed — the ledger is only touched
+    by ``ManifestAuthorization``, which runs after this returns — so an
+    operator can fix the encoding and reuse the same identity.
+    """
     try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+        raw = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        # A file that is not UTF-8 at all is unreadable as a manifest, and is
+        # refused as such rather than escaping as a decoding traceback.
         raise AuthorizationManifestError("manifest is absent or unreadable") from exc
     try:
         payload = json.loads(raw)

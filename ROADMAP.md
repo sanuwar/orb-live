@@ -148,13 +148,18 @@ approved to begin before its predecessor is complete and reviewed.
 > time, and the **then-current** implementation digest. The values above are a
 > historical record, not values to copy forward — `approved_main_sha` must equal
 > the resolved `HEAD`, so **any** commit to `main`, including this
-> documentation, moves it. The digest changes only when one of the five files in
-> `PINNED_IMPLEMENTATION_FILES` changes.
+> documentation, moves it.
 >
-> See [`MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md`](MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md)
-> for why work that would touch a pinned file is batched into a single re-pin
-> window rather than landed piecemeal. A non-safety manifest-encoding follow-up
-> is queued for that window; see the Milestone 9 document.
+> **The re-pin window has since closed and the digest has moved.** All five
+> pinned files changed, so `8516057134…31faf` is now historical and **every
+> manifest issued against it is invalid**. The current digest is
+> `3c972092693a41524d2406fb700ff9cdab4f635bad3474630a6882c3ac6b3b1c`. The
+> window was opened at the cheapest moment — no outstanding manifest existed to
+> invalidate — and carried F2 acquisition consistency, authoritative-calendar
+> delegation, lifecycle-model adoption, the manifest BOM fix, and the
+> authorization-ordering correction together, so the pin moved once. See the
+> Milestone 9 document and
+> [`MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md`](MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md).
 
 The offline foundation — provenance framework, sanitized snapshot model,
 fail-closed decision API, freshness policy, and the read-only checkpoint design
@@ -218,10 +223,13 @@ Milestone 11's live-shadow phase, and all of Milestone 12. The completed
 2026-08-03 checkpoint did **not** unblock these: it observed a flat account and
 promoted nothing, so the approved-state set is still empty.
 
-**Deferred to a single re-pin window**, batched so the manifest is reissued
+~~**Deferred to a single re-pin window**, batched so the manifest is reissued
 once rather than per change: F2 detection wiring, calendar delegation from
 `classify_market_session`, and lifecycle-model adoption in
-`live_order_state_model.py`.
+`live_order_state_model.py`.~~ **Done** — all three landed together with the
+manifest BOM fix and the authorization-ordering correction, moving the digest
+once. Positions are still read once, so intra-cycle *position* consistency
+remains outside the guarantee by design.
 
 **Disabled throughout, without exception:** `strategy.enabled` stays `false`;
 the approved-state count stays `0`; exactly three read tools remain permitted;
