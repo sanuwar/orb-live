@@ -61,19 +61,22 @@ that time:
 | Run ID | a fresh, never-used identity |
 | authorization manifest | newly authored by an operator, single-use |
 | `approved_main_sha` | re-derived from `git rev-parse HEAD` at manifest-issue time |
-| `checkpoint_implementation_digest` | the **then-current** digest over `PINNED_IMPLEMENTATION_FILES` |
+| `checkpoint_implementation_digest` | the **then-current** digest over `PINNED_IMPLEMENTATION_CLOSURE` |
 
 ### The re-pin window has since moved the digest
 
 | Digest | Value | Status |
 | --- | --- | --- |
 | Pre-re-pin (historical) | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` | What run `m9-obs-20260803-01` actually executed. **Never valid again.** |
-| Current | `2d9e25ba0643a102725ac22a1a8551b293f9e6d014c791a0f7df937934f72d50` | The digest a new manifest must carry |
+| Current | `b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46` | The digest a new manifest must carry |
 
-All five pinned files changed in the re-pin window described below, so
-**every manifest issued against the old digest is now invalid** — including
-the one already spent. That is the mechanism working as designed: an operator
-approved *that* implementation, and this is no longer that implementation.
+The re-pin window described below changed the pinned files **and** widened what
+the digest covers, from five files to the complete twenty-file execution
+closure. **Every manifest issued against the old digest is now invalid** —
+including the one already spent. That is the mechanism working as designed: an
+operator approved *that* implementation, and this is no longer that
+implementation. It is also no longer the same *kind* of claim: the digest now
+covers everything that can change what a run does, not a chosen subset.
 
 The historical values are records, not values to copy forward. That applies to
 the old digest, to `approved_main_sha`
@@ -674,44 +677,90 @@ because a caller reaching the runner by another path must still be validated.
 Authorization is still resolved **before** any transport exists, which is what
 F5 fixed and which this preserves.
 
-### Open finding: the digest does not cover everything the checkpoint reaches
+### The digest now covers the whole execution closure
 
-Raised by review of the re-pin window, **not fixed**, because fixing it changes
-what an operator is asked to approve.
+Raised by review of the re-pin window and **resolved before merge**, because a
+digest that covers less than it appears to is not an adequate basis for a
+single-use authorization.
 
-`checkpoint_implementation_digest` covers five files. Those five can reach
-fifteen more by import, and a change to any of them alters what the checkpoint
-does **without moving the digest** — so a manifest issued earlier would still
-validate against changed behaviour. The digest's claim is that an operator
-approved *this implementation*; today that claim is narrower than it sounds.
+The digest used to cover five files. Those five reached **fifteen more** by
+import, and a change to any of them altered what the checkpoint did *without
+moving the digest* — so a manifest issued earlier kept validating against
+changed behaviour. An operator signing a digest was approving less than they
+had reason to think.
 
-Most of the gap is structural and long-standing rather than new. The launcher
-must reach a session factory to open a session at all, and that factory pulls in
-the commissioning transport chain: `robinhood_commissioning_session`,
-`robinhood_commissioning_adapter`, `robinhood_client`, `one_share_commissioning`
-and its orchestrator, `broker_action_saga`, `broker_identity`, `broker_snapshot`,
-`trade_state`, `config`, `canonical_source_hash`, `live_broker_capabilities`,
-and `live_order_contract`. This window added exactly two:
-`exchange_calendar` and `order_lifecycle_model`.
+Freezing the unpinned set in a guard was the earlier, weaker answer. It stopped
+the set from growing silently but did nothing about a file already on it
+changing, which is the failure that actually matters. That guard and its
+constant are gone: two definitions of what is approved is worse than one.
 
-What is in scope here is a guard, and it has been added: the reviewed closure is
-frozen in `REVIEWED_UNPINNED_CLOSURE`, and a test fails if it grows. A pinned
-file cannot quietly gain a new import without a human seeing that the digest's
-guarantee just got weaker.
+`PINNED_IMPLEMENTATION_CLOSURE` now names **all twenty** repository runtime
+files the checkpoint can reach at execution time. Signing a digest means signing
+off on everything that can change what the run does.
 
-**Widening `PINNED_IMPLEMENTATION_FILES` is an operator decision.** It would
-change the authorization contract, and it is not something to do as a side
-effect of a test. Two directions are worth considering, and neither should be
-chosen here:
+| Area | Files |
+| --- | --- |
+| Entry point | `read_only_observation_checkpoint_launcher.py` |
+| Authorization | `read_only_authorization_manifest.py`, `canonical_source_hash.py` |
+| Read-only runtime, decisions, calendar | `read_only_observation_runtime.py`, `read_only_broker_state.py`, `exchange_calendar.py` |
+| Order state and lifecycle | `live_order_state_model.py`, `order_lifecycle_model.py`, `live_order_contract.py`, `live_broker_capabilities.py` |
+| Session creation and transport | `robinhood_commissioning_session.py`, `robinhood_commissioning_adapter.py`, `robinhood_client.py`, `one_share_commissioning.py`, `one_share_commissioning_orchestrator.py`, `broker_action_saga.py`, `broker_identity.py`, `broker_snapshot.py`, `trade_state.py`, `config.py` |
 
-1. Extend the pinned set to the full closure. Strongest, and makes the digest
-   move whenever anything reachable changes — including routine edits to
-   `config.py`, which would invalidate manifests often.
-2. Extract the launcher's session-factory import behind a narrow reviewed
-   boundary, shrinking the closure rather than pinning all of it.
+The transport chain is in the closure because the launcher's deferred
+session-factory import is deferred for *import* safety, not for execution: at
+run time it is reached, and execution is what a digest must pin. A closure that
+ignored deferred imports would have missed the entire chain that opens the one
+permitted broker session.
 
-Separately, and unrelated to this window: `src/config.py` and
+**`src/config.py` is the configuration *loader* — runtime code.** The YAML it
+reads is data, is deliberately **not** pinned, and must never be: pinning it
+would mean an operator's local configuration edit invalidated their manifest,
+and would fold configuration contents into a digest that appears in an
+authorization document. Tests, documentation, caches, generated artifacts,
+evidence, databases, credentials, and token files are excluded for the same
+class of reason, and a test asserts none of them can appear.
+
+#### Determinism
+
+Canonical relative POSIX paths, **sorted**, with a domain-separation tag, the
+file count, and each path's byte length folded in alongside a `\0` delimiter, so
+two files cannot be substituted for one another or concatenated into an
+ambiguous encoding. Content hashes come from `canonical_source_sha256`, so a
+line-ending difference between checkouts does not change the answer. Nothing
+environmental participates: no timestamp, absolute path, working directory,
+environment variable, or generated artifact — asserted by a test that re-digests
+the same tree after `utime`, a `chdir`, an environment change, and a copy to a
+different absolute location.
+
+Sorting is deliberate. Reordering the declaration for readability must not
+invalidate an outstanding manifest; only the *set* of files and their contents
+are load-bearing.
+
+The closure **includes the module that defines it**. Editing
+`src/read_only_authorization_manifest.py` — even a comment — changes the digest,
+which is correct and occasionally surprising. Compute the value at the exact
+commit the manifest will name, not from an earlier note, and never copy a digest
+out of a document.
+
+#### What the guard now fails on
+
+- a repository-local runtime dependency entering the execution closure unpinned
+- a pinned file becoming unreachable, or disappearing from disk
+- a pinned path that is absolute, traverses with `..`, is non-POSIX, is
+  unnormalized, is duplicated, or is not a Python module
+- any single pinned file changing without the digest changing — exercised for
+  **every** file, not a representative one
+- two files' contents being swapped
+- the old five-file contract or `REVIEWED_UNPINNED_CLOSURE` reappearing
+
+The closure is an **explicit reviewed list**, not discovered dynamically at
+validation time. Dynamic discovery on the authorization path would mean the set
+being approved was computed by the same process asking for approval. A test
+walks the real closure and fails if the list has fallen behind, which keeps the
+list honest without letting it be self-generated.
+
+Separately, and unrelated: `src/config.py` and
 `tests/test_robinhood_live_adapter.py` are stored with UTF-8 byte-order marks.
 Python imports them correctly, so nothing is broken, but tooling that parses
-them as plain UTF-8 will fail. Cosmetic, untouched here, noted so it is not
-rediscovered as a mystery.
+them as plain UTF-8 must read `utf-8-sig`. Cosmetic, untouched, noted so it is
+not rediscovered as a mystery.

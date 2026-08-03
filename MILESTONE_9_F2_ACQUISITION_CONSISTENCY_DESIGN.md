@@ -68,8 +68,9 @@ decisions that a one-line fix would make silently.
 
 ### 1. It re-pins the held checkpoint
 
-`src/read_only_observation_runtime.py` is one of five files in
-`PINNED_IMPLEMENTATION_FILES`. Changing it changes
+`src/read_only_observation_runtime.py` was one of the five files pinned at the
+time this was written — the pin has since been widened to the full execution
+closure of twenty files. Changing it changes
 `checkpoint_implementation_digest`, invalidating the pin recorded for the held
 real-account checkpoint. That pin should move **once**, deliberately, carrying
 every pinned-file change together — not once per improvement.
@@ -196,7 +197,7 @@ checkpoint, so reissuing against a new digest invalidated nothing outstanding.
 | Digest | Value |
 | --- | --- |
 | Pre-re-pin (historical) | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` |
-| Current | `2d9e25ba0643a102725ac22a1a8551b293f9e6d014c791a0f7df937934f72d50` |
+| Current | `b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46` |
 
 Shipped as designed: the confirmation read is orders-only, the comparison is on
 the attributed normalized projection, the per-tool ceiling is 2 for

@@ -153,7 +153,7 @@ approved to begin before its predecessor is complete and reviewed.
 > **The re-pin window has since closed and the digest has moved.** All five
 > pinned files changed, so `8516057134…31faf` is now historical and **every
 > manifest issued against it is invalid**. The current digest is
-> `2d9e25ba0643a102725ac22a1a8551b293f9e6d014c791a0f7df937934f72d50`. The
+> `b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46`. The
 > window was opened at the cheapest moment — no outstanding manifest existed to
 > invalidate — and carried F2 acquisition consistency, authoritative-calendar
 > delegation, lifecycle-model adoption, the manifest BOM fix, and the

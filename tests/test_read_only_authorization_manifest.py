@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import pathlib
+import shutil
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -25,7 +27,7 @@ from src.read_only_authorization_manifest import (
     MANIFEST_REQUIRED_KEYS,
     MANIFEST_VERSION,
     MAXIMUM_VALIDITY,
-    PINNED_IMPLEMENTATION_FILES,
+    PINNED_IMPLEMENTATION_CLOSURE,
     READ_ONLY_SCOPE,
     UNATTENDED_WRITE_POLICY_REQUIRED_FIELDS,
     AuthorizationManifestError,
@@ -759,38 +761,135 @@ def test_the_write_policy_specification_is_recorded_but_not_implemented():
 # --------------------------------------------------------------------------
 
 
-def test_the_implementation_digest_covers_every_file_that_can_change_behaviour():
-    assert set(PINNED_IMPLEMENTATION_FILES) == {
-        "src/read_only_observation_runtime.py",
-        "src/read_only_broker_state.py",
-        "src/read_only_authorization_manifest.py",
-        "src/live_order_state_model.py",
-        "read_only_observation_checkpoint_launcher.py",
-    }
-    for relative in PINNED_IMPLEMENTATION_FILES:
-        assert (REPOSITORY_ROOT / relative).is_file()
+def test_every_pinned_path_exists_and_is_repository_local():
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
+        target = REPOSITORY_ROOT / relative
+        assert target.is_file(), relative
+        assert target.resolve().is_relative_to(REPOSITORY_ROOT.resolve()), relative
 
 
-def test_the_digest_is_stable_and_order_sensitive():
+def test_the_digest_is_stable_across_calls():
     first = checkpoint_implementation_digest(REPOSITORY_ROOT)
     assert first == checkpoint_implementation_digest(REPOSITORY_ROOT)
     assert len(first) == 64
+    assert all(character in "0123456789abcdef" for character in first)
 
 
-def test_the_digest_changes_when_a_pinned_file_changes(tmp_path):
+def test_the_digest_does_not_depend_on_declaration_order(monkeypatch):
+    """Reordering the list for readability must not invalidate a manifest.
+
+    Only the *set* of files and their contents are load-bearing, so the digest
+    is computed over a canonical sort. A reviewer regrouping the list must not
+    silently break every outstanding authorization.
+    """
+    baseline = checkpoint_implementation_digest(REPOSITORY_ROOT)
+    reversed_order = tuple(reversed(PINNED_IMPLEMENTATION_CLOSURE))
+    monkeypatch.setattr(
+        manifests, "PINNED_IMPLEMENTATION_CLOSURE", reversed_order
+    )
+    assert checkpoint_implementation_digest(REPOSITORY_ROOT) == baseline
+
+    shuffled = tuple(sorted(PINNED_IMPLEMENTATION_CLOSURE, key=len))
+    monkeypatch.setattr(manifests, "PINNED_IMPLEMENTATION_CLOSURE", shuffled)
+    assert checkpoint_implementation_digest(REPOSITORY_ROOT) == baseline
+
+
+def test_changing_any_single_pinned_file_changes_the_digest(tmp_path):
+    """The property the entire pin rests on, exercised per file.
+
+    Every file, not a representative one: a file that could change without
+    moving the digest is exactly the hole this closure exists to close.
+    """
     root = tmp_path / "repo"
-    for relative in PINNED_IMPLEMENTATION_FILES:
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("x = 1\n", encoding="utf-8")
-    before = checkpoint_implementation_digest(root)
-    (root / PINNED_IMPLEMENTATION_FILES[0]).write_text("x = 2\n", encoding="utf-8")
-    assert checkpoint_implementation_digest(root) != before
+    baseline = checkpoint_implementation_digest(root)
+
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
+        target = root / relative
+        target.write_text("x = 2\n", encoding="utf-8")
+        assert checkpoint_implementation_digest(root) != baseline, relative
+        target.write_text("x = 1\n", encoding="utf-8")
+    assert checkpoint_implementation_digest(root) == baseline
+
+
+def test_swapping_two_files_contents_changes_the_digest(tmp_path):
+    """Path boundaries are folded in, so contents are not interchangeable."""
+    root = tmp_path / "repo"
+    for index, relative in enumerate(PINNED_IMPLEMENTATION_CLOSURE):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"x = {index}\n", encoding="utf-8")
+    baseline = checkpoint_implementation_digest(root)
+
+    first, second = PINNED_IMPLEMENTATION_CLOSURE[0], PINNED_IMPLEMENTATION_CLOSURE[1]
+    a = (root / first).read_text(encoding="utf-8")
+    b = (root / second).read_text(encoding="utf-8")
+    (root / first).write_text(b, encoding="utf-8")
+    (root / second).write_text(a, encoding="utf-8")
+    assert checkpoint_implementation_digest(root) != baseline
 
 
 def test_an_absent_pinned_file_refuses_rather_than_skips(tmp_path):
     with pytest.raises(AuthorizationManifestError):
         checkpoint_implementation_digest(tmp_path / "empty")
+
+
+def test_one_missing_file_out_of_the_whole_closure_still_refuses(tmp_path):
+    """A disappearing file must refuse, never silently digest what is left."""
+    root = tmp_path / "repo"
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x = 1\n", encoding="utf-8")
+    checkpoint_implementation_digest(root)
+    (root / PINNED_IMPLEMENTATION_CLOSURE[-1]).unlink()
+    with pytest.raises(AuthorizationManifestError):
+        checkpoint_implementation_digest(root)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ("src/a.py", "src/a.py"),                 # duplicate
+        ("src/./a.py",),                          # not normalized
+        ("src\\a.py",),                           # not POSIX
+        ("../outside.py",),                       # escapes the repository
+        ("src/../../outside.py",),                # escapes by traversal
+        ("/etc/passwd.py",),                      # absolute
+        ("src/a.txt",),                           # not a Python module
+        ("",),                                    # empty
+        (None,),                                  # not a string
+    ],
+)
+def test_a_malformed_pinned_path_refuses(monkeypatch, bad):
+    monkeypatch.setattr(manifests, "PINNED_IMPLEMENTATION_CLOSURE", bad)
+    with pytest.raises(AuthorizationManifestError):
+        checkpoint_implementation_digest(REPOSITORY_ROOT)
+
+
+def test_the_digest_ignores_the_environment(tmp_path, monkeypatch):
+    """No timestamp, absolute path, cwd, or environment value participates."""
+    root = tmp_path / "repo"
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x = 1\n", encoding="utf-8")
+    first = checkpoint_implementation_digest(root)
+
+    monkeypatch.setenv("ORB_LIVE_TEST_VARIABLE", "something")
+    monkeypatch.chdir(tmp_path)
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
+        target = root / relative
+        os.utime(target, (0, 0))
+    assert checkpoint_implementation_digest(root) == first
+
+    # The same tree at a different absolute location digests identically.
+    moved = tmp_path / "moved"
+    shutil.copytree(root, moved)
+    assert checkpoint_implementation_digest(moved) == first
 
 
 def test_head_resolves_to_a_commit_sha():
@@ -899,120 +998,148 @@ def test_a_bom_manifest_that_fails_validation_consumes_nothing(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# What the digest does and does not cover.
+# The digest covers the whole execution closure, and a guard proves it.
 # --------------------------------------------------------------------------
 
-#: Modules the five pinned files can reach by import but which the digest does
-#: **not** cover. Reviewed and frozen here so the set cannot grow silently.
-#:
-#: This is an honest record of a real limitation, not an endorsement of it. The
-#: digest's claim is that an operator approved *this implementation*; a change
-#: to any module below alters what the checkpoint does while leaving the digest
-#: — and therefore any previously issued manifest — still valid.
-#:
-#: Most of this closure is structural and long-standing: the launcher must
-#: reach a session factory to open a session at all, and that factory pulls in
-#: the commissioning transport chain. Widening `PINNED_IMPLEMENTATION_FILES` to
-#: cover it would change what an operator is asked to approve, so it is an
-#: operator decision rather than something to do as a side effect of a test.
-#:
-#: The guard below is the part that is in scope: the closure may not grow
-#: without a human seeing it.
-REVIEWED_UNPINNED_CLOSURE: frozenset[str] = frozenset({
-    "broker_action_saga",
-    "broker_identity",
-    "broker_snapshot",
-    "canonical_source_hash",
-    "config",
-    "exchange_calendar",
-    "live_broker_capabilities",
-    "live_order_contract",
-    "one_share_commissioning",
-    "one_share_commissioning_orchestrator",
-    "order_lifecycle_model",
-    "robinhood_client",
-    "robinhood_commissioning_adapter",
-    "robinhood_commissioning_session",
-    "trade_state",
-})
+#: The files the closure is walked from. These are the reachable surfaces of
+#: the checkpoint: the launcher a human runs, the authorization path, the
+#: read-only runtime, the decision model, and the order-state model.
+CLOSURE_ENTRY_POINTS = (
+    "read_only_observation_checkpoint_launcher.py",
+    "src/read_only_authorization_manifest.py",
+    "src/read_only_observation_runtime.py",
+    "src/read_only_broker_state.py",
+    "src/live_order_state_model.py",
+)
 
 
-def _src_imports(path: pathlib.Path) -> set[str]:
-    """Every `src` module this file imports, including inside functions."""
-    source = path.read_text(encoding="utf-8-sig")
+def _repo_file_for(module: str) -> pathlib.Path | None:
+    """Map a dotted module name to a repository file, or None if external."""
+    parts = module.split(".")
+    for candidate in (
+        REPOSITORY_ROOT.joinpath(*parts).with_suffix(".py"),
+        REPOSITORY_ROOT / "src" / (parts[-1] + ".py"),
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _imported_modules(path: pathlib.Path) -> set[str]:
+    """Every module name imported anywhere in the file.
+
+    Deliberately includes imports inside functions. The launcher's session
+    factory is imported inside `_execute` precisely so that importing the
+    launcher does not reach transport code — but at *execution* time it is
+    reached, and execution is what the digest is meant to pin. A closure that
+    ignored deferred imports would miss the entire transport chain.
+
+    Read as utf-8-sig: some repository sources carry a byte-order mark.
+    """
     names: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig"))):
         if isinstance(node, ast.ImportFrom) and node.module:
             names.add(node.module)
         elif isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-    root = pathlib.Path(".")
-    return {
-        name.split(".")[-1]
-        for name in names
-        if (root / "src" / (name.split(".")[-1] + ".py")).is_file()
-    }
+    return names
 
 
-def _pinned_import_closure() -> set[str]:
-    root = pathlib.Path(".")
+def discovered_execution_closure() -> set[str]:
+    """Walk the real repository-local execution closure from the entry points."""
     seen: set[str] = set()
-    queue: list[str] = []
-    for relative in PINNED_IMPLEMENTATION_FILES:
-        queue.extend(_src_imports(root / relative))
+    queue = list(CLOSURE_ENTRY_POINTS)
     while queue:
-        module = queue.pop()
-        if module in seen:
+        relative = queue.pop()
+        if relative in seen:
             continue
-        seen.add(module)
-        queue.extend(_src_imports(root / "src" / f"{module}.py"))
+        seen.add(relative)
+        for module in _imported_modules(REPOSITORY_ROOT / relative):
+            target = _repo_file_for(module)
+            if target is None:
+                continue
+            queue.append(target.relative_to(REPOSITORY_ROOT).as_posix())
     return seen
 
 
-def test_the_unpinned_import_closure_cannot_grow_unnoticed():
-    """The digest does not cover everything the checkpoint can reach.
+def test_the_pinned_closure_equals_the_real_execution_closure():
+    """The whole point of this window.
 
-    A module in this closure can change the checkpoint's behaviour without
-    moving `checkpoint_implementation_digest`, which means a manifest issued
-    earlier still validates against changed behaviour. That gap is recorded
-    rather than hidden, and this test fails if it widens.
+    An earlier version pinned five files while the checkpoint reached twenty,
+    so fifteen modules could change what the checkpoint did without moving the
+    digest -- an operator was approving less than they thought. The digest now
+    covers the closure, and this proves the list has not fallen behind.
 
-    If this fails because a pinned file gained an import: either drop the
-    import, or add the module here **and** raise it with the operator, because
-    the digest's guarantee just got weaker.
+    If this fails, do not edit the list to make it pass without understanding
+    which direction it moved:
+
+    * discovered but not pinned -> a new dependency entered the execution path.
+      Either drop the import or pin it, and reissue the digest.
+    * pinned but not discovered -> a dependency was removed. Drop it from the
+      list, and reissue the digest.
     """
-    pinned_stems = {
-        relative.split("/")[-1][: -len(".py")]
-        for relative in PINNED_IMPLEMENTATION_FILES
+    discovered = discovered_execution_closure()
+    pinned = set(PINNED_IMPLEMENTATION_CLOSURE)
+    assert discovered - pinned == set(), "unpinned runtime dependency"
+    assert pinned - discovered == set(), "pinned file no longer reachable"
+
+
+def test_the_closure_contains_no_tests_docs_or_generated_artifacts():
+    forbidden_prefixes = ("tests/", "site/", "data/", "logs/", "scripts/", ".venv/")
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
+        assert relative.endswith(".py"), relative
+        assert not relative.startswith(forbidden_prefixes), relative
+        assert not pathlib.Path(relative).name.startswith("test_"), relative
+        assert "__pycache__" not in relative, relative
+
+
+def test_no_configuration_data_credential_or_evidence_file_is_pinned():
+    """`src/config.py` is a loader and is pinned; the YAML it reads is data.
+
+    Pinning data would mean an operator's local configuration change
+    invalidated their manifest, and would put configuration contents inside a
+    digest that is published in an authorization document.
+    """
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
+        lowered = relative.lower()
+        assert not lowered.endswith((".yaml", ".yml", ".json", ".sqlite", ".log"))
+        assert "local" not in pathlib.Path(lowered).name
+        assert "token" not in lowered
+        assert "credential" not in lowered
+        assert "evidence" not in lowered
+    assert "src/config.py" in PINNED_IMPLEMENTATION_CLOSURE
+
+
+def test_the_closure_covers_each_named_behavioural_area():
+    """Every area the authorization actually depends on is represented."""
+    required = {
+        "authorization": "src/read_only_authorization_manifest.py",
+        "authorization hashing": "src/canonical_source_hash.py",
+        "permitted capabilities and broker reads": (
+            "src/read_only_observation_runtime.py"
+        ),
+        "request validation and entry point": (
+            "read_only_observation_checkpoint_launcher.py"
+        ),
+        "attribution, state decisions, evidence privacy, zero-write": (
+            "src/read_only_broker_state.py"
+        ),
+        "calendar decisions": "src/exchange_calendar.py",
+        "order-state normalization": "src/live_order_state_model.py",
+        "lifecycle interpretation": "src/order_lifecycle_model.py",
+        "session creation and close handling": (
+            "src/robinhood_commissioning_session.py"
+        ),
+        "transport initialization": "src/robinhood_client.py",
     }
-    unpinned = _pinned_import_closure() - pinned_stems
-    assert unpinned == REVIEWED_UNPINNED_CLOSURE
+    for area, relative in required.items():
+        assert relative in PINNED_IMPLEMENTATION_CLOSURE, area
 
 
-def test_the_digest_still_covers_exactly_the_five_reviewed_files():
-    """The pinned set itself is the authorization contract; it did not change."""
-    assert len(PINNED_IMPLEMENTATION_FILES) == 5
-    assert set(PINNED_IMPLEMENTATION_FILES) == {
-        "src/read_only_observation_runtime.py",
-        "src/read_only_broker_state.py",
-        "src/read_only_authorization_manifest.py",
-        "src/live_order_state_model.py",
-        "read_only_observation_checkpoint_launcher.py",
-    }
-
-
-def test_changing_any_pinned_file_moves_the_digest(tmp_path):
-    """The property the whole pin rests on, exercised per file."""
-    root = tmp_path / "repo"
-    for relative in PINNED_IMPLEMENTATION_FILES:
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x = 1\n", encoding="utf-8")
-    baseline = checkpoint_implementation_digest(root)
-    for relative in PINNED_IMPLEMENTATION_FILES:
-        target = root / relative
-        original = target.read_text(encoding="utf-8")
-        target.write_text("x = 2\n", encoding="utf-8")
-        assert checkpoint_implementation_digest(root) != baseline, relative
-        target.write_text(original, encoding="utf-8")
-    assert checkpoint_implementation_digest(root) == baseline
+def test_the_old_five_file_contract_is_gone():
+    """Two definitions of what is approved would be worse than one wrong one."""
+    assert not hasattr(manifests, "PINNED_IMPLEMENTATION_FILES")
+    source = pathlib.Path(manifests.__file__).read_text(encoding="utf-8")
+    assert "PINNED_IMPLEMENTATION_FILES" not in source
+    assert "REVIEWED_UNPINNED_CLOSURE" not in source
+    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 20

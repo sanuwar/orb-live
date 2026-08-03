@@ -19,6 +19,15 @@ What this is deliberately **not**:
   onto a different checkpoint, a different build, a later date, a wider
   capability, or any future write-enabled runtime.
 
+What `checkpoint_implementation_digest` approves is the **complete reviewed
+implementation closure** — every repository runtime file the checkpoint can
+reach at execution time, including through the launcher's deferred session
+import. It is not a list of the five most interesting files, and it was once
+exactly that: a review found that the checkpoint reached fifteen modules the
+digest did not cover, any of which could change behaviour while an already
+issued manifest kept validating. Signing off on a digest now means signing off
+on everything that can change what the run does.
+
 **The agent never creates, renews, broadens, or raises a manifest.** This
 module only ever *reads and refuses*. There is no write path, no template
 generator, and no renewal helper — asserted by test, because a convenience
@@ -37,7 +46,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from src.canonical_source_hash import canonical_source_sha256
@@ -80,30 +89,123 @@ MANIFEST_REQUIRED_KEYS: frozenset[str] = frozenset({
 #: authorization. A manifest may not be valid for more than one day.
 MAXIMUM_VALIDITY = timedelta(hours=24)
 
-#: Files whose content the manifest pins. If any changes, every previously
-#: issued manifest stops validating — which is the point: an operator approved
-#: *this* implementation, not this file name.
-PINNED_IMPLEMENTATION_FILES: tuple[str, ...] = (
-    "src/read_only_observation_runtime.py",
-    "src/read_only_broker_state.py",
-    "src/read_only_authorization_manifest.py",
-    "src/live_order_state_model.py",
+#: Every repository runtime file the checkpoint can reach at execution time.
+#:
+#: This is the **implementation closure**, not a list of the interesting files.
+#: The distinction was a review finding: an earlier version pinned five files
+#: while the checkpoint reached fifteen more by import, so a change to any of
+#: those fifteen altered what the checkpoint did while leaving the digest — and
+#: therefore any previously issued manifest — still valid. An operator was
+#: approving less than they thought.
+#:
+#: Derived by walking imports from the five entry points (the launcher, the
+#: manifest path, the runtime, the state model, and the order-state model) and
+#: kept here as an **explicit reviewed list** rather than rediscovered
+#: dynamically at validation time. Dynamic discovery on the authorization path
+#: would mean the set being approved is computed by the same process asking for
+#: approval; a literal list is auditable by reading it.
+#:
+#: A guard test walks the real closure and fails if it and this list disagree,
+#: so the list cannot silently fall behind the code.
+#:
+#: What is deliberately **absent**: tests, documentation, caches, generated
+#: artifacts, evidence, databases, credentials, and token files. Note that
+#: `src/config.py` is present because it is the configuration *loader* — runtime
+#: code that can change behaviour. The YAML it reads is data, is not pinned, and
+#: must never be.
+PINNED_IMPLEMENTATION_CLOSURE: tuple[str, ...] = (
+    # Entry point.
     "read_only_observation_checkpoint_launcher.py",
+    # Authorization.
+    "src/canonical_source_hash.py",
+    "src/read_only_authorization_manifest.py",
+    # Read-only runtime, decision model, and calendar.
+    "src/exchange_calendar.py",
+    "src/read_only_broker_state.py",
+    "src/read_only_observation_runtime.py",
+    # Order-state normalization and lifecycle interpretation.
+    "src/live_broker_capabilities.py",
+    "src/live_order_contract.py",
+    "src/live_order_state_model.py",
+    "src/order_lifecycle_model.py",
+    # Session creation and transport initialization. Reached through the
+    # launcher's deferred session-factory import, which is what actually opens
+    # the one permitted broker session.
+    "src/broker_action_saga.py",
+    "src/broker_identity.py",
+    "src/broker_snapshot.py",
+    "src/config.py",
+    "src/one_share_commissioning.py",
+    "src/one_share_commissioning_orchestrator.py",
+    "src/robinhood_client.py",
+    "src/robinhood_commissioning_adapter.py",
+    "src/robinhood_commissioning_session.py",
+    "src/trade_state.py",
 )
+
+#: Domain separation. A digest of this closure must never collide with a digest
+#: of anything else that happens to hash file paths and contents, and the tag
+#: changes if the digest construction itself ever changes.
+_DIGEST_DOMAIN = b"orb-live/read-only-checkpoint-implementation-closure/v2"
+
+
+def _canonical_pinned_paths() -> tuple[str, ...]:
+    """Validate and canonically order the closure.
+
+    Sorted, so reordering the declaration above — for readability, for grouping
+    — cannot change the digest and cannot invalidate an outstanding manifest.
+    Only the *set* of files and their contents are load-bearing.
+    """
+    seen: set[str] = set()
+    for relative in PINNED_IMPLEMENTATION_CLOSURE:
+        if not isinstance(relative, str) or not relative:
+            raise AuthorizationManifestError("pinned path is not a string")
+        if "\\" in relative:
+            raise AuthorizationManifestError("pinned path is not POSIX-normalized")
+        if "\0" in relative:
+            raise AuthorizationManifestError("pinned path contains a null byte")
+        if relative != PurePosixPath(relative).as_posix():
+            raise AuthorizationManifestError("pinned path is not normalized")
+        if PurePosixPath(relative).is_absolute() or relative.startswith("/"):
+            raise AuthorizationManifestError("pinned path is absolute")
+        if ".." in PurePosixPath(relative).parts:
+            raise AuthorizationManifestError("pinned path escapes the repository")
+        if not relative.endswith(".py"):
+            raise AuthorizationManifestError("pinned path is not a Python module")
+        if relative in seen:
+            raise AuthorizationManifestError("pinned path is duplicated")
+        seen.add(relative)
+    return tuple(sorted(seen))
 
 
 def checkpoint_implementation_digest(root: Path) -> str:
-    """One digest over every pinned implementation file, in fixed order.
+    """One digest over the entire reviewed implementation closure.
 
-    Path names are folded in alongside content so that swapping two files'
-    contents cannot produce the same digest.
+    Deterministic by construction: canonical relative POSIX paths, sorted, with
+    the file count and each path length folded in so that two files cannot be
+    substituted for one another or concatenated into an ambiguous encoding.
+    Nothing environmental participates — no timestamp, no absolute path, no
+    working directory, no environment variable, no generated artifact.
+
+    `canonical_source_sha256` supplies the per-file content hash, so a
+    line-ending difference between checkouts does not change the answer.
     """
+    paths = _canonical_pinned_paths()
     accumulator = hashlib.sha256()
-    for relative in PINNED_IMPLEMENTATION_FILES:
+    accumulator.update(_DIGEST_DOMAIN)
+    accumulator.update(b"\0")
+    accumulator.update(str(len(paths)).encode("ascii"))
+    accumulator.update(b"\0")
+    for relative in paths:
         target = root / relative
         if not target.is_file():
             raise AuthorizationManifestError("pinned implementation file is absent")
-        accumulator.update(relative.encode("utf-8"))
+        encoded = relative.encode("utf-8")
+        # Length-prefixed as well as delimited: a delimiter alone can be
+        # ambiguous if a path could ever contain one.
+        accumulator.update(str(len(encoded)).encode("ascii"))
+        accumulator.update(b"\0")
+        accumulator.update(encoded)
         accumulator.update(b"\0")
         accumulator.update(canonical_source_sha256(target).encode("ascii"))
         accumulator.update(b"\0")
@@ -342,6 +444,9 @@ def validate_manifest(
         else checkpoint_implementation_digest(repository_root)
     )
     if manifest.checkpoint_implementation_digest != actual_digest:
+        # "a different implementation" means the whole reviewed closure, not
+        # merely a handful of files. Any runtime module the checkpoint can
+        # reach changing is enough to land here, which is the intent.
         raise AuthorizationManifestError(
             "manifest is pinned to a different implementation"
         )
@@ -485,7 +590,7 @@ __all__ = [
     "MANIFEST_REQUIRED_KEYS",
     "MANIFEST_VERSION",
     "MAXIMUM_VALIDITY",
-    "PINNED_IMPLEMENTATION_FILES",
+    "PINNED_IMPLEMENTATION_CLOSURE",
     "READ_ONLY_SCOPE",
     "UNATTENDED_WRITE_POLICY_REQUIRED_FIELDS",
     "AuthorizationManifest",
