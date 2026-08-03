@@ -873,32 +873,46 @@ def test_the_calendar_does_not_read_the_wall_clock_implicitly():
     assert "date.today(" not in source
 
 
-def test_the_calendar_agrees_with_the_legacy_runtime_table():
-    """TEMPORARY drift guard for the pre-integration period. Expected to die.
+def test_the_runtime_no_longer_keeps_a_private_copy_of_the_tables():
+    """The drift guard's designed successor.
 
-    `src/read_only_observation_runtime.py` keeps its own private copy of the
-    holiday and early-close tables, because it is one of the five files in the
-    checkpoint implementation digest and cannot be edited while the
-    real-account checkpoint is held at its operator gate. Until delegation
-    happens, two copies of the same data exist and must not diverge — a
-    divergence would mean the eventual switch silently changed behaviour.
+    Its predecessor compared this calendar against a private duplicate of the
+    holiday and early-close tables inside `src/read_only_observation_runtime.py`,
+    and said in as many words that it must be replaced in the re-pin window
+    that introduced delegation. This is that replacement.
 
-    **This test must be removed or rewritten in the same re-pin window that
-    makes `classify_market_session` delegate to `src/exchange_calendar.py`.**
-    It deliberately imports private names (`_MARKET_HOLIDAYS`,
-    `_EARLY_CLOSE_DAYS`) from that module, and delegation will delete them.
-
-    **An `ImportError` here at that point is the expected, designed outcome —
-    not an unexplained regression.** Do not "fix" it by re-adding the private
-    names to the runtime; that would recreate the duplication this guard
-    exists to retire. Delete this test instead, and rely on
-    `test_the_shipped_holidays_match_the_independent_expected_set_exactly`,
-    which is independent of both modules and outlives the migration.
+    Two copies can no longer drift because there is only one. What is asserted
+    now is the absence of the second: the private names are gone, and the
+    runtime imports the calendar rather than restating it.
     """
-    from src.read_only_observation_runtime import (
-        _EARLY_CLOSE_DAYS as runtime_early,
-        _MARKET_HOLIDAYS as runtime_holidays,
-    )
+    import src.read_only_observation_runtime as runtime
 
-    assert runtime_holidays == FULL_HOLIDAYS
-    assert set(runtime_early) == set(EARLY_CLOSE_DAYS)
+    assert not hasattr(runtime, "_MARKET_HOLIDAYS")
+    assert not hasattr(runtime, "_EARLY_CLOSE_DAYS")
+    assert not hasattr(runtime, "_COVERED_CALENDAR_YEARS")
+
+    source = pathlib.Path("src/read_only_observation_runtime.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.exchange_calendar" in source
+
+
+def test_delegation_preserved_every_closed_day_the_runtime_used_to_report():
+    """Delegation must not have opened a day that used to read as closed.
+
+    Swept across both supported years against this module's own tables, which
+    are independent of the runtime's mapping.
+    """
+    from src.read_only_broker_state import MarketSession
+    from src.read_only_observation_runtime import classify_market_session
+
+    day = SCHEDULE_METADATA.first_supported_date
+    while day <= SCHEDULE_METADATA.last_supported_date:
+        if day.weekday() >= 5 or day in FULL_HOLIDAYS:
+            for hour in (5, 10, 15, 19):
+                moment = datetime(day.year, day.month, day.day, hour, tzinfo=EASTERN)
+                assert classify_market_session(moment) is MarketSession.CLOSED
+        if day in EARLY_CLOSE_DAYS:
+            afternoon = datetime(day.year, day.month, day.day, 14, tzinfo=EASTERN)
+            assert classify_market_session(afternoon) is MarketSession.CLOSED
+        day += timedelta(days=1)

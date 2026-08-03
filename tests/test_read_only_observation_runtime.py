@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import itertools
 import inspect
 import json
 import pathlib
@@ -95,8 +96,12 @@ def account_row(number: str = ACCOUNT, **overrides: object) -> dict[str, object]
     return row
 
 
+_ORDER_IDENTITIES = itertools.count(1)
+
+
 def order_row(**overrides: object) -> dict[str, object]:
     row = {
+        "id": f"broker-order-{next(_ORDER_IDENTITIES)}",
         "symbol": SYMBOL,
         "side": "sell",
         "type": "market",
@@ -105,6 +110,29 @@ def order_row(**overrides: object) -> dict[str, object]:
     }
     row.update(overrides)
     return row
+
+
+def observed_order(
+    symbol: str,
+    side: str,
+    order_type: str,
+    state: str,
+    is_stop: bool,
+    identity: str | None = None,
+) -> ObservedOrder:
+    """Build an ObservedOrder with a distinct identity unless one is given.
+
+    Distinctness matters: the F2 confirmation compares a set keyed by
+    identity, so reusing one id across two orders would silently collapse them.
+    """
+    return ObservedOrder(
+        identity or f"observed-order-{next(_ORDER_IDENTITIES)}",
+        symbol,
+        side,
+        order_type,
+        state,
+        is_stop,
+    )
 
 
 class FakeSession:
@@ -165,6 +193,30 @@ class StubReader:
         if "orders" in self._fail:
             raise ReadOnlyRuntimeError("broker read failed")
         return self._orders
+
+
+class SequencedOrderReader(StubReader):
+    """Returns a different orders payload on each successive read.
+
+    Exists for F2: the confirmation read must be able to disagree with the
+    first one, which a fixed stub can never do.
+    """
+
+    def __init__(self, *sequences, fail_on_read: int | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self._sequences = [tuple(item) for item in sequences]
+        self._fail_on_read = fail_on_read
+        self.orders_reads = 0
+
+    async def read_orders(self):
+        self.call_counts["get_equity_orders"] = (
+            self.call_counts.get("get_equity_orders", 0) + 1
+        )
+        self.orders_reads += 1
+        if self._fail_on_read == self.orders_reads:
+            raise ReadOnlyRuntimeError("broker read failed")
+        index = min(self.orders_reads - 1, len(self._sequences) - 1)
+        return self._sequences[index]
 
 
 class Ticks:
@@ -418,8 +470,59 @@ def test_the_reader_requires_a_session_and_an_account():
 def test_the_reader_rejects_a_nonsensical_call_ceiling(ceiling):
     with pytest.raises(ReadOnlyRuntimeError):
         RestrictedReadOnlyReader(
-            session=FakeSession(), account_number=ACCOUNT, maximum_calls_per_tool=ceiling
+            session=FakeSession(),
+            account_number=ACCOUNT,
+            call_ceilings={"get_accounts": ceiling},
         )
+
+
+@pytest.mark.parametrize("ceilings", [{}, None, "two", [("get_accounts", 1)]])
+def test_the_reader_requires_a_real_ceiling_mapping(ceilings):
+    with pytest.raises(ReadOnlyRuntimeError):
+        RestrictedReadOnlyReader(
+            session=FakeSession(), account_number=ACCOUNT, call_ceilings=ceilings
+        )
+
+
+def test_the_reader_refuses_a_ceiling_for_an_unpermitted_tool():
+    """A budget cannot be the thing that widens the surface."""
+    with pytest.raises(ReadOnlyCapabilityError):
+        RestrictedReadOnlyReader(
+            session=FakeSession(),
+            account_number=ACCOUNT,
+            call_ceilings={"get_accounts": 1, "place_equity_order": 1},
+        )
+
+
+def test_a_tool_with_no_configured_ceiling_gets_no_calls():
+    """Absent capability fails closed rather than defaulting to one free call."""
+    reader = RestrictedReadOnlyReader(
+        session=FakeSession(default_payloads()),
+        account_number=ACCOUNT,
+        call_ceilings={"get_accounts": 1},
+    )
+    asyncio.run(reader.read_accounts())
+    with pytest.raises(ReadOnlyCapabilityError):
+        asyncio.run(reader.read_orders())
+
+
+def test_only_orders_may_be_read_twice():
+    """The per-tool ceiling is the point: the other two stay at one."""
+    reader = RestrictedReadOnlyReader(
+        session=FakeSession(default_payloads()), account_number=ACCOUNT
+    )
+    asyncio.run(reader.read_orders())
+    asyncio.run(reader.read_orders())
+    with pytest.raises(ReadOnlyCapabilityError):
+        asyncio.run(reader.read_orders())
+
+    asyncio.run(reader.read_accounts())
+    with pytest.raises(ReadOnlyCapabilityError):
+        asyncio.run(reader.read_accounts())
+
+    asyncio.run(reader.read_positions())
+    with pytest.raises(ReadOnlyCapabilityError):
+        asyncio.run(reader.read_positions())
 
 
 def test_the_reader_asks_only_for_permitted_tools():
@@ -497,7 +600,14 @@ def test_orders_are_parsed_into_sanitized_records():
     )
     reader = RestrictedReadOnlyReader(session=session, account_number=ACCOUNT)
     orders = asyncio.run(reader.read_orders())
-    assert orders[0] == ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True)
+    assert (
+        orders[0].symbol,
+        orders[0].side,
+        orders[0].order_type,
+        orders[0].state,
+        orders[0].is_stop,
+    ) == (SYMBOL, "sell", "stop_market", "confirmed", True)
+    assert orders[0].identity
     assert orders[1].order_type == "limit"
     assert orders[1].is_stop is False
 
@@ -573,7 +683,7 @@ def test_another_symbols_position_is_not_attributed_to_this_one():
         symbol=SYMBOL,
         expected_quantity=Decimal("1"),
         positions=[ObservedPosition("MSFT", Decimal("5"))],
-        orders=[ObservedOrder("MSFT", "sell", "stop_market", "confirmed", True)],
+        orders=[observed_order("MSFT", "sell", "stop_market", "confirmed", True)],
     )
     assert result.position is PositionClassification.FLAT
     assert result.related_open_order_count == 0
@@ -619,8 +729,8 @@ def test_terminal_orders_are_not_counted_as_live():
         expected_quantity=Decimal("1"),
         positions=[],
         orders=[
-            ObservedOrder(SYMBOL, "sell", "stop_market", "filled", True),
-            ObservedOrder(SYMBOL, "sell", "stop_market", "cancelled", True),
+            observed_order(SYMBOL, "sell", "stop_market", "filled", True),
+            observed_order(SYMBOL, "sell", "stop_market", "cancelled", True),
         ],
     )
     assert result.related_open_order_count == 0
@@ -634,7 +744,7 @@ def test_an_unrecognized_state_counts_as_live_not_harmless():
         symbol=SYMBOL,
         expected_quantity=Decimal("1"),
         positions=[ObservedPosition(SYMBOL, Decimal("1"))],
-        orders=[ObservedOrder(SYMBOL, "sell", "stop_market", "wibble", True)],
+        orders=[observed_order(SYMBOL, "sell", "stop_market", "wibble", True)],
     )
     assert result.related_open_order_count == 1
     assert result.protective_candidate_count == 1
@@ -647,8 +757,8 @@ def test_two_protective_candidates_are_ambiguous():
         expected_quantity=Decimal("1"),
         positions=[ObservedPosition(SYMBOL, Decimal("1"))],
         orders=[
-            ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True),
-            ObservedOrder(SYMBOL, "sell", "stop_market", "queued", True),
+            observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),
+            observed_order(SYMBOL, "sell", "stop_market", "queued", True),
         ],
     )
     assert result.protection is ProtectionObservation.AMBIGUOUS_CANDIDATES
@@ -660,7 +770,7 @@ def test_a_working_stop_is_unapproved_while_nothing_is_approved():
         symbol=SYMBOL,
         expected_quantity=Decimal("1"),
         positions=[ObservedPosition(SYMBOL, Decimal("1"))],
-        orders=[ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True)],
+        orders=[observed_order(SYMBOL, "sell", "stop_market", "confirmed", True)],
     )
     assert result.protection is ProtectionObservation.OBSERVED_UNAPPROVED_STATE
     assert result.protective_state == "confirmed"
@@ -671,7 +781,7 @@ def test_a_non_stop_sell_is_executable_but_not_protective():
         symbol=SYMBOL,
         expected_quantity=Decimal("1"),
         positions=[],
-        orders=[ObservedOrder(SYMBOL, "sell", "market", "confirmed", False)],
+        orders=[observed_order(SYMBOL, "sell", "market", "confirmed", False)],
     )
     assert result.executable_related_sell_count == 1
     assert result.protective_candidate_count == 0
@@ -764,7 +874,13 @@ def test_a_session_change_during_acquisition_is_recorded_and_unsafe():
         )
     )
     assert result.snapshot.market_session is MarketSession.CHANGED_DURING_ACQUISITION
-    assert result.snapshot.order_state_changed_during_acquisition is True
+    # Its own field now. Before F2 this signal was written into the *order*
+    # flag, so a session rollover was indistinguishable in evidence from the
+    # order set actually moving. The order flag must stay false here: nothing
+    # about the orders changed.
+    assert result.snapshot.market_session_changed_during_acquisition is True
+    assert result.snapshot.order_state_changed_during_acquisition is False
+    assert result.assessment.decision is BrokerStateDecision.UNKNOWN_BROKER_STATE
 
 
 def test_an_uncovered_calendar_year_makes_the_session_read_unavailable():
@@ -785,7 +901,7 @@ def test_a_held_position_with_a_stop_is_never_verified_protection_today():
     result = acquire(
         StubReader(
             positions=[ObservedPosition(SYMBOL, Decimal("1"))],
-            orders=[ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True)],
+            orders=[observed_order(SYMBOL, "sell", "stop_market", "confirmed", True)],
         )
     )
     assert result.assessment.decision is not BrokerStateDecision.VERIFIED_ACTIVE_PROTECTION
@@ -798,7 +914,7 @@ def test_acquisition_reads_each_permitted_tool_exactly_once():
     assert reader.call_counts == {
         "get_accounts": 1,
         "get_equity_positions": 1,
-        "get_equity_orders": 1,
+        "get_equity_orders": 2,
     }
 
 
@@ -949,7 +1065,7 @@ def test_an_existing_stop_is_recorded_but_never_approved(tmp_path):
         make_request(tmp_path),
         StubReader(
             positions=[ObservedPosition(SYMBOL, Decimal("1"))],
-            orders=[ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True)],
+            orders=[observed_order(SYMBOL, "sell", "stop_market", "confirmed", True)],
         ),
     )
     assert result.outcome is CheckpointOutcome.OBSERVATION_RECORDED
@@ -969,7 +1085,7 @@ def test_running_the_checkpoint_does_not_change_the_approved_mapping(tmp_path):
         make_request(tmp_path),
         StubReader(
             positions=[ObservedPosition(SYMBOL, Decimal("1"))],
-            orders=[ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True)],
+            orders=[observed_order(SYMBOL, "sell", "stop_market", "confirmed", True)],
         ),
     )
     assert frozenset(ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES) == before
@@ -982,8 +1098,8 @@ def test_two_stops_report_protection_ambiguous(tmp_path):
         StubReader(
             positions=[ObservedPosition(SYMBOL, Decimal("1"))],
             orders=[
-                ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True),
-                ObservedOrder(SYMBOL, "sell", "stop_market", "queued", True),
+                observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),
+                observed_order(SYMBOL, "sell", "stop_market", "queued", True),
             ],
         ),
     )
@@ -1101,7 +1217,7 @@ def test_persisted_evidence_survives_the_privacy_and_zero_write_gates(tmp_path):
         make_request(tmp_path),
         StubReader(
             positions=[ObservedPosition(SYMBOL, Decimal("1"))],
-            orders=[ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True)],
+            orders=[observed_order(SYMBOL, "sell", "stop_market", "confirmed", True)],
         ),
     )
     payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
@@ -1109,7 +1225,7 @@ def test_persisted_evidence_survives_the_privacy_and_zero_write_gates(tmp_path):
     assert payload["read_call_counts"] == {
         "get_accounts": 1,
         "get_equity_positions": 1,
-        "get_equity_orders": 1,
+        "get_equity_orders": 2,
     }
     assert payload["approved_active_protection_state_count"] == 0
     assert SYMBOL not in json.dumps(payload)
@@ -1130,7 +1246,12 @@ def test_a_full_cycle_through_the_real_reader_asks_only_for_reads(tmp_path):
     result = run_checkpoint(make_request(tmp_path), reader)
     assert result.outcome is CheckpointOutcome.OBSERVATION_RECORDED
     assert result.evidence.observed_protection_state == "confirmed"
-    assert sorted(session.requested) == sorted(PERMITTED_READ_TOOLS)
+    # Four calls across three tools: orders twice, everything else once, and
+    # nothing outside the permitted set.
+    assert sorted(session.requested) == sorted(
+        PERMITTED_READ_TOOLS + ("get_equity_orders",)
+    )
+    assert set(session.requested) == set(PERMITTED_READ_TOOLS)
     assert all(
         MCP_TOOL_CLASSIFICATION[name] is ToolCapability.READ_ONLY_PERMITTED
         for name in session.requested
@@ -1240,13 +1361,15 @@ def test_a_full_trading_day_still_closes_at_four():
 
 
 def test_no_supported_date_in_range_is_ever_wrongly_open():
-    """Sweep every covered day: a closed day must never read as open."""
+    """Sweep every covered day: a closed day must never read as open.
+
+    The tables now come from `src/exchange_calendar.py` — the runtime no
+    longer keeps a private copy to consult, which is the point of the
+    delegation. This still exercises the runtime's own classifier end to end.
+    """
     from datetime import timedelta
 
-    from src.read_only_observation_runtime import (
-        _EARLY_CLOSE_DAYS,
-        _MARKET_HOLIDAYS,
-    )
+    from src.exchange_calendar import EARLY_CLOSE_DAYS, FULL_HOLIDAYS
 
     moment = datetime(2026, 1, 1, 14, 0, tzinfo=EASTERN)
     end = datetime(2027, 12, 31, 14, 0, tzinfo=EASTERN)
@@ -1254,8 +1377,9 @@ def test_no_supported_date_in_range_is_ever_wrongly_open():
         session = classify_market_session(moment)
         shut = (
             moment.weekday() >= 5
-            or moment.date() in _MARKET_HOLIDAYS
-            or moment.date() in _EARLY_CLOSE_DAYS
+            or moment.date() in FULL_HOLIDAYS
+            # 14:00 ET on a half-day is after the 13:00 close.
+            or moment.date() in EARLY_CLOSE_DAYS
         )
         if shut:
             assert session is MarketSession.CLOSED, moment
@@ -1286,7 +1410,7 @@ def test_calendar_metadata_is_fixed_and_complete():
         "calendar_limitation",
         "calendar_expires_after",
     }
-    assert meta["calendar_source"] == "static_tracked_table"
+    assert meta["calendar_source"] == "authoritative_static_exchange_calendar"
     assert meta["calendar_supported_range"] == "2026-2027"
     assert meta["calendar_expires_after"] == "2027-12-31"
     assert all(isinstance(value, str) for value in meta.values())
@@ -1295,7 +1419,7 @@ def test_calendar_metadata_is_fixed_and_complete():
 def test_evidence_records_the_calendar_provenance(tmp_path):
     result = run_checkpoint(make_request(tmp_path), StubReader())
     payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
-    assert payload["calendar_source"] == "static_tracked_table"
+    assert payload["calendar_source"] == "authoritative_static_exchange_calendar"
     assert payload["calendar_supported_range"] == "2026-2027"
     assert payload["calendar_expires_after"] == "2027-12-31"
     assert "expires_after_2027" in payload["calendar_limitation"]
@@ -1308,7 +1432,7 @@ def test_the_launcher_report_displays_the_calendar_limitation(tmp_path, capsys):
     result = run_checkpoint(make_request(tmp_path), StubReader())
     launcher.report(result)
     printed = capsys.readouterr().out
-    assert "calendar_source: static_tracked_table" in printed
+    assert "calendar_source: authoritative_static_exchange_calendar" in printed
     assert "calendar_supported_range: 2026-2027" in printed
     assert "2027-12-31" in printed
     assert "no authoritative feed" in printed
@@ -1486,7 +1610,7 @@ def test_a_close_failure_keeps_the_observation_that_was_recorded(tmp_path):
     assert payload["read_call_counts"] == {
         "get_accounts": 1,
         "get_equity_positions": 1,
-        "get_equity_orders": 1,
+        "get_equity_orders": 2,
     }
 
 
@@ -1557,7 +1681,7 @@ def test_an_unknown_broker_state_persists_only_as_unrecognized(tmp_path):
         make_request(tmp_path),
         StubReader(
             positions=[ObservedPosition(SYMBOL, Decimal("1"))],
-            orders=[ObservedOrder(SYMBOL, "sell", "stop_market", leaked, True)],
+            orders=[observed_order(SYMBOL, "sell", "stop_market", leaked, True)],
         ),
     )
     assert result.outcome is CheckpointOutcome.OBSERVATION_RECORDED
@@ -1571,7 +1695,7 @@ def test_a_known_broker_state_is_still_recorded_verbatim(tmp_path):
         make_request(tmp_path),
         StubReader(
             positions=[ObservedPosition(SYMBOL, Decimal("1"))],
-            orders=[ObservedOrder(SYMBOL, "sell", "stop_market", "confirmed", True)],
+            orders=[observed_order(SYMBOL, "sell", "stop_market", "confirmed", True)],
         ),
     )
     assert result.evidence.observed_protection_state == "confirmed"
@@ -1617,3 +1741,245 @@ def test_the_approved_set_is_folded_in_dynamically():
 
     for state in approved_active_protection_states():
         assert recordable_order_state(state) == state
+
+
+# --------------------------------------------------------------------------
+# F2: the confirmation read, and what it is allowed to conclude.
+# --------------------------------------------------------------------------
+
+
+def test_an_unchanged_order_set_leaves_the_flag_false_and_decides_normally():
+    resting = (observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),)
+    result = acquire(SequencedOrderReader(resting, resting))
+    assert result.snapshot.order_state_changed_during_acquisition is False
+    assert result.snapshot.order_read is ReadAvailability.AVAILABLE
+    # The ordinary decision still runs: nothing was suppressed by the extra read.
+    assert result.assessment.decision is not BrokerStateDecision.UNKNOWN_BROKER_STATE
+
+
+def test_an_order_appearing_between_the_two_reads_fails_closed():
+    before = ()
+    after = (observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),)
+    result = acquire(SequencedOrderReader(before, after))
+    assert result.snapshot.order_state_changed_during_acquisition is True
+    assert result.assessment.decision is BrokerStateDecision.UNKNOWN_BROKER_STATE
+
+
+def test_an_order_disappearing_between_the_two_reads_fails_closed():
+    before = (observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),)
+    after = ()
+    result = acquire(SequencedOrderReader(before, after))
+    assert result.snapshot.order_state_changed_during_acquisition is True
+    assert result.assessment.decision is BrokerStateDecision.UNKNOWN_BROKER_STATE
+
+
+def test_a_state_transition_on_the_same_order_fails_closed():
+    """Same identity, different state. The count is unchanged, so only a
+    per-order comparison can catch this."""
+    before = (
+        observed_order(SYMBOL, "sell", "stop_market", "confirmed", True, identity="o1"),
+    )
+    after = (
+        observed_order(SYMBOL, "sell", "stop_market", "filled", True, identity="o1"),
+    )
+    result = acquire(SequencedOrderReader(before, after))
+    assert result.snapshot.order_state_changed_during_acquisition is True
+    assert result.assessment.decision is BrokerStateDecision.UNKNOWN_BROKER_STATE
+
+
+def test_a_change_on_an_unrelated_symbol_does_not_set_the_flag():
+    """Attribution is by exact symbol in the comparison too. Another symbol's
+    churn is not this cycle's business."""
+    ours = observed_order(SYMBOL, "sell", "stop_market", "confirmed", True, identity="o1")
+    before = (ours,)
+    after = (
+        ours,
+        observed_order("MSFT", "sell", "stop_market", "confirmed", True, identity="x1"),
+    )
+    result = acquire(SequencedOrderReader(before, after))
+    assert result.snapshot.order_state_changed_during_acquisition is False
+
+
+def test_reordering_the_same_orders_is_not_a_change():
+    """The projection is a set: read ordering must not masquerade as churn."""
+    first = observed_order(SYMBOL, "sell", "stop_market", "confirmed", True, identity="a")
+    second = observed_order(SYMBOL, "sell", "limit", "queued", False, identity="b")
+    result = acquire(SequencedOrderReader((first, second), (second, first)))
+    assert result.snapshot.order_state_changed_during_acquisition is False
+
+
+def test_a_failed_confirmation_read_is_unavailable_not_no_change():
+    """Not knowing whether the set moved is not knowing that it did not."""
+    resting = (observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),)
+    result = acquire(SequencedOrderReader(resting, fail_on_read=2))
+    assert result.snapshot.order_read is ReadAvailability.UNAVAILABLE
+    assert result.snapshot.order_state_changed_during_acquisition is False
+    assert result.assessment.decision is BrokerStateDecision.BROKER_READ_UNAVAILABLE
+
+
+def test_a_failed_first_read_never_reaches_the_confirmation():
+    resting = (observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),)
+    reader = SequencedOrderReader(resting, fail_on_read=1)
+    result = acquire(reader)
+    assert reader.orders_reads == 1
+    assert result.snapshot.order_read is ReadAvailability.UNAVAILABLE
+
+
+def test_the_cycle_spends_exactly_four_reads():
+    resting = (observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),)
+    reader = SequencedOrderReader(resting, resting)
+    acquire(reader)
+    assert reader.call_counts == {
+        "get_accounts": 1,
+        "get_equity_positions": 1,
+        "get_equity_orders": 2,
+    }
+    assert sum(reader.call_counts.values()) == 4
+
+
+def test_four_reads_exceeding_the_span_are_still_span_too_wide():
+    """The confirmation widens the span; the span cap still wins."""
+    resting = (observed_order(SYMBOL, "sell", "stop_market", "confirmed", True),)
+    result = acquire(SequencedOrderReader(resting, resting), step=2.5)
+    assert result.assessment.freshness is SnapshotFreshness.SPAN_TOO_WIDE
+    assert result.assessment.decision is BrokerStateDecision.STALE_BROKER_STATE
+
+
+def test_the_projection_compares_states_normalized():
+    """Case and whitespace are not change."""
+    before = (
+        observed_order(SYMBOL, "sell", "stop_market", "confirmed", True, identity="o1"),
+    )
+    after = (
+        observed_order(SYMBOL, "sell", "stop_market", " CONFIRMED ", True, identity="o1"),
+    )
+    result = acquire(SequencedOrderReader(before, after))
+    assert result.snapshot.order_state_changed_during_acquisition is False
+
+
+def test_an_order_identifier_never_reaches_evidence(tmp_path):
+    """The projection holds identifiers; nothing derived from it escapes but a
+    boolean."""
+    secret = "ORDER-IDENTIFIER-THAT-MUST-NOT-LEAK"
+    session = FakeSession(
+        default_payloads(
+            positions=[{"symbol": SYMBOL, "quantity": "1"}],
+            orders=[order_row(id=secret)],
+        )
+    )
+    reader = RestrictedReadOnlyReader(session=session, account_number=ACCOUNT)
+    result = run_checkpoint(make_request(tmp_path), reader)
+    assert result.evidence_path is not None
+    written = result.evidence_path.read_text(encoding="utf-8")
+    assert secret not in written
+    assert "identity" not in written
+
+
+def test_an_order_with_no_identifier_is_refused():
+    session = FakeSession(default_payloads(orders=[order_row(id="   ")]))
+    reader = RestrictedReadOnlyReader(session=session, account_number=ACCOUNT)
+    with pytest.raises(ReadOnlyRuntimeError):
+        asyncio.run(reader.read_orders())
+
+
+def test_the_confirmation_adds_no_new_call_site_and_no_new_tool():
+    """The fourth read reuses an already-permitted tool. Three literal call
+    sites, three permitted tools — the surface did not widen."""
+    from tests.call_site_guard import LITERAL, analyze_source
+
+    sites = analyze_source(
+        MODULE_PATH.read_text(encoding="utf-8"),
+        path="src/read_only_observation_runtime.py",
+    )
+    assert len(sites) == 3
+    assert {site.kind for site in sites} == {LITERAL}
+    assert len(PERMITTED_READ_TOOLS) == 3
+
+
+# --------------------------------------------------------------------------
+# E: preconditions are validated before authorization can be spent.
+# --------------------------------------------------------------------------
+
+
+def test_deterministic_preconditions_are_checked_before_authorization(tmp_path):
+    """A blank account number must not cost a manifest.
+
+    This is the ordering the completed 2026-08-03 checkpoint exposed: the
+    manifest was consumed by `build_authorization` before the request was ever
+    validated, so a typo spent an identity that could not be reissued.
+    """
+    import read_only_observation_checkpoint_launcher as launcher
+
+    bad = ReadOnlyCheckpointRequest(
+        run_id="m9-obs-precondition",
+        account_number="   ",
+        symbol=SYMBOL,
+        expected_quantity=Decimal("1"),
+        evidence_root=tmp_path / "evidence",
+        authorization_flag=READ_ONLY_AUTHORIZATION_FLAG,
+        operator_present=True,
+    )
+    with pytest.raises(ReadOnlyRuntimeError):
+        launcher.assert_preconditions_before_authorization(bad)
+    # Nothing was created: no evidence directory, so no identity was claimed.
+    assert not (tmp_path / "evidence" / "m9-obs-precondition").exists()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"account_number": ""},
+        {"account_number": "   "},
+        {"symbol": ""},
+        {"symbol": "   "},
+        {"expected_quantity": Decimal("0")},
+        {"expected_quantity": Decimal("-1")},
+        {"authorization_flag": "NOPE"},
+    ],
+)
+def test_every_bad_precondition_is_refused_before_authorization(tmp_path, overrides):
+    import read_only_observation_checkpoint_launcher as launcher
+
+    fields = dict(
+        run_id="m9-obs-precondition",
+        account_number=ACCOUNT,
+        symbol=SYMBOL,
+        expected_quantity=Decimal("1"),
+        evidence_root=tmp_path / "evidence",
+        authorization_flag=READ_ONLY_AUTHORIZATION_FLAG,
+        operator_present=True,
+    )
+    fields.update(overrides)
+    with pytest.raises(ReadOnlyRuntimeError):
+        launcher.assert_preconditions_before_authorization(
+            ReadOnlyCheckpointRequest(**fields)
+        )
+
+
+def test_an_already_used_run_id_is_refused_before_authorization(tmp_path):
+    import read_only_observation_checkpoint_launcher as launcher
+
+    request = make_request(tmp_path)
+    (request.evidence_root / request.run_id).mkdir(parents=True)
+    with pytest.raises(ReadOnlyRuntimeError):
+        launcher.assert_preconditions_before_authorization(request)
+
+
+def test_a_valid_request_passes_the_early_gate_without_claiming_anything(tmp_path):
+    import read_only_observation_checkpoint_launcher as launcher
+
+    request = make_request(tmp_path)
+    launcher.assert_preconditions_before_authorization(request)
+    # The gate inspects; `start()` is still what claims the directory.
+    assert not (request.evidence_root / request.run_id).exists()
+
+
+def test_the_launcher_validates_before_it_resolves_authorization():
+    """Order asserted structurally, not by reading the prose above it."""
+    import read_only_observation_checkpoint_launcher as launcher
+
+    source = pathlib.Path(launcher.__file__).read_text(encoding="utf-8")
+    body = source.split("def main(")[1]
+    early = body.index("assert_preconditions_before_authorization")
+    authorize = body.index("build_authorization(")
+    assert early < authorize

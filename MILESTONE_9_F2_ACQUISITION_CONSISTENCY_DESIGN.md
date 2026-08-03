@@ -1,8 +1,19 @@
-# F2 — Intra-acquisition consistency: design, and why it is not implemented yet
+# F2 — Intra-acquisition consistency: design, and the window that implemented it
 
-Resolves the design half of [issue #45](https://github.com/sanuwar/orb-live/issues/45).
-**No code changes accompany this document.** It exists so the decision is
-reviewable now rather than argued about inside a later pull request.
+Resolves [issue #45](https://github.com/sanuwar/orb-live/issues/45).
+
+> **Status: IMPLEMENTED**, in the re-pin window — see [Sequencing](#sequencing).
+>
+> This document was originally written as design-only, so that the decision was
+> reviewable before it was argued about inside a pull request. That structure is
+> preserved rather than rewritten: the sections below describe the defect and
+> the reasoning **as they stood before implementation**, which is what makes the
+> shipped behaviour checkable against what was actually approved.
+>
+> Two things below are therefore deliberately historical and no longer describe
+> the code: the defect table in *The defect, precisely*, and *Why implementation
+> is deferred rather than done now*. Everything from *Proposed design* onward
+> describes what shipped.
 
 ## The defect, precisely
 
@@ -57,8 +68,9 @@ decisions that a one-line fix would make silently.
 
 ### 1. It re-pins the held checkpoint
 
-`src/read_only_observation_runtime.py` is one of five files in
-`PINNED_IMPLEMENTATION_FILES`. Changing it changes
+`src/read_only_observation_runtime.py` was one of the five files pinned at the
+time this was written — the pin has since been widened to the full execution
+closure of twenty files. Changing it changes
 `checkpoint_implementation_digest`, invalidating the pin recorded for the held
 real-account checkpoint. That pin should move **once**, deliberately, carrying
 every pinned-file change together — not once per improvement.
@@ -173,11 +185,26 @@ it, `SPAN_TOO_WIDE` is the correct answer.
 
 ## Sequencing
 
-Belongs to the **re-pin window**, batched with the authoritative-calendar
-delegation and lifecycle-model adoption. Landing it requires reissuing the
-checkpoint manifest against a new digest, which is the correct cost to pay
-once, for several improvements, rather than repeatedly.
+**IMPLEMENTED.** This design landed in the re-pin window, batched with the
+authoritative-calendar delegation, lifecycle-model adoption, the manifest BOM
+fix, and the authorization-ordering correction, so the digest moved once for
+all five.
 
-Until then F2 stands as an accepted, documented, non-blocking limitation of the
-attended read-only checkpoint, and a **blocker** for any unattended operation
-that relies on intra-acquisition consistency.
+The window was opened at the cheapest possible moment: the only authorization
+manifest ever issued had already been spent by the completed 2026-08-03
+checkpoint, so reissuing against a new digest invalidated nothing outstanding.
+
+| Digest | Value |
+| --- | --- |
+| Pre-re-pin (historical) | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` |
+| Current | `b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46` |
+
+Shipped as designed: the confirmation read is orders-only, the comparison is on
+the attributed normalized projection, the per-tool ceiling is 2 for
+`get_equity_orders` and 1 for the others, detected change reports rather than
+retries, and the span cap still wins over the fourth read. Every acceptance test
+listed above ships with it.
+
+**What remains outside the guarantee, deliberately:** positions are still read
+once, so intra-cycle *position* consistency is not established — only order
+consistency is. An unattended caller that needs the former does not have it.

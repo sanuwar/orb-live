@@ -310,12 +310,40 @@ def test_order_change_during_acquisition_fails_closed():
 
 
 def test_contradictory_position_observations_fail_closed():
-    assert decide(position_observations_disagreed=True) is (
+    assert decide(position_response_self_contradictory=True) is (
         BrokerStateDecision.UNKNOWN_BROKER_STATE
     )
     assert decide(position=PositionClassification.CONTRADICTORY) is (
         BrokerStateDecision.UNKNOWN_BROKER_STATE
     )
+
+
+def test_a_market_session_change_during_acquisition_fails_closed():
+    """Its own field now, rather than being folded into the order flag."""
+    assert decide(market_session_changed_during_acquisition=True) is (
+        BrokerStateDecision.UNKNOWN_BROKER_STATE
+    )
+
+
+def test_the_three_instability_flags_are_independent():
+    """Each one alone is disqualifying; none masks another.
+
+    Before F2 the order flag carried the session signal, so a genuine order
+    change and a session rollover were indistinguishable in evidence. Setting
+    each independently proves they are now separate channels.
+    """
+    flags = (
+        "order_state_changed_during_acquisition",
+        "position_response_self_contradictory",
+        "market_session_changed_during_acquisition",
+    )
+    for flag in flags:
+        assert decide(**{flag: True}) is BrokerStateDecision.UNKNOWN_BROKER_STATE
+        facts = decide_broker_state(snapshot(**{flag: True})).facts
+        assert facts[flag] == "true"
+        for other in flags:
+            if other != flag:
+                assert facts[other] == "false"
 
 
 def test_session_transition_during_acquisition_fails_closed():
@@ -510,7 +538,20 @@ def test_prohibited_tools_are_named_and_excluded_from_the_plan():
     assert plan.order_placements == 0
     assert plan.order_cancellations == 0
     assert plan.order_replacements == 0
-    assert plan.maximum_calls_per_tool == 1
+
+
+def test_the_call_budget_is_per_tool_and_only_orders_gets_a_second_call():
+    """The F2 budget: four calls, and the extra one is confined to orders.
+
+    A uniform ceiling of 2 would have been simpler and wrong — it would grant
+    `get_accounts` and `get_equity_positions` a second call nothing asked for.
+    """
+    plan = ReadOnlyObservationPlan()
+    assert plan.call_ceilings["get_equity_orders"] == 2
+    assert plan.call_ceilings["get_accounts"] == 1
+    assert plan.call_ceilings["get_equity_positions"] == 1
+    assert plan.maximum_total_calls == 4
+    assert set(plan.call_ceilings) == set(plan.tools)
 
 
 @pytest.mark.parametrize(
@@ -521,7 +562,16 @@ def test_prohibited_tools_are_named_and_excluded_from_the_plan():
         {"order_replacements": 1},
         {"manufactures_observation": True},
         {"tools": ("get_accounts", "place_equity_order")},
-        {"maximum_calls_per_tool": 0},
+        # A ceiling below one, a non-int ceiling, a ceiling for a tool that is
+        # not planned, and a planned tool with no ceiling are all refusals.
+        {"call_ceilings": {"get_accounts": 0, "get_equity_positions": 1,
+                           "get_equity_orders": 2}},
+        {"call_ceilings": {"get_accounts": True, "get_equity_positions": 1,
+                           "get_equity_orders": 2}},
+        {"call_ceilings": {"get_accounts": 1, "get_equity_positions": 1}},
+        {"call_ceilings": {"get_accounts": 1, "get_equity_positions": 1,
+                           "get_equity_orders": 2, "get_portfolio": 1}},
+        {"call_ceilings": "two"},
     ],
 )
 def test_the_plan_refuses_any_write_shaped_configuration(kwargs):

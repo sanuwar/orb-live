@@ -70,6 +70,7 @@ from src.read_only_observation_runtime import (  # noqa: E402
     PreResolvedAuthorization,
     ReadOnlyAuthorizationGate,
     ReadOnlyCheckpointRequest,
+    ReadOnlyEvidenceStore,
     ReadOnlyRuntimeError,
     RestrictedReadOnlyReader,
     calendar_metadata,
@@ -258,7 +259,9 @@ async def _execute(
             reader = RestrictedReadOnlyReader(
                 session=session,
                 account_number=request.account_number,
-                maximum_calls_per_tool=1,
+                # Per-tool, from the reviewed plan rather than restated here,
+                # so the launcher cannot grant a budget the plan does not.
+                call_ceilings=request.plan.call_ceilings,
             )
             result = await run_read_only_observation_checkpoint(
                 request,
@@ -301,11 +304,44 @@ def report(result: CheckpointResult) -> None:
     )
 
 
+def assert_preconditions_before_authorization(
+    request: ReadOnlyCheckpointRequest,
+) -> None:
+    """Validate everything deterministic **before** authorization is spent.
+
+    Authorization is resolved before any transport exists, which is correct and
+    was a review finding in its own right (F5). But `build_authorization`
+    *consumes* the manifest, while the request itself was not validated until
+    the checkpoint had already started — so a blank account number alongside a
+    perfectly good manifest spent the manifest and the Run ID and then finished
+    as `PRECONDITION_REJECTED`. The authorization was burned to discover a
+    typo.
+
+    Everything checkable without a broker, a session, or a secret is therefore
+    checked here first. A refusal at this point costs nothing: the ledger is
+    untouched, the Run ID is unspent, and the operator can correct the input
+    and reuse both.
+
+    `ReadOnlyCheckpointRequest.validate()` still runs inside the checkpoint.
+    This is an earlier gate, not a replacement — a caller reaching the runner
+    by another path must still be validated there.
+    """
+    request.validate()
+    # Constructing the store validates that the Run ID is a safe path
+    # component; it creates nothing. `start()` is what claims the directory,
+    # and that still happens inside the checkpoint.
+    store = ReadOnlyEvidenceStore(request.evidence_root, request.run_id)
+    if store.completed.exists():
+        raise ReadOnlyRuntimeError("run ID already used")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     namespace = build_parser().parse_args(argv)
     try:
         assert_real_read_preconditions(namespace)
         request = _build_request(namespace)
+        # Before authorization, so a rejected precondition never spends it.
+        assert_preconditions_before_authorization(request)
         authorization = build_authorization(
             namespace, now=datetime.now(tz=timezone.utc)
         )
