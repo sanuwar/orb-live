@@ -1,8 +1,19 @@
-# F2 — Intra-acquisition consistency: design, and why it is not implemented yet
+# F2 — Intra-acquisition consistency: design, and the window that implemented it
 
-Resolves the design half of [issue #45](https://github.com/sanuwar/orb-live/issues/45).
-**No code changes accompany this document.** It exists so the decision is
-reviewable now rather than argued about inside a later pull request.
+Resolves [issue #45](https://github.com/sanuwar/orb-live/issues/45).
+
+> **Status: IMPLEMENTED**, in the re-pin window — see [Sequencing](#sequencing).
+>
+> This document was originally written as design-only, so that the decision was
+> reviewable before it was argued about inside a pull request. That structure is
+> preserved rather than rewritten: the sections below describe the defect and
+> the reasoning **as they stood before implementation**, which is what makes the
+> shipped behaviour checkable against what was actually approved.
+>
+> Two things below are therefore deliberately historical and no longer describe
+> the code: the defect table in *The defect, precisely*, and *Why implementation
+> is deferred rather than done now*. Everything from *Proposed design* onward
+> describes what shipped.
 
 ## The defect, precisely
 
@@ -185,7 +196,7 @@ checkpoint, so reissuing against a new digest invalidated nothing outstanding.
 | Digest | Value |
 | --- | --- |
 | Pre-re-pin (historical) | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` |
-| Current | `3c972092693a41524d2406fb700ff9cdab4f635bad3474630a6882c3ac6b3b1c` |
+| Current | `2d9e25ba0643a102725ac22a1a8551b293f9e6d014c791a0f7df937934f72d50` |
 
 Shipped as designed: the confirmation read is orders-only, the comparison is on
 the attributed normalized projection, the per-tool ceiling is 2 for

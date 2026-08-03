@@ -896,3 +896,123 @@ def test_a_bom_manifest_that_fails_validation_consumes_nothing(tmp_path):
             implementation_digest=body["checkpoint_implementation_digest"],
         )
     assert not ledger_root.exists()
+
+
+# --------------------------------------------------------------------------
+# What the digest does and does not cover.
+# --------------------------------------------------------------------------
+
+#: Modules the five pinned files can reach by import but which the digest does
+#: **not** cover. Reviewed and frozen here so the set cannot grow silently.
+#:
+#: This is an honest record of a real limitation, not an endorsement of it. The
+#: digest's claim is that an operator approved *this implementation*; a change
+#: to any module below alters what the checkpoint does while leaving the digest
+#: — and therefore any previously issued manifest — still valid.
+#:
+#: Most of this closure is structural and long-standing: the launcher must
+#: reach a session factory to open a session at all, and that factory pulls in
+#: the commissioning transport chain. Widening `PINNED_IMPLEMENTATION_FILES` to
+#: cover it would change what an operator is asked to approve, so it is an
+#: operator decision rather than something to do as a side effect of a test.
+#:
+#: The guard below is the part that is in scope: the closure may not grow
+#: without a human seeing it.
+REVIEWED_UNPINNED_CLOSURE: frozenset[str] = frozenset({
+    "broker_action_saga",
+    "broker_identity",
+    "broker_snapshot",
+    "canonical_source_hash",
+    "config",
+    "exchange_calendar",
+    "live_broker_capabilities",
+    "live_order_contract",
+    "one_share_commissioning",
+    "one_share_commissioning_orchestrator",
+    "order_lifecycle_model",
+    "robinhood_client",
+    "robinhood_commissioning_adapter",
+    "robinhood_commissioning_session",
+    "trade_state",
+})
+
+
+def _src_imports(path: pathlib.Path) -> set[str]:
+    """Every `src` module this file imports, including inside functions."""
+    source = path.read_text(encoding="utf-8-sig")
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module)
+        elif isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+    root = pathlib.Path(".")
+    return {
+        name.split(".")[-1]
+        for name in names
+        if (root / "src" / (name.split(".")[-1] + ".py")).is_file()
+    }
+
+
+def _pinned_import_closure() -> set[str]:
+    root = pathlib.Path(".")
+    seen: set[str] = set()
+    queue: list[str] = []
+    for relative in PINNED_IMPLEMENTATION_FILES:
+        queue.extend(_src_imports(root / relative))
+    while queue:
+        module = queue.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        queue.extend(_src_imports(root / "src" / f"{module}.py"))
+    return seen
+
+
+def test_the_unpinned_import_closure_cannot_grow_unnoticed():
+    """The digest does not cover everything the checkpoint can reach.
+
+    A module in this closure can change the checkpoint's behaviour without
+    moving `checkpoint_implementation_digest`, which means a manifest issued
+    earlier still validates against changed behaviour. That gap is recorded
+    rather than hidden, and this test fails if it widens.
+
+    If this fails because a pinned file gained an import: either drop the
+    import, or add the module here **and** raise it with the operator, because
+    the digest's guarantee just got weaker.
+    """
+    pinned_stems = {
+        relative.split("/")[-1][: -len(".py")]
+        for relative in PINNED_IMPLEMENTATION_FILES
+    }
+    unpinned = _pinned_import_closure() - pinned_stems
+    assert unpinned == REVIEWED_UNPINNED_CLOSURE
+
+
+def test_the_digest_still_covers_exactly_the_five_reviewed_files():
+    """The pinned set itself is the authorization contract; it did not change."""
+    assert len(PINNED_IMPLEMENTATION_FILES) == 5
+    assert set(PINNED_IMPLEMENTATION_FILES) == {
+        "src/read_only_observation_runtime.py",
+        "src/read_only_broker_state.py",
+        "src/read_only_authorization_manifest.py",
+        "src/live_order_state_model.py",
+        "read_only_observation_checkpoint_launcher.py",
+    }
+
+
+def test_changing_any_pinned_file_moves_the_digest(tmp_path):
+    """The property the whole pin rests on, exercised per file."""
+    root = tmp_path / "repo"
+    for relative in PINNED_IMPLEMENTATION_FILES:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x = 1\n", encoding="utf-8")
+    baseline = checkpoint_implementation_digest(root)
+    for relative in PINNED_IMPLEMENTATION_FILES:
+        target = root / relative
+        original = target.read_text(encoding="utf-8")
+        target.write_text("x = 2\n", encoding="utf-8")
+        assert checkpoint_implementation_digest(root) != baseline, relative
+        target.write_text(original, encoding="utf-8")
+    assert checkpoint_implementation_digest(root) == baseline

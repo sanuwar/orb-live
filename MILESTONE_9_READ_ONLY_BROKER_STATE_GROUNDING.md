@@ -68,7 +68,7 @@ that time:
 | Digest | Value | Status |
 | --- | --- | --- |
 | Pre-re-pin (historical) | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` | What run `m9-obs-20260803-01` actually executed. **Never valid again.** |
-| Current | `3c972092693a41524d2406fb700ff9cdab4f635bad3474630a6882c3ac6b3b1c` | The digest a new manifest must carry |
+| Current | `2d9e25ba0643a102725ac22a1a8551b293f9e6d014c791a0f7df937934f72d50` | The digest a new manifest must carry |
 
 All five pinned files changed in the re-pin window described below, so
 **every manifest issued against the old digest is now invalid** — including
@@ -673,3 +673,45 @@ because a caller reaching the runner by another path must still be validated.
 
 Authorization is still resolved **before** any transport exists, which is what
 F5 fixed and which this preserves.
+
+### Open finding: the digest does not cover everything the checkpoint reaches
+
+Raised by review of the re-pin window, **not fixed**, because fixing it changes
+what an operator is asked to approve.
+
+`checkpoint_implementation_digest` covers five files. Those five can reach
+fifteen more by import, and a change to any of them alters what the checkpoint
+does **without moving the digest** — so a manifest issued earlier would still
+validate against changed behaviour. The digest's claim is that an operator
+approved *this implementation*; today that claim is narrower than it sounds.
+
+Most of the gap is structural and long-standing rather than new. The launcher
+must reach a session factory to open a session at all, and that factory pulls in
+the commissioning transport chain: `robinhood_commissioning_session`,
+`robinhood_commissioning_adapter`, `robinhood_client`, `one_share_commissioning`
+and its orchestrator, `broker_action_saga`, `broker_identity`, `broker_snapshot`,
+`trade_state`, `config`, `canonical_source_hash`, `live_broker_capabilities`,
+and `live_order_contract`. This window added exactly two:
+`exchange_calendar` and `order_lifecycle_model`.
+
+What is in scope here is a guard, and it has been added: the reviewed closure is
+frozen in `REVIEWED_UNPINNED_CLOSURE`, and a test fails if it grows. A pinned
+file cannot quietly gain a new import without a human seeing that the digest's
+guarantee just got weaker.
+
+**Widening `PINNED_IMPLEMENTATION_FILES` is an operator decision.** It would
+change the authorization contract, and it is not something to do as a side
+effect of a test. Two directions are worth considering, and neither should be
+chosen here:
+
+1. Extend the pinned set to the full closure. Strongest, and makes the digest
+   move whenever anything reachable changes — including routine edits to
+   `config.py`, which would invalidate manifests often.
+2. Extract the launcher's session-factory import behind a narrow reviewed
+   boundary, shrinking the closure rather than pinning all of it.
+
+Separately, and unrelated to this window: `src/config.py` and
+`tests/test_robinhood_live_adapter.py` are stored with UTF-8 byte-order marks.
+Python imports them correctly, so nothing is broken, but tooling that parses
+them as plain UTF-8 will fail. Cosmetic, untouched here, noted so it is not
+rediscovered as a mystery.

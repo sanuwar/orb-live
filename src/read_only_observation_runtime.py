@@ -656,11 +656,18 @@ def project_related_orders(
     if not target:
         raise ReadOnlyRuntimeError("attribution symbol is empty")
     related = [record for record in orders if record.symbol == target]
-    live = [record for record in related if record.state not in TERMINAL_ORDER_STATES]
+    # Normalized once, and used for both the identity pairs and the terminal
+    # test. Normalizing in one place and not the other would make casing a
+    # difference in one half of the comparison and not the other.
+    states = {record.identity: normalize_state(record.state) for record in related}
+    live = [
+        record for record in related
+        if states[record.identity] not in TERMINAL_ORDER_STATES
+    ]
     executable_sells = [record for record in live if record.side == "sell"]
     return OrderProjection(
         identities=frozenset(
-            (record.identity, normalize_state(record.state)) for record in related
+            (record.identity, states[record.identity]) for record in related
         ),
         executable_sell_count=len(executable_sells),
         protective_candidate_count=sum(
