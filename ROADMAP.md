@@ -118,31 +118,43 @@ a first unattended run.
 Each milestone depends on the one before it. None may be skipped, and none is
 approved to begin before its predecessor is complete and reviewed.
 
-### Milestone 9 — Read-Only Broker-State Grounding — **IN PROGRESS, HELD AT AN OPERATOR GATE**
+### Milestone 9 — Read-Only Broker-State Grounding — **IN PROGRESS, CHECKPOINT EXECUTED, STEPS 4–5 PENDING**
 
-> **⛔ OPERATOR GATE — the real-account read-only checkpoint is ON HOLD.**
+> **✅ OPERATOR GATE LIFTED — the real-account read-only checkpoint ran once,
+> successfully, on 2026-08-03 at approximately 09:58 ET.**
 >
-> All software for step 2 of the definition of done is merged and verified.
-> **It has never been executed against a real account, and it will not be until
-> an operator explicitly lifts this hold.** Nothing in this repository may
-> execute it, open a broker session, or issue an authorization manifest.
+> Run `m9-obs-20260803-01` against `main`
+> `a93d13f1027552b8d01194cf925438c916bb0ed6`, digest
+> `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf`: outcome
+> `NO_PROTECTIVE_ORDER_OBSERVED`, decision `VERIFIED_FLAT`, freshness `FRESH`.
+> Exactly one broker session, opened and closed cleanly; `get_accounts`,
+> `get_equity_positions`, and `get_equity_orders` called once each; every write
+> counter `0`. Privacy-validated evidence was written outside the repository.
 >
-> Required pins for the eventual run:
+> **The account was verified flat, so no active protection state was observed
+> and none was promoted.** `ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` remains
+> empty. `NO_PROTECTIVE_ORDER_OBSERVED` is a legitimate completion outcome, not
+> a failed run — but it means **protection grounding is not complete.**
 >
-> | Pin | Value |
-> | --- | --- |
-> | `checkpoint_implementation_digest` | `8516057134acc1540bfa90f76fc9f5663588fcff53d5d08d07d20d4c79131faf` |
-> | `approved_main_sha` | **re-derive from `git rev-parse HEAD` at manifest-issue time** |
+> **Steps 4 and 5 remain**, and are now waiting on a human review of naturally
+> occurring protective state that a future checkpoint may observe. **A
+> protective order must never be manufactured merely to generate an
+> observation** — that would be a broker write, and this milestone performs
+> none.
 >
-> The digest is the durable pin: it changes only when one of the five files in
-> `PINNED_IMPLEMENTATION_FILES` changes. `approved_main_sha` must equal the
-> resolved `HEAD`, so **any** commit to `main` — including documentation —
-> moves it. It was `4fc75b6be7419d369c3c72dac046f23842eb3f6d` at the moment PR
-> #44 merged. Do not copy that value forward; re-derive it.
+> **The Run ID and its manifest are permanently spent.** Any future checkpoint
+> requires a new Run ID, a newly operator-authored manifest, an
+> `approved_main_sha` re-derived from `git rev-parse HEAD` at manifest-issue
+> time, and the **then-current** implementation digest. The values above are a
+> historical record, not values to copy forward — `approved_main_sha` must equal
+> the resolved `HEAD`, so **any** commit to `main`, including this
+> documentation, moves it. The digest changes only when one of the five files in
+> `PINNED_IMPLEMENTATION_FILES` changes.
 >
 > See [`MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md`](MILESTONE_9_F2_ACQUISITION_CONSISTENCY_DESIGN.md)
 > for why work that would touch a pinned file is batched into a single re-pin
-> window rather than landed piecemeal.
+> window rather than landed piecemeal. A non-safety manifest-encoding follow-up
+> is queued for that window; see the Milestone 9 document.
 
 The offline foundation — provenance framework, sanitized snapshot model,
 fail-closed decision API, freshness policy, and the read-only checkpoint design
@@ -152,11 +164,11 @@ capability-restricted reader, and the tracked attended launcher are in
 `src/read_only_observation_runtime.py` and
 `read_only_observation_checkpoint_launcher.py`.
 
-**No state has been approved for active protection, and the attended read-only
-checkpoint has not been executed against a real account.** Every test is
-fake-only. See
+**No state has been approved for active protection.** The attended read-only
+checkpoint has now been executed once against a real account and observed a
+flat account with no protective order, so it approved nothing. See
 [`MILESTONE_9_READ_ONLY_BROKER_STATE_GROUNDING.md`](MILESTONE_9_READ_ONLY_BROKER_STATE_GROUNDING.md)
-for the definition of done.
+for the definition of done and the completion record.
 
 - Ground active-protection status using **non-order broker reads** only.
 - Document the actual Robinhood order states observed, rather than inferring
@@ -176,14 +188,14 @@ for the definition of done.
   identity, and an expiry window; it is validated and consumed before any
   read. It is not an always-yes mode and nothing auto-answers a prompt.
 
-Remaining: an operator must lift the hold above, issue a manifest, execute the
-checkpoint, and review what it records. That is not software work, and
-**approving zero states is a legitimate result.**
+Remaining: a future checkpoint must observe naturally occurring protective
+state, and an operator must review what it records. That is not software work,
+and **approving zero states is a legitimate result** — it is the result so far.
 
-### Work that proceeds while the checkpoint is held
+### Work that proceeds while protection grounding is incomplete
 
 Every item below is buildable offline against fixtures and touches **no**
-pinned file, so none of it disturbs the held checkpoint's digest.
+pinned file, so none of it disturbs the checkpoint's digest or forces a re-pin.
 
 | Order | Work | Lands in | Depends on |
 | --- | --- | --- | --- |
@@ -200,9 +212,11 @@ The gate definitions take already-decided facts rather than importing the risk,
 recovery, lifecycle, and monitoring modules. That keeps each review separate,
 and stops a gate from re-deriving inputs it could then silently disagree with.
 
-**Blocked by the real-account checkpoint** — steps 3–5 of the Milestone 9
-definition of done, anything requiring `VERIFIED_ACTIVE_PROTECTION` to be
-reachable, Milestone 11's live-shadow phase, and all of Milestone 12.
+**Blocked by ungrounded protection** — steps 4–5 of the Milestone 9 definition
+of done, anything requiring `VERIFIED_ACTIVE_PROTECTION` to be reachable,
+Milestone 11's live-shadow phase, and all of Milestone 12. The completed
+2026-08-03 checkpoint did **not** unblock these: it observed a flat account and
+promoted nothing, so the approved-state set is still empty.
 
 **Deferred to a single re-pin window**, batched so the manifest is reissued
 once rather than per change: F2 detection wiring, calendar delegation from
@@ -212,7 +226,7 @@ once rather than per change: F2 detection wiring, calendar delegation from
 **Disabled throughout, without exception:** `strategy.enabled` stays `false`;
 the approved-state count stays `0`; exactly three read tools remain permitted;
 no write capability, scheduler, or signal-to-execution bridge exists; and no
-authorization manifest is issued.
+authorization manifest is issued outside an explicitly authorized checkpoint.
 
 ### Authorization policy, across milestones
 
