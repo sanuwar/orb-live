@@ -142,6 +142,14 @@ class AlertIntent:
         _identifier(self.correlation_id, "correlation-", "correlation identity")
         if not isinstance(self.category, AlertCategory) or not isinstance(self.severity, AlertSeverity) or not isinstance(self.reason, AlertReason):
             raise OutboxError("alert intent is invalid")
+        if (
+            self.reason is AlertReason.SUSPENSION_PROJECTION
+            and (
+                self.category is not AlertCategory.SUSPENSION
+                or self.severity is not AlertSeverity.CRITICAL
+            )
+        ):
+            raise OutboxError("suspension alert intent is invalid")
         _moment(self.created_at, "creation timestamp")
         if self.permits_automated_action is not False:
             raise OutboxError("alert intent never authorizes action")
@@ -289,13 +297,14 @@ class DurableAlertOutbox:
         self._verifier = verifier
         try:
             self.database_path = _database_path(database_path)
+            preexisting = self.database_path.exists() and self.database_path.stat().st_size > 0
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
             self._connection = sqlite3.connect(self.database_path, isolation_level=None)
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.execute("PRAGMA synchronous=FULL")
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._connection.executescript(_SCHEMA)
-            self._bind_meta()
+            self._bind_meta(allow_initialize=not preexisting)
         except Exception:
             if hasattr(self, "_connection"):
                 try:
@@ -316,18 +325,31 @@ class DurableAlertOutbox:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def _bind_meta(self) -> None:
+    def _bind_meta(self, *, allow_initialize: bool) -> None:
         expected = {
             "schema_version": str(SCHEMA_VERSION),
             "policy_signature": self.policy.signature,
             "verifier_identity": self._verifier.verifier_id,
+            "initialization_complete": "true",
         }
-        for key, value in expected.items():
-            row = self._connection.execute("SELECT value FROM outbox_meta WHERE key=?", (key,)).fetchone()
-            if row is None:
-                self._connection.execute("INSERT INTO outbox_meta(key,value) VALUES(?,?)", (key, value))
-            elif row != (value,):
+        rows = dict(self._connection.execute("SELECT key,value FROM outbox_meta").fetchall())
+        if rows:
+            if rows != expected:
                 raise OutboxError("durable outbox metadata conflicts")
+            return
+        if not allow_initialize:
+            raise OutboxError("durable outbox metadata is incomplete")
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._connection.executemany(
+                "INSERT INTO outbox_meta(key,value) VALUES(?,?)",
+                tuple(expected.items()),
+            )
+            self._connection.execute("COMMIT")
+        except Exception:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
 
     def create(self, intent: AlertIntent, *, transition_id: str) -> AlertRecord:
         if not isinstance(intent, AlertIntent):
@@ -447,6 +469,23 @@ class DurableAlertOutbox:
             if record.state is not AlertState.CLAIMED or record.claim_id != evidence.claim_id:
                 raise OutboxError("delivery evidence is bound to another claim")
             temporal_invalid = evidence.observed_at > now or evidence.observed_at < record.claimed_at
+            claim_stale = (
+                not temporal_invalid
+                and evidence.observed_at - record.claimed_at > self.policy.claim_timeout
+            )
+            if claim_stale:
+                self._spend(evidence.evidence_id, evidence.alert_id, "EVIDENCE", now)
+                self._connection.execute(
+                    "INSERT INTO delivery_evidence VALUES(?,?,?,?,?,?,?)",
+                    (evidence.evidence_id, *submitted, 0),
+                )
+                result = self._transition(
+                    record, transition_id, now, AlertState.FAILED_CLOSED,
+                    reason=AlertReason.CLAIM_STALE,
+                    evidence_id=evidence.evidence_id,
+                )
+                self._commit()
+                return result
             attestation_verified = (
                 not temporal_invalid
                 and evidence.provenance is DeliveryProvenance.VERIFIED_ATTESTATION
@@ -518,7 +557,10 @@ class DurableAlertOutbox:
         self._begin()
         try:
             record = self._load_audited(alert_id)
-            if prohibit_suspension and record.category is AlertCategory.SUSPENSION:
+            if prohibit_suspension and (
+                record.category is AlertCategory.SUSPENSION
+                or record.reason is AlertReason.SUSPENSION_PROJECTION
+            ):
                 raise OutboxError("suspension alert cannot be discarded")
             if record.state not in allowed:
                 raise OutboxError("alert transition is not allowed")
@@ -658,7 +700,9 @@ class DurableAlertOutbox:
                     and attempts == previous_attempts and claim_identity == previous_claim
                     and (
                         (reason is AlertReason.CLAIM_STALE and previous_state is AlertState.CLAIMED
-                         and evidence_identity is None and acknowledgment is previous_ack)
+                         and previous_claimed_at is not None
+                         and occurred - previous_claimed_at > self.policy.claim_timeout
+                         and acknowledgment is previous_ack)
                         or (reason is AlertReason.INTERNAL_INVARIANT and previous_state is AlertState.READY
                             and evidence_identity is None and acknowledgment is previous_ack)
                         or (reason in {AlertReason.DELIVERY_EVIDENCE_INVALID, AlertReason.DELIVERY_EVIDENCE_STALE}
@@ -672,6 +716,7 @@ class DurableAlertOutbox:
             elif target in {AlertState.EXPIRED, AlertState.CANCELLED_BY_SAFETY}:
                 valid = (
                     record.category is not AlertCategory.SUSPENSION
+                    and record.reason is not AlertReason.SUSPENSION_PROJECTION
                     and previous_state in {AlertState.CREATED, AlertState.READY, AlertState.CLAIMED}
                     and reason is previous_reason and attempts == previous_attempts
                     and acknowledgment is previous_ack and claim_identity == previous_claim
@@ -722,7 +767,14 @@ class DurableAlertOutbox:
                 ):
                     raise OutboxError("alert evidence history is invalid")
                 if target is AlertState.FAILED_CLOSED:
-                    if reason is AlertReason.CONFLICTING_CONFIRMATION:
+                    if reason is AlertReason.CLAIM_STALE:
+                        if (
+                            observed < previous_claimed_at or observed > occurred
+                            or observed - previous_claimed_at <= self.policy.claim_timeout
+                            or verified
+                        ):
+                            raise OutboxError("alert evidence history is invalid")
+                    elif reason is AlertReason.CONFLICTING_CONFIRMATION:
                         expected_delivery = previous_state is AlertState.DELIVERY_UNCONFIRMED
                         if previous_state not in {AlertState.DELIVERED_CONFIRMED, AlertState.DELIVERY_UNCONFIRMED} or bool(evidence_row[3]) is not expected_delivery:
                             raise OutboxError("alert evidence history is invalid")
@@ -845,7 +897,11 @@ def intent_from_liveness(decision: LivenessDecision, *, alert_id: str, correlati
     }
     if decision.record.state not in mapping:
         raise OutboxError("liveness decision does not require an alert")
-    category = mapping[decision.record.state]
+    category = (
+        AlertCategory.SUSPENSION
+        if decision.suspension.request_suspension
+        else mapping[decision.record.state]
+    )
     severity = AlertSeverity.CRITICAL if category in {AlertCategory.SUSPENSION, AlertCategory.FAILED_CLOSED} else AlertSeverity.WARNING
     return AlertIntent(alert_id, category, severity, AlertReason.LIVENESS_PROJECTION, created_at, correlation_id)
 
@@ -855,8 +911,7 @@ def intent_from_suspension(decision: SuspensionDecision, *, alert_id: str, corre
         raise OutboxError("typed suspension decision is required")
     if decision.state is ControllerState.CLEAR:
         raise OutboxError("clear controller state does not require an alert")
-    category = AlertCategory.INTERNAL_INVARIANT_FAILURE if decision.state is ControllerState.MALFORMED_STATE else AlertCategory.SUSPENSION
-    return AlertIntent(alert_id, category, AlertSeverity.CRITICAL, AlertReason.SUSPENSION_PROJECTION, created_at, correlation_id)
+    return AlertIntent(alert_id, AlertCategory.SUSPENSION, AlertSeverity.CRITICAL, AlertReason.SUSPENSION_PROJECTION, created_at, correlation_id)
 
 
 def _bucket(count: int) -> AttemptBucket:

@@ -57,7 +57,13 @@ class TestVerifier:
     verifier_id = "verifier-test"
 
     def verify(self, selected: DeliveryEvidence) -> bool:
-        return selected.evidence_id.startswith("delivery-evidence-")
+        return (
+            selected.evidence_id in {"delivery-evidence-one", "delivery-evidence-conflict"}
+            and selected.alert_id == "alert-one"
+            and selected.claim_id in {"claim-one", "claim-other"}
+            and selected.provenance is DeliveryProvenance.VERIFIED_ATTESTATION
+            and selected.permits_automated_action is False
+        )
 
 
 def open_outbox(tmp_path: Path, selected: OutboxPolicy | None = None, verifier=None) -> DurableAlertOutbox:
@@ -201,6 +207,55 @@ def test_stale_claim_fails_closed_and_restart_preserves_it(tmp_path: Path) -> No
     restarted.close()
 
 
+def test_delivery_claim_timeout_boundary_and_one_unit_after(tmp_path: Path) -> None:
+    selected_policy = policy(maximum_evidence_age=timedelta(minutes=10))
+    exact = open_outbox(tmp_path / "exact", selected_policy)
+    claimed(exact)
+    delivered = exact.submit_delivery(
+        evidence(observed_at=NOW + timedelta(seconds=2) + selected_policy.claim_timeout),
+        transition_id="alert-transition-exact-timeout",
+        now=NOW + timedelta(seconds=2) + policy().claim_timeout,
+    )
+    assert delivered.state is AlertState.DELIVERED_CONFIRMED
+    exact.close()
+
+    late = open_outbox(tmp_path / "late", selected_policy)
+    claimed(late)
+    failed = late.submit_delivery(
+        evidence(observed_at=NOW + timedelta(seconds=2) + selected_policy.claim_timeout + timedelta(microseconds=1)),
+        transition_id="alert-transition-late-timeout",
+        now=NOW + timedelta(seconds=2) + selected_policy.claim_timeout + timedelta(microseconds=2),
+    )
+    assert failed.state is AlertState.FAILED_CLOSED
+    assert failed.reason is AlertReason.CLAIM_STALE
+    assert failed.acknowledgment_status is AcknowledgmentStatus.PENDING
+    assert late.transition_history("alert-one")[-1].to_state is AlertState.FAILED_CLOSED
+    late.close()
+
+
+def test_claim_stale_history_requires_actual_timeout_chronology(tmp_path: Path) -> None:
+    outbox = open_outbox(tmp_path)
+    claimed(outbox)
+    outbox.submit_delivery(
+        evidence(observed_at=NOW + timedelta(seconds=2) + policy().claim_timeout + timedelta(microseconds=1)),
+        transition_id="alert-transition-late-timeout",
+        now=NOW + timedelta(minutes=6),
+    )
+    with sqlite3.connect(outbox.database_path) as connection:
+        shifted_claim = NOW + timedelta(seconds=2, microseconds=2)
+        connection.execute(
+            "UPDATE alert_transitions SET occurred_at=? WHERE transition_id='alert-transition-claim'",
+            (shifted_claim.isoformat(),),
+        )
+        connection.execute(
+            "UPDATE alerts SET claimed_at=? WHERE alert_id='alert-one'",
+            (shifted_claim.isoformat(),),
+        )
+    with pytest.raises(OutboxError, match="history"):
+        outbox.load("alert-one")
+    outbox.close()
+
+
 def test_restart_preserves_claim_and_delivery_state(tmp_path: Path) -> None:
     outbox = open_outbox(tmp_path)
     claimed(outbox)
@@ -232,6 +287,31 @@ def test_changed_verifier_identity_cannot_reinterpret_restart(tmp_path: Path) ->
 
     with pytest.raises(OutboxError, match="initialization"):
         open_outbox(tmp_path, verifier=OtherVerifier())
+
+
+@pytest.mark.parametrize("missing", ["schema_version", "policy_signature", "verifier_identity", "initialization_complete"])
+def test_missing_metadata_cannot_be_rebound_on_restart(tmp_path: Path, missing: str) -> None:
+    outbox = open_outbox(tmp_path)
+    created(outbox)
+    database = outbox.database_path
+    outbox.close()
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM outbox_meta WHERE key=?", (missing,))
+    with pytest.raises(OutboxError, match="initialization"):
+        open_outbox(
+            tmp_path,
+            policy(claim_timeout=timedelta(hours=1)) if missing == "policy_signature" else None,
+        )
+
+
+def test_existing_schema_without_complete_metadata_fails_closed(tmp_path: Path) -> None:
+    outbox = open_outbox(tmp_path)
+    database = outbox.database_path
+    outbox.close()
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM outbox_meta")
+    with pytest.raises(OutboxError, match="initialization"):
+        open_outbox(tmp_path)
 
 
 def test_maximum_attempts_fails_closed_without_hidden_retry(tmp_path: Path) -> None:
@@ -361,6 +441,49 @@ def test_non_suspension_can_be_cancelled_but_suspension_cannot_be_discarded(tmp_
     with pytest.raises(OutboxError, match="cannot be discarded"):
         suspension.expire("alert-one", transition_id="alert-transition-expire", now=NOW + timedelta(seconds=1))
     suspension.close()
+
+
+def test_all_typed_suspension_origins_are_non_discardable(tmp_path: Path) -> None:
+    malformed = SuspensionDecision(
+        ControllerState.MALFORMED_STATE,
+        SuspensionCause.INTERNAL_INVARIANT_FAILURE,
+        True,
+        SchedulerAction.SUSPEND,
+    )
+    malformed_intent = intent_from_suspension(
+        malformed, alert_id="alert-malformed", correlation_id="correlation-malformed",
+        created_at=NOW,
+    )
+    assert malformed_intent.category is AlertCategory.SUSPENSION
+
+    requested = make_liveness(
+        LivenessState.STALE, LivenessReason.HEARTBEAT_STALE, request=True,
+    )
+    liveness_intent = intent_from_liveness(
+        requested, alert_id="alert-liveness-suspension",
+        correlation_id="correlation-liveness", created_at=NOW,
+    )
+    assert liveness_intent.category is AlertCategory.SUSPENSION
+
+    for index, selected in enumerate((malformed_intent, liveness_intent)):
+        outbox = open_outbox(tmp_path / str(index))
+        outbox.create(selected, transition_id=f"alert-transition-create-suspension-{index}")
+        with pytest.raises(OutboxError, match="cannot be discarded"):
+            outbox.cancel_by_safety(
+                selected.alert_id,
+                transition_id=f"alert-transition-cancel-suspension-{index}",
+                now=NOW + timedelta(seconds=1),
+            )
+        outbox.close()
+
+
+def test_suspension_projection_cannot_be_mislabeled_as_discardable() -> None:
+    with pytest.raises(OutboxError, match="suspension alert"):
+        replace(
+            intent(category=AlertCategory.SUSPENSION),
+            category=AlertCategory.INTERNAL_INVARIANT_FAILURE,
+            reason=AlertReason.SUSPENSION_PROJECTION,
+        )
 
 
 def test_terminal_failed_state_cannot_be_overwritten(tmp_path: Path) -> None:
