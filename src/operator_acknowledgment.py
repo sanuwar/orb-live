@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from src.durable_alert_outbox import AlertCategory, AlertRecord, AlertState
-from src.durable_scheduler import ScheduledRun, SchedulerAction, SchedulerDecision, SchedulerReason, SchedulerTransitionReceipt
+from src.durable_scheduler import REVIEW_REASONS, RunState, ScheduledRun, SchedulerAction, SchedulerDecision, SchedulerReason, SchedulerTransitionReceipt
 from src.durable_suspension_controller import ControllerRecord, ControllerState, SuspensionDecision
 from src.operational_status_report import OperationalStatusReport, OverallStatus
 
@@ -167,7 +167,12 @@ class OperatorAcknowledgmentArtifact:
         if self.disposition is AcknowledgmentDisposition.SUPERSEDE:
             _identifier(self.successor_review_item_id, "review-item-", "successor review item identity")
             _sequence(self.successor_review_sequence)
-            if self.successor_review_item_id == self.review_item_id or self.successor_review_sequence <= self.review_sequence:
+            if (
+                self.successor_review_sequence != self.review_sequence + 1
+                or self.successor_review_item_id != _successor_id(
+                    self.review_item_id, self.successor_review_sequence,
+                )
+            ):
                 raise AcknowledgmentError("successor review binding is invalid")
         elif self.successor_review_item_id is not None or self.successor_review_sequence is not None:
             raise AcknowledgmentError("non-supersession artifact contains a successor")
@@ -236,7 +241,12 @@ class AcknowledgmentRecord:
         if self.state is AcknowledgmentState.SUPERSEDED:
             _identifier(self.successor_review_item_id, "review-item-", "successor review item identity")
             _sequence(self.successor_review_sequence)
-            if self.successor_review_item_id == self.review_item_id or self.successor_review_sequence <= self.expected_review_sequence:
+            if (
+                self.successor_review_sequence != self.expected_review_sequence + 1
+                or self.successor_review_item_id != _successor_id(
+                    self.review_item_id, self.successor_review_sequence,
+                )
+            ):
                 raise AcknowledgmentError("stored successor review binding is invalid")
         elif self.successor_review_item_id is not None or self.successor_review_sequence is not None:
             raise AcknowledgmentError("non-superseded state contains a successor")
@@ -581,7 +591,10 @@ class OperatorAcknowledgmentStore:
                 if disposition is AcknowledgmentDisposition.SUPERSEDE:
                     _identifier(artifact[12], "review-item-", "successor review item identity")
                     _sequence(artifact[13])
-                    if artifact[12] == record.review_item_id or artifact[13] <= record.expected_review_sequence:
+                    if (
+                        artifact[13] != record.expected_review_sequence + 1
+                        or artifact[12] != _successor_id(record.review_item_id, artifact[13])
+                    ):
                         raise AcknowledgmentError("acknowledgment artifact history is invalid")
                 elif artifact[12] is not None or artifact[13] is not None:
                     raise AcknowledgmentError("acknowledgment artifact history is invalid")
@@ -599,8 +612,8 @@ class OperatorAcknowledgmentStore:
                     )
                     successor_valid = (
                         artifact[12] is not None and artifact[13] is not None
-                        and artifact[12] != record.review_item_id
-                        and artifact[13] > record.expected_review_sequence
+                        and artifact[13] == record.expected_review_sequence + 1
+                        and artifact[12] == _successor_id(record.review_item_id, artifact[13])
                     ) if target is AcknowledgmentState.SUPERSEDED else artifact[12] is None and artifact[13] is None
                     if not (
                         exact_binding and temporally_valid and successor_valid
@@ -727,7 +740,28 @@ def request_from_scheduler(decision: SchedulerDecision, run: ScheduledRun, recei
         raise AcknowledgmentError("typed scheduler review decision is required")
     if receipt.run_id != run.run_id or receipt.to_state is not run.state:
         raise AcknowledgmentError("scheduler source binding conflicts")
-    category = AcknowledgmentCategory.FAILED_CLOSED if decision.action is SchedulerAction.FAIL_CLOSED else AcknowledgmentCategory.STATUS_DEGRADED
+    state_binding = {
+        SchedulerAction.REQUIRE_OPERATOR_REVIEW: run.state in {
+            RunState.READY_FOR_SUPERVISED_REVIEW,
+            RunState.SUPERVISED_REVIEW_REQUIRED,
+        } and decision.reason in REVIEW_REASONS | {SchedulerReason.REEVALUATION_REQUIRED},
+        SchedulerAction.SUSPEND: run.state is RunState.SUSPENDED and decision.reason in {
+            SchedulerReason.SAFETY_HALT_ACTIVE,
+            SchedulerReason.RUN_IS_SUSPENDED,
+        },
+        SchedulerAction.FAIL_CLOSED: run.state in {
+            RunState.FAILED_CLOSED,
+            RunState.AMBIGUOUS_RESTART,
+            RunState.EXPIRED,
+        } and decision.reason is SchedulerReason.RUN_IS_TERMINAL,
+    }
+    if not state_binding[decision.action]:
+        raise AcknowledgmentError("scheduler decision state conflicts")
+    category = {
+        SchedulerAction.REQUIRE_OPERATOR_REVIEW: AcknowledgmentCategory.STATUS_DEGRADED,
+        SchedulerAction.SUSPEND: AcknowledgmentCategory.SUSPENSION_NOTICE,
+        SchedulerAction.FAIL_CLOSED: AcknowledgmentCategory.FAILED_CLOSED,
+    }[decision.action]
     if decision.reason is SchedulerReason.MONITORING_DELIVERY_UNCONFIRMED:
         category = AcknowledgmentCategory.ALERT_UNCONFIRMED
     return _request(category, fields, AcknowledgmentSourceKind.SCHEDULER, run.run_id, receipt.sequence)
@@ -745,6 +779,14 @@ def _request(category: AcknowledgmentCategory, fields: dict[str, object], source
         expected_review_sequence=source_sequence, source_kind=source_kind,
         source_id=source_id, source_sequence=source_sequence, **fields,
     )  # type: ignore[arg-type]
+
+
+def _successor_id(review_item_id: str, sequence: int) -> str:
+    return _identifier(
+        f"{review_item_id}-successor-{sequence}",
+        "review-item-",
+        "successor review item identity",
+    )
 
 
 def _false(value: object) -> None:

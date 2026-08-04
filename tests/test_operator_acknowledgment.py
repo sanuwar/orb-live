@@ -142,14 +142,14 @@ def test_rejection_and_supersession_require_verified_durable_artifacts(tmp_path:
     created(selected)
     changes = {"disposition": disposition}
     if disposition is AcknowledgmentDisposition.SUPERSEDE:
-        changes.update(successor_review_item_id="review-item-successor", successor_review_sequence=4)
+        changes.update(successor_review_item_id="review-item-one-successor-4", successor_review_sequence=4)
     decision = getattr(selected, method)(
         artifact(**changes), transition_id=f"ack-transition-{method}", now=NOW + timedelta(minutes=2),
     )
     assert decision.record.state is state
     assert decision.record.requires_further_review is True
     if state is AcknowledgmentState.SUPERSEDED:
-        assert decision.record.successor_review_item_id == "review-item-successor"
+        assert decision.record.successor_review_item_id == "review-item-one-successor-4"
         assert decision.record.successor_review_sequence == 4
     selected.close()
     restarted = store(tmp_path)
@@ -163,7 +163,7 @@ def test_unverified_supersession_fails_closed_without_replacing_review_item(tmp_
     result = selected.supersede(
         artifact(
             disposition=AcknowledgmentDisposition.SUPERSEDE,
-            successor_review_item_id="review-item-successor", successor_review_sequence=4,
+            successor_review_item_id="review-item-one-successor-4", successor_review_sequence=4,
             provenance=AttestedProvenance.SELF_DECLARED,
         ),
         transition_id="ack-transition-invalid-supersede", now=NOW + timedelta(minutes=2),
@@ -286,7 +286,7 @@ def test_superseded_item_cannot_be_acknowledged(tmp_path: Path) -> None:
     selected.supersede(
         artifact(
             disposition=AcknowledgmentDisposition.SUPERSEDE,
-            successor_review_item_id="review-item-successor", successor_review_sequence=4,
+            successor_review_item_id="review-item-one-successor-4", successor_review_sequence=4,
         ),
         transition_id="ack-transition-supersede", now=NOW + timedelta(minutes=2),
     )
@@ -386,6 +386,99 @@ def test_public_typed_integration_adapters() -> None:
     scheduler_request = request_from_scheduler(scheduler, run, receipt, **fields)
     assert scheduler_request.category is AcknowledgmentCategory.ALERT_UNCONFIRMED
     assert scheduler_request.source_sequence == 5
+
+
+@pytest.mark.parametrize(
+    ("action", "reason"),
+    [
+        (SchedulerAction.SUSPEND, SchedulerReason.SAFETY_HALT_ACTIVE),
+        (SchedulerAction.FAIL_CLOSED, SchedulerReason.RUN_IS_TERMINAL),
+        (SchedulerAction.REQUIRE_OPERATOR_REVIEW, SchedulerReason.OK),
+    ],
+)
+def test_scheduler_adapter_rejects_action_state_or_reason_cross_pair(
+    action: SchedulerAction, reason: SchedulerReason,
+) -> None:
+    fields = dict(
+        acknowledgment_id="ack-scheduler-cross", issued_at=NOW,
+        expires_at=NOW + timedelta(hours=1), correlation_id="correlation-scheduler",
+    )
+    run = ScheduledRun(
+        "run-scheduler-cross", date(2026, 8, 4),
+        RunState.READY_FOR_SUPERVISED_REVIEW, NOW, NOW,
+    )
+    receipt = SchedulerTransitionReceipt(
+        "transition-scheduler-cross", run.run_id,
+        RunState.PRECONDITION_CHECK, run.state, 5,
+    )
+    with pytest.raises(AcknowledgmentError, match="state conflicts"):
+        request_from_scheduler(SchedulerDecision(action, reason), run, receipt, **fields)
+
+
+@pytest.mark.parametrize(
+    ("action", "reason", "state", "category"),
+    [
+        (
+            SchedulerAction.SUSPEND, SchedulerReason.RUN_IS_SUSPENDED,
+            RunState.SUSPENDED, AcknowledgmentCategory.SUSPENSION_NOTICE,
+        ),
+        (
+            SchedulerAction.FAIL_CLOSED, SchedulerReason.RUN_IS_TERMINAL,
+            RunState.FAILED_CLOSED, AcknowledgmentCategory.FAILED_CLOSED,
+        ),
+    ],
+)
+def test_scheduler_adapter_binds_refusing_action_to_durable_state(
+    action: SchedulerAction,
+    reason: SchedulerReason,
+    state: RunState,
+    category: AcknowledgmentCategory,
+) -> None:
+    run = ScheduledRun("run-scheduler-safe", date(2026, 8, 4), state, NOW, NOW)
+    receipt = SchedulerTransitionReceipt(
+        "transition-scheduler-safe", run.run_id, RunState.PRECONDITION_CHECK, state, 6,
+    )
+    selected = request_from_scheduler(
+        SchedulerDecision(action, reason), run, receipt,
+        acknowledgment_id="ack-scheduler-safe", issued_at=NOW,
+        expires_at=NOW + timedelta(hours=1), correlation_id="correlation-scheduler",
+    )
+    assert selected.category is category
+    assert selected.source_sequence == receipt.sequence
+
+
+@pytest.mark.parametrize(
+    "reason", [SchedulerReason.OK, SchedulerReason.MONITORING_DELIVERY_UNCONFIRMED],
+)
+def test_scheduler_failed_terminal_rejects_nonterminal_reason(reason: SchedulerReason) -> None:
+    run = ScheduledRun(
+        "run-scheduler-failed", date(2026, 8, 4), RunState.FAILED_CLOSED, NOW, NOW,
+    )
+    receipt = SchedulerTransitionReceipt(
+        "transition-scheduler-failed", run.run_id,
+        RunState.PRECONDITION_CHECK, run.state, 6,
+    )
+    with pytest.raises(AcknowledgmentError, match="state conflicts"):
+        request_from_scheduler(
+            SchedulerDecision(SchedulerAction.FAIL_CLOSED, reason), run, receipt,
+            acknowledgment_id="ack-scheduler-failed", issued_at=NOW,
+            expires_at=NOW + timedelta(hours=1), correlation_id="correlation-scheduler",
+        )
+
+
+def test_supersession_is_exactly_bound_to_same_review_lineage() -> None:
+    with pytest.raises(AcknowledgmentError, match="successor review binding"):
+        artifact(
+            disposition=AcknowledgmentDisposition.SUPERSEDE,
+            successor_review_item_id="review-item-scheduler-run-other",
+            successor_review_sequence=4,
+        )
+    with pytest.raises(AcknowledgmentError, match="successor review binding"):
+        artifact(
+            disposition=AcknowledgmentDisposition.SUPERSEDE,
+            successor_review_item_id="review-item-one-successor-5",
+            successor_review_sequence=5,
+        )
 
 
 def test_adapter_source_identity_and_sequence_cannot_be_overridden() -> None:
