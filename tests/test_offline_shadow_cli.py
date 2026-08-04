@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import io
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,6 +11,7 @@ import pytest
 
 import src.offline_shadow_cli as cli_module
 from src.execution_gates import ACTIVATION_APPROVALS
+from src.durable_suspension_controller import DurableSuspensionController
 from src.offline_shadow_cli import (
     RECEIPT_KEYS,
     CliDependencies,
@@ -27,6 +28,7 @@ from src.offline_shadow_runner import (
     RunnerReason,
     RunnerResult,
     RunnerState,
+    derive_driver_tick,
 )
 from src.read_only_broker_state import approved_active_protection_states
 from tests.test_offline_shadow_runner import close_stack, stack
@@ -43,6 +45,9 @@ def argv(tmp_path: Path, *, ticks: tuple[datetime, ...] = (NOW,), maximum: int =
         "--session-date", "2026-08-03",
         "--runner-db", str((tmp_path / "runner.sqlite").resolve()),
         "--driver-db", str((tmp_path / "driver.sqlite").resolve()),
+        "--scheduler-db", str((tmp_path / "scheduler.sqlite").resolve()),
+        "--controller-db", str((tmp_path / "controller.sqlite").resolve()),
+        "--orchestrator-db", str((tmp_path / "orchestrator.sqlite").resolve()),
         "--receipt", str((tmp_path / "receipt.json").resolve()),
         "--mode", "offline-shadow",
     ]
@@ -66,7 +71,7 @@ class FixedRunner:
         self.closes += 1
 
 
-def result(outcome: RunnerOutcome) -> RunnerResult:
+def result(outcome: RunnerOutcome, config: RunnerConfig) -> RunnerResult:
     values = {
         RunnerOutcome.COMPLETED_BOUND: (RunnerState.COMPLETED, RunnerReason.DRIVER_COMPLETE),
         RunnerOutcome.STOPPED_ON_REVIEW: (RunnerState.COMPLETED, RunnerReason.DRIVER_REVIEW_REQUIRED),
@@ -77,12 +82,15 @@ def result(outcome: RunnerOutcome) -> RunnerResult:
         RunnerOutcome.EXPIRED: (RunnerState.EXPIRED, RunnerReason.DRIVER_EXPIRED),
     }
     state, reason = values[outcome]
-    return RunnerResult("runner-one", state, outcome, reason, 1, 1, 4, "driver-safe")
+    return RunnerResult(
+        "runner-one", state, outcome, reason, 1, 1, 4,
+        derive_driver_tick(config, 0).driver_id,
+    )
 
 
 def invoke_fixed(tmp_path: Path, selected: RunnerOutcome) -> tuple[int, FixedRunner, str, str]:
-    config, _ = parse_config(argv(tmp_path))
-    fixed = FixedRunner(config, result(selected))
+    config = parse_config(argv(tmp_path)).runner
+    fixed = FixedRunner(config, result(selected, config))
     stdout, stderr = io.StringIO(), io.StringIO()
     code = run_cli(
         argv(tmp_path),
@@ -203,7 +211,7 @@ def test_tick_list_cannot_exceed_bound(tmp_path: Path) -> None:
         parse_config(argv(tmp_path, ticks=(NOW, NOW + timedelta(minutes=1)), maximum=1))
 
 
-@pytest.mark.parametrize("field", ["--runner-db", "--driver-db"])
+@pytest.mark.parametrize("field", ["--runner-db", "--driver-db", "--scheduler-db", "--controller-db", "--orchestrator-db"])
 def test_memory_repository_and_production_database_paths_are_rejected(tmp_path: Path, field: str) -> None:
     for bad in (":memory:", str((Path.cwd() / "data" / "x.sqlite").resolve()), str((tmp_path / "production" / "x.sqlite").resolve())):
         values = argv(tmp_path)
@@ -244,7 +252,7 @@ def test_raw_factory_exception_is_never_printed_or_persisted(tmp_path: Path) -> 
 
 
 def test_wrong_runner_result_identity_fails_closed_without_receipt(tmp_path: Path) -> None:
-    config, _ = parse_config(argv(tmp_path))
+    config = parse_config(argv(tmp_path)).runner
     wrong = RunnerResult(
         "runner-other", RunnerState.COMPLETED, RunnerOutcome.COMPLETED_BOUND,
         RunnerReason.DRIVER_COMPLETE, 1, 1, 4, "driver-safe",
@@ -260,9 +268,76 @@ def test_wrong_runner_result_identity_fails_closed_without_receipt(tmp_path: Pat
     assert not (tmp_path / "receipt.json").exists()
 
 
+@pytest.mark.parametrize("mutation", ["count", "driver"])
+def test_runner_result_is_bound_to_exact_finite_invocation(tmp_path: Path, mutation: str) -> None:
+    config = parse_config(argv(tmp_path, maximum=1)).runner
+    selected = result(RunnerOutcome.COMPLETED_BOUND, config)
+    selected = replace(
+        selected,
+        **(
+            {"completed_tick_count": 999, "next_tick_index": 999}
+            if mutation == "count"
+            else {"current_driver_id": "driver-stale-safe"}
+        ),
+    )
+    code = run_cli(
+        argv(tmp_path, maximum=1),
+        dependencies=CliDependencies(lambda received: FixedRunner(received, selected)),
+        stdout=io.StringIO(), stderr=io.StringIO(),
+    )
+    assert code == ExitCode.FAILED_CLOSED
+    assert not (tmp_path / "receipt.json").exists()
+
+
+def test_process_entrypoint_has_action_inert_default_composition(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli_module.main(argv(tmp_path, ticks=()))
+    assert code == ExitCode.COMPLETED_SAFELY
+    payload = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert payload["runner_outcome"] == RunnerOutcome.COMPLETED_BOUND.value
+    assert payload["completed_tick_count"] == 0
+    assert payload["permits_automated_action"] is False
+    assert capsys.readouterr().err == ""
+    for name in ("runner.sqlite", "driver.sqlite", "scheduler.sqlite", "controller.sqlite", "orchestrator.sqlite"):
+        assert (tmp_path / name).exists()
+
+
+def test_process_entrypoint_fails_closed_when_offline_evidence_is_unavailable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli_module.main(argv(tmp_path))
+    assert code == ExitCode.FAILED_CLOSED
+    payload = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert payload["runner_outcome"] == RunnerOutcome.STOPPED_ON_FAILURE.value
+    assert payload["permits_automated_action"] is False
+    assert capsys.readouterr().err == ""
+
+
+def test_process_restart_recovers_exact_controller_and_pending_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    selected = argv(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(cli_module.os, "link", lambda source, target: (_ for _ in ()).throw(OSError("PRIVATE token")))
+        assert cli_module.main(selected) == ExitCode.FAILED_CLOSED
+    assert not (tmp_path / "receipt.json").exists()
+    assert (tmp_path / ".receipt.json.pending").exists()
+
+    assert cli_module.main(selected) == ExitCode.FAILED_CLOSED
+    payload = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert payload["runner_outcome"] == RunnerOutcome.STOPPED_ON_FAILURE.value
+    assert not (tmp_path / ".receipt.json.pending").exists()
+
+
+def test_process_restart_rejects_controller_identity_with_wrong_creation_time(tmp_path: Path) -> None:
+    invocation = parse_config(argv(tmp_path))
+    tick = derive_driver_tick(invocation.runner, 0)
+    controller = DurableSuspensionController(invocation.controller_database_path)
+    controller.register(tick.controller_id, now=tick.now + timedelta(microseconds=1))
+    controller.close()
+
+    assert cli_module.main(argv(tmp_path)) == ExitCode.FAILED_CLOSED
+    assert not (tmp_path / "receipt.json").exists()
+
+
 def test_partial_receipt_publish_fails_closed_without_visible_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config, _ = parse_config(argv(tmp_path))
-    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND))
+    config = parse_config(argv(tmp_path)).runner
+    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND, config))
     monkeypatch.setattr(cli_module.os, "link", lambda source, target: (_ for _ in ()).throw(OSError("PRIVATE token")))
     stderr = io.StringIO()
     code = run_cli(
@@ -276,8 +351,8 @@ def test_partial_receipt_publish_fails_closed_without_visible_receipt(tmp_path: 
 
 
 def test_cleanup_failure_after_publication_cannot_contradict_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    config, _ = parse_config(argv(tmp_path))
-    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND))
+    config = parse_config(argv(tmp_path)).runner
+    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND, config))
     monkeypatch.setattr(cli_module.os, "unlink", lambda path: (_ for _ in ()).throw(OSError("PRIVATE token")))
     code = run_cli(
         argv(tmp_path), dependencies=CliDependencies(lambda received: fixed),
@@ -293,8 +368,8 @@ def test_stdout_failure_after_publication_cannot_contradict_receipt(tmp_path: Pa
         def write(self, value: str) -> int:
             raise OSError("PRIVATE account")
 
-    config, _ = parse_config(argv(tmp_path))
-    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND))
+    config = parse_config(argv(tmp_path)).runner
+    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND, config))
     code = run_cli(
         argv(tmp_path), dependencies=CliDependencies(lambda received: fixed),
         stdout=BrokenOutput(), stderr=io.StringIO(),
@@ -306,8 +381,8 @@ def test_stdout_failure_after_publication_cannot_contradict_receipt(tmp_path: Pa
 def test_publication_attempts_directory_metadata_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
     monkeypatch.setattr(cli_module, "_sync_directory_best_effort", lambda directory: calls.append(directory))
-    config, _ = parse_config(argv(tmp_path))
-    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND))
+    config = parse_config(argv(tmp_path)).runner
+    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND, config))
     assert run_cli(
         argv(tmp_path), dependencies=CliDependencies(lambda received: fixed),
         stdout=io.StringIO(), stderr=io.StringIO(),
@@ -321,8 +396,8 @@ def test_directory_sync_exception_after_commit_cannot_change_outcome(tmp_path: P
         "_sync_directory_best_effort",
         lambda directory: (_ for _ in ()).throw(OSError("PRIVATE account")),
     )
-    config, _ = parse_config(argv(tmp_path))
-    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND))
+    config = parse_config(argv(tmp_path)).runner
+    fixed = FixedRunner(config, result(RunnerOutcome.COMPLETED_BOUND, config))
     code = run_cli(
         argv(tmp_path), dependencies=CliDependencies(lambda received: fixed),
         stdout=io.StringIO(), stderr=io.StringIO(),
