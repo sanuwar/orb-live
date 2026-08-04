@@ -175,6 +175,16 @@ def test_healthy_offline_is_explicitly_inert() -> None:
     assert "UNATTENDED_READY" not in json.dumps(report.to_dict())
 
 
+def test_public_runner_scheduler_identity_is_accepted() -> None:
+    selected = context(scheduler_run_id="scheduler-derived-safe")
+    projected = project_status(
+        selected,
+        inputs(scheduler=replace(scheduled(), run_id="scheduler-derived-safe")),
+    )
+    assert projected.scheduler_run_id == "scheduler-derived-safe"
+    assert OperationalStatusReport.from_dict(projected.to_dict()) == projected
+
+
 @pytest.mark.parametrize(
     ("changed", "expected"),
     [

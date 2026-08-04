@@ -85,6 +85,14 @@ def _identifier(value: object, prefix: str, label: str) -> str:
     return value
 
 
+def _scheduler_identifier(value: object) -> str:
+    """Accept both scheduler IDs already used by public offline producers."""
+    if not isinstance(value, str):
+        raise StatusReportError("scheduler run identity is invalid")
+    prefix = "scheduler-" if value.startswith("scheduler-") else "run-"
+    return _identifier(value, prefix, "scheduler run identity")
+
+
 def _moment(value: object, label: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
         raise StatusReportError(f"{label} is invalid")
@@ -112,7 +120,7 @@ class StatusContext:
     def __post_init__(self) -> None:
         _identifier(self.report_id, "status-", "report identity")
         _identifier(self.runner_id, "runner-", "runner identity")
-        _identifier(self.scheduler_run_id, "run-", "scheduler run identity")
+        _scheduler_identifier(self.scheduler_run_id)
         _moment(self.reported_at, "report timestamp")
         if not isinstance(self.maximum_component_age, timedelta) or self.maximum_component_age <= timedelta(0):
             raise StatusReportError("component freshness bound is invalid")
@@ -183,7 +191,7 @@ class OperationalStatusReport:
     def __post_init__(self) -> None:
         _identifier(self.report_id, "status-", "report identity")
         _identifier(self.runner_id, "runner-", "runner identity")
-        _identifier(self.scheduler_run_id, "run-", "scheduler run identity")
+        _scheduler_identifier(self.scheduler_run_id)
         if not isinstance(self.overall_status, OverallStatus):
             raise StatusReportError("overall status is invalid")
         if not self.reason_codes or any(not isinstance(x, StatusReason) for x in self.reason_codes):
