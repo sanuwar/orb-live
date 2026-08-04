@@ -448,6 +448,8 @@ class OfflineCycleDriver:
     ) -> None:
         if not isinstance(database_path, Path):
             raise DriverError("a driver database path is required")
+        if os.fspath(database_path) == ":memory:":
+            raise DriverError("the driver requires a durable database file")
         if is_repository_data_path(database_path):
             raise DriverError("the driver may not open a database inside repository data")
         if not isinstance(scheduler, DurableScheduler):
@@ -512,6 +514,12 @@ class OfflineCycleDriver:
             self._require_same_tick(record, tick)
         if record.is_terminal:
             return self._result_from_record(record)
+        if record.state is DriverState.ORCHESTRATOR_STARTED:
+            return self._recover_started(record, tick)
+        if record.state is DriverState.ORCHESTRATOR_COMPLETED:
+            return self._resume_completed(record, tick)
+        if record.state is DriverState.RECEIPT_PERSISTED:
+            return self._finalize(record.driver_id, tick.now)
         if tick.now > record.expires_at:
             return self._conclude(
                 record.driver_id,
@@ -520,12 +528,6 @@ class OfflineCycleDriver:
                 DriverReason.EXPIRED,
                 tick.now,
             )
-        if record.state is DriverState.ORCHESTRATOR_STARTED:
-            return self._recover_started(record, tick)
-        if record.state is DriverState.ORCHESTRATOR_COMPLETED:
-            return self._resume_completed(record, tick)
-        if record.state is DriverState.RECEIPT_PERSISTED:
-            return self._finalize(record.driver_id, tick.now)
 
         try:
             scheduler_run = self._load_or_create_scheduler(tick, created_here)
@@ -597,17 +599,6 @@ class OfflineCycleDriver:
         try:
             result = self.orchestrator.run_cycle(inputs)
         except Exception:
-            try:
-                cycle = self.orchestrator.load_cycle(tick.cycle_id)
-            except Exception:
-                cycle = None
-            if self._cycle_is_exact_final(cycle, tick):
-                self._record_orchestrator_result(
-                    tick.driver_id, cycle.outcome, cycle.reason, tick.now
-                )
-                return self._resume_completed(
-                    self._require_record(tick.driver_id), tick
-                )
             return self._conclude(
                 tick.driver_id,
                 DriverState.AMBIGUOUS_RESTART,
@@ -694,22 +685,29 @@ class OfflineCycleDriver:
         return envelope.decision
 
     def _recover_started(self, record: DriverRecord, tick: DriverTick) -> DriverResult:
-        cycle = self.orchestrator.load_cycle(record.cycle_id)
-        if not self._cycle_is_exact_final(cycle, tick):
-            return self._conclude(
-                record.driver_id,
-                DriverState.AMBIGUOUS_RESTART,
-                DriverOutcome.AMBIGUOUS_RESTART,
-                DriverReason.ORCHESTRATOR_RESULT_MISSING,
-                tick.now,
-            )
-        self._record_orchestrator_result(
-            record.driver_id, cycle.outcome, cycle.reason, tick.now
+        # The orchestrator journal does not carry a driver identity.  A result
+        # found after restart therefore cannot prove which caller created it,
+        # even when its cycle identities match.  Only the synchronous return
+        # path below can durably advance to ORCHESTRATOR_COMPLETED.
+        return self._conclude(
+            record.driver_id,
+            DriverState.AMBIGUOUS_RESTART,
+            DriverOutcome.AMBIGUOUS_RESTART,
+            DriverReason.ORCHESTRATOR_RESULT_MISSING,
+            tick.now,
         )
-        return self._resume_completed(self._require_record(record.driver_id), tick)
 
     def _resume_completed(self, record: DriverRecord, tick: DriverTick) -> DriverResult:
-        cycle = self.orchestrator.load_cycle(record.cycle_id)
+        try:
+            cycle = self.orchestrator.load_cycle(record.cycle_id)
+        except Exception:
+            return self._conclude(
+                record.driver_id,
+                DriverState.FAILED_CLOSED,
+                DriverOutcome.FAILED_CLOSED,
+                DriverReason.DURABLE_STATE_INVALID,
+                tick.now,
+            )
         if not self._cycle_is_exact_final(cycle, tick):
             return self._conclude(
                 record.driver_id,
@@ -794,9 +792,17 @@ class OfflineCycleDriver:
                 [(identity, tick.driver_id, kind, stamp) for identity, kind in identities],
             )
             self._connection.execute("COMMIT")
-        except sqlite3.IntegrityError as exc:
-            self._connection.execute("ROLLBACK")
-            raise DriverError("driver, cycle, or transition identity is already spent") from exc
+        except Exception as exc:
+            if self._connection.in_transaction:
+                try:
+                    self._connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            if isinstance(exc, sqlite3.IntegrityError):
+                raise DriverError(
+                    "driver, cycle, or transition identity is already spent"
+                ) from None
+            raise DriverError("driver record persistence failed") from None
         return self._require_record(tick.driver_id)
 
     def _record_orchestrator_result(self, driver_id, outcome, reason, moment) -> None:
@@ -857,10 +863,27 @@ class OfflineCycleDriver:
 
     def _finalize(self, driver_id: str, moment: datetime) -> DriverResult:
         record = self._require_record(driver_id)
-        receipt = self.load_receipt(driver_id)
+        try:
+            receipt = self.load_receipt(driver_id)
+        except Exception:
+            return self._conclude(
+                driver_id,
+                DriverState.FAILED_CLOSED,
+                DriverOutcome.FAILED_CLOSED,
+                DriverReason.DURABLE_STATE_INVALID,
+                moment,
+            )
         if receipt is None:
             raise DriverError("receipt persistence is required before finalization")
         if record.state is DriverState.RECEIPT_PERSISTED:
+            if not self._receipt_is_exact_for_record(receipt, record):
+                return self._conclude(
+                    driver_id,
+                    DriverState.FAILED_CLOSED,
+                    DriverOutcome.FAILED_CLOSED,
+                    DriverReason.ORCHESTRATOR_RESULT_MISMATCH,
+                    moment,
+                )
             target = (
                 DriverState.FAILED_CLOSED
                 if receipt.outcome is DriverOutcome.FAILED_CLOSED
@@ -876,6 +899,26 @@ class OfflineCycleDriver:
                 moment,
             )
         return self._result_from_record(self._require_record(driver_id))
+
+    @staticmethod
+    def _receipt_is_exact_for_record(
+        receipt: DriverReceipt, record: DriverRecord
+    ) -> bool:
+        """Bind a recovered receipt to the exact durable driver transition."""
+        return bool(
+            record.orchestrator_outcome is not None
+            and record.orchestrator_reason is not None
+            and receipt.driver_id == record.driver_id
+            and receipt.cycle_id == record.cycle_id
+            and receipt.scheduler_run_id == record.scheduler_run_id
+            and receipt.controller_id == record.controller_id
+            and receipt.outcome is _OUTCOME_PROJECTION[record.orchestrator_outcome]
+            and receipt.reason is DriverReason.ORCHESTRATOR_RESULT
+            and receipt.orchestrator_outcome is record.orchestrator_outcome
+            and receipt.orchestrator_reason is record.orchestrator_reason
+            and receipt.sequence == record.sequence
+            and receipt.persisted_at == record.updated_at
+        )
 
     def _conclude(self, driver_id, state, outcome, reason, moment) -> DriverResult:
         record = self._require_record(driver_id)
@@ -1049,12 +1092,15 @@ def _parsed_moment(value: object, label: str) -> datetime:
 
 def is_repository_data_path(path: Path) -> bool:
     try:
-        resolved = os.path.normcase(os.path.abspath(os.fspath(path)))
-    except (TypeError, ValueError):
+        resolved = os.path.normcase(os.fspath(path.resolve(strict=False)))
+        repository_data = os.path.normcase(
+            os.fspath(Path(REPOSITORY_DATA_DIRECTORY).resolve(strict=False))
+        )
+        return resolved == repository_data or os.path.commonpath(
+            [resolved, repository_data]
+        ) == repository_data
+    except (OSError, TypeError, ValueError):
         return False
-    return resolved == REPOSITORY_DATA_DIRECTORY or os.path.commonpath(
-        [resolved, REPOSITORY_DATA_DIRECTORY]
-    ) == REPOSITORY_DATA_DIRECTORY
 
 
 _OUTCOME_PROJECTION: Mapping[CycleOutcome, DriverOutcome] = MappingProxyType(

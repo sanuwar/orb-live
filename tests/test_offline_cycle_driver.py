@@ -417,6 +417,33 @@ def test_database_under_repository_data_is_refused(tmp_path):
     orchestrator.close(); scheduler.close(); controller.close()
 
 
+def test_in_memory_database_is_refused(tmp_path):
+    scheduler = DurableScheduler(tmp_path / "scheduler.sqlite")
+    controller = DurableSuspensionController(tmp_path / "controller.sqlite")
+    controller.register("controller-one", now=NOW)
+    orchestrator = OfflineSafetyOrchestrator(
+        tmp_path / "orchestrator.sqlite", scheduler=scheduler, controller=controller
+    )
+    with pytest.raises(DriverError, match="durable database"):
+        OfflineCycleDriver(
+            pathlib.Path(":memory:"),
+            scheduler=scheduler,
+            controller=controller,
+            orchestrator=orchestrator,
+            providers=provider_set(),
+        )
+    orchestrator.close(); scheduler.close(); controller.close()
+
+
+def test_repository_data_alias_is_refused(tmp_path):
+    alias = tmp_path / "data-alias"
+    try:
+        alias.symlink_to(pathlib.Path("data").resolve(), target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    assert is_repository_data_path(alias / "driver.sqlite")
+
+
 def test_driver_rejects_orchestrator_wired_to_other_durable_stores(tmp_path):
     scheduler = DurableScheduler(tmp_path / "scheduler.sqlite")
     other_scheduler = DurableScheduler(tmp_path / "other-scheduler.sqlite")
@@ -771,6 +798,26 @@ def test_transition_identity_is_permanently_spent(tmp_path, field):
     close_stack(items)
 
 
+def test_non_integrity_create_failure_rolls_back_all_identity_evidence(tmp_path):
+    items = stack(tmp_path)
+    def refuse_identity():
+        raise sqlite3.OperationalError("PRIVATE partial transaction")
+
+    items[0]._connection.create_function("refuse_identity", 0, refuse_identity)
+    items[0]._connection.execute(
+        "CREATE TRIGGER refuse_identity BEFORE INSERT ON spent_driver_identities "
+        "BEGIN SELECT refuse_identity(); END"
+    )
+    with pytest.raises(DriverError, match="record persistence failed") as raised:
+        items[0].run_tick(tick())
+    assert raised.value.__cause__ is None
+    assert items[0]._connection.in_transaction is False
+    with sqlite3.connect(items[0].database_path) as connection:
+        assert connection.execute("SELECT * FROM driver_runs").fetchall() == []
+        assert connection.execute("SELECT * FROM spent_driver_identities").fetchall() == []
+    close_stack(items)
+
+
 def test_wrong_controller_identity_fails_closed(tmp_path):
     items = stack(tmp_path)
     result = items[0].run_tick(tick(controller_id="controller-wrong"))
@@ -897,16 +944,28 @@ def prepare_final_orchestrator(items):
     return items[1].run_cycle(orchestrator_inputs(auth, suspension=suspension))
 
 
-def test_orchestrator_started_recovers_only_an_exact_final_journal(tmp_path):
+def test_orchestrator_started_rejects_preexisting_exact_journal(tmp_path):
     items = stack(tmp_path)
-    result = prepare_final_orchestrator(items)
+    prepare_final_orchestrator(items)
     items[0]._create_record(tick())
     items[0]._transition("driver-one", DriverState.INPUTS_COLLECTED, NOW)
     items[0]._transition("driver-one", DriverState.ORCHESTRATOR_STARTED, NOW)
     recovered = items[0].run_tick(tick())
-    assert recovered.state is DriverState.COMPLETED_NO_ACTION
-    assert recovered.orchestrator_outcome is result.outcome
+    assert recovered.state is DriverState.AMBIGUOUS_RESTART
+    assert recovered.outcome is DriverOutcome.AMBIGUOUS_RESTART
+    assert items[0].load_receipt("driver-one") is None
     assert items[1].cycle_count == 1
+    close_stack(items)
+
+
+def test_expiry_cannot_erase_started_ambiguity(tmp_path):
+    items = stack(tmp_path)
+    items[0]._create_record(tick())
+    items[0]._transition("driver-one", DriverState.INPUTS_COLLECTED, NOW)
+    items[0]._transition("driver-one", DriverState.ORCHESTRATOR_STARTED, NOW)
+    result = items[0].run_tick(tick(now=NOW + timedelta(hours=2)))
+    assert result.state is DriverState.AMBIGUOUS_RESTART
+    assert result.outcome is DriverOutcome.AMBIGUOUS_RESTART
     close_stack(items)
 
 
@@ -923,6 +982,42 @@ def test_orchestrator_completed_reinspects_exact_result(tmp_path):
     recovered = items[0].run_tick(tick())
     assert recovered.state is DriverState.COMPLETED_NO_ACTION
     assert items[0].load_receipt("driver-one") is not None
+    close_stack(items)
+
+
+def test_orchestrator_completed_with_unreadable_journal_fails_closed(tmp_path):
+    items = stack(tmp_path)
+    result = prepare_final_orchestrator(items)
+    items[0]._create_record(tick())
+    set_state(
+        items[0],
+        DriverState.ORCHESTRATOR_COMPLETED,
+        orch_outcome=result.outcome,
+        orch_reason=result.reason,
+    )
+    with sqlite3.connect(items[1].journal_path) as connection:
+        connection.execute(
+            "UPDATE cycle_journal SET phase='NOT_A_PHASE' WHERE cycle_id='cycle-one'"
+        )
+    recovered = items[0].run_tick(tick())
+    assert recovered.state is DriverState.FAILED_CLOSED
+    assert recovered.reason is DriverReason.DURABLE_STATE_INVALID
+    close_stack(items)
+
+
+def test_expiry_cannot_erase_completed_result(tmp_path):
+    items = stack(tmp_path)
+    result = prepare_final_orchestrator(items)
+    items[0]._create_record(tick())
+    set_state(
+        items[0],
+        DriverState.ORCHESTRATOR_COMPLETED,
+        orch_outcome=result.outcome,
+        orch_reason=result.reason,
+    )
+    recovered = items[0].run_tick(tick(now=NOW + timedelta(hours=2)))
+    assert recovered.state is DriverState.COMPLETED_NO_ACTION
+    assert recovered.outcome is DriverOutcome.OPERATOR_REVIEW_REQUIRED
     close_stack(items)
 
 
@@ -961,10 +1056,107 @@ def test_another_cycles_receipt_cannot_be_attached(tmp_path):
 def test_receipt_persisted_restart_finalizes_idempotently(tmp_path):
     items = stack(tmp_path)
     completed = items[0].run_tick(tick())
-    set_state(items[0], DriverState.RECEIPT_PERSISTED)
+    receipt = items[0].load_receipt("driver-one")
+    with sqlite3.connect(items[0].database_path) as connection:
+        connection.execute(
+            "UPDATE driver_runs SET state=?, outcome=NULL, reason=NULL, "
+            "sequence=?, updated_at=? WHERE driver_id=?",
+            (
+                DriverState.RECEIPT_PERSISTED.value,
+                receipt.sequence,
+                receipt.persisted_at.isoformat(),
+                "driver-one",
+            ),
+        )
     first = items[0].run_tick(tick())
     second = items[0].run_tick(tick())
     assert first == second == completed
+    close_stack(items)
+
+
+def test_expiry_cannot_erase_persisted_receipt(tmp_path):
+    items = stack(tmp_path)
+    completed = items[0].run_tick(tick())
+    receipt = items[0].load_receipt("driver-one")
+    with sqlite3.connect(items[0].database_path) as connection:
+        connection.execute(
+            "UPDATE driver_runs SET state=?, outcome=NULL, reason=NULL, "
+            "sequence=?, updated_at=? WHERE driver_id=?",
+            (
+                DriverState.RECEIPT_PERSISTED.value,
+                receipt.sequence,
+                receipt.persisted_at.isoformat(),
+                "driver-one",
+            ),
+        )
+    recovered = items[0].run_tick(tick(now=NOW + timedelta(hours=2)))
+    assert recovered == completed
+    close_stack(items)
+
+
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("cycle_id", "cycle-other"),
+        ("scheduler_run_id", "scheduler-other"),
+        ("controller_id", "controller-other"),
+        ("outcome", DriverOutcome.OFFLINE_COMPLETE.value),
+        ("orchestrator_outcome", CycleOutcome.OFFLINE_CHECKS_COMPLETE.value),
+        ("sequence", 99),
+        ("persisted_at", (NOW + timedelta(seconds=1)).isoformat()),
+    ],
+)
+def test_receipt_persisted_restart_rejects_wrong_durable_evidence(
+    tmp_path, column, value
+):
+    items = stack(tmp_path)
+    items[0].run_tick(tick())
+    receipt = items[0].load_receipt("driver-one")
+    with sqlite3.connect(items[0].database_path) as connection:
+        connection.execute(
+            "UPDATE driver_runs SET state=?, outcome=NULL, reason=NULL, "
+            "sequence=?, updated_at=? WHERE driver_id=?",
+            (
+                DriverState.RECEIPT_PERSISTED.value,
+                receipt.sequence,
+                receipt.persisted_at.isoformat(),
+                "driver-one",
+            ),
+        )
+        connection.execute(
+            f"UPDATE driver_receipts SET {column}=? WHERE driver_id=?",
+            (value, "driver-one"),
+        )
+    result = items[0].run_tick(tick(now=NOW + timedelta(seconds=2)))
+    assert result.state is DriverState.FAILED_CLOSED
+    assert result.outcome is DriverOutcome.FAILED_CLOSED
+    assert result.reason is DriverReason.ORCHESTRATOR_RESULT_MISMATCH
+    assert items[1].cycle_count == 1
+    close_stack(items)
+
+
+def test_receipt_persisted_with_unreadable_receipt_fails_closed(tmp_path):
+    items = stack(tmp_path)
+    items[0].run_tick(tick())
+    receipt = items[0].load_receipt("driver-one")
+    with sqlite3.connect(items[0].database_path) as connection:
+        connection.execute(
+            "UPDATE driver_runs SET state=?, outcome=NULL, reason=NULL, "
+            "sequence=?, updated_at=? WHERE driver_id=?",
+            (
+                DriverState.RECEIPT_PERSISTED.value,
+                receipt.sequence,
+                receipt.persisted_at.isoformat(),
+                "driver-one",
+            ),
+        )
+        connection.execute(
+            "UPDATE driver_receipts SET outcome='NOT_AN_OUTCOME' "
+            "WHERE driver_id='driver-one'"
+        )
+    recovered = items[0].run_tick(tick())
+    assert recovered.state is DriverState.FAILED_CLOSED
+    assert recovered.reason is DriverReason.DURABLE_STATE_INVALID
     close_stack(items)
 
 
@@ -1016,7 +1208,7 @@ def test_orchestrator_is_called_exactly_once(tmp_path, monkeypatch):
     close_stack(items)
 
 
-def test_exception_after_durable_orchestrator_completion_uses_exact_journal(
+def test_exception_after_durable_orchestrator_completion_is_ambiguous_without_binding(
     tmp_path, monkeypatch
 ):
     items = stack(tmp_path)
@@ -1031,10 +1223,10 @@ def test_exception_after_durable_orchestrator_completion_uses_exact_journal(
 
     monkeypatch.setattr(items[1], "run_cycle", completed_then_raised)
     result = items[0].run_tick(tick())
-    assert result.state is DriverState.COMPLETED_NO_ACTION
-    assert result.outcome is DriverOutcome.OPERATOR_REVIEW_REQUIRED
+    assert result.state is DriverState.AMBIGUOUS_RESTART
+    assert result.outcome is DriverOutcome.AMBIGUOUS_RESTART
     assert calls == 1
-    assert items[0].load_receipt("driver-one") is not None
+    assert items[0].load_receipt("driver-one") is None
     close_stack(items)
 
 
