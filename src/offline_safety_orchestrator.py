@@ -89,6 +89,7 @@ from src.execution_gates import (
 )
 from src.offline_reconciliation import RecoveryOutcome, RecoveryResult
 from src.operational_monitor import HeartbeatAssessment, HeartbeatStatus
+from src.offline_path_safety import REPOSITORY_DATA_DIRECTORY, is_repository_data_path
 from src.risk_limits import RiskAssessment, RiskDecision
 
 
@@ -538,9 +539,6 @@ def _evaluate_level(level: DominanceLevel, inputs: CycleInputs) -> CycleReason |
 # --------------------------------------------------------------------------
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-REPOSITORY_DATA_DIRECTORY = os.path.normcase(
-    os.path.abspath(os.fspath(REPOSITORY_ROOT / "data"))
-)
 
 SCHEMA_VERSION = 1
 
@@ -595,19 +593,6 @@ _RESTART_BY_PHASE: Mapping[CyclePhase, CyclePhase] = MappingProxyType({
     CyclePhase.VALIDATED: CyclePhase.FAILED_CLOSED,
     CyclePhase.SCHEDULER_APPLIED: CyclePhase.AMBIGUOUS_RESTART,
 })
-
-
-def is_repository_data_path(path: Path) -> bool:
-    """True when `path` lies inside the repository's production data directory."""
-    try:
-        resolved = os.path.normcase(os.path.abspath(os.fspath(path)))
-    except (TypeError, ValueError):
-        return False
-    return (
-        resolved == REPOSITORY_DATA_DIRECTORY
-        or os.path.commonpath([resolved, REPOSITORY_DATA_DIRECTORY])
-        == REPOSITORY_DATA_DIRECTORY
-    )
 
 
 def _validated_identifier(value: object, label: str) -> str:

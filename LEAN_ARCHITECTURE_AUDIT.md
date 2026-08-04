@@ -2,21 +2,20 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 50961
-- Test LOC: 47544
-- Estimated removable production LOC: 33
+- Production LOC: 50938
+- Test LOC: 47608
+- Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
-- Exact helper-body candidates: 1
-- Decision: Review exact helper-body groups for contract equivalence before consolidation.
+- Exact helper-body candidates: 0
+- Decision: No shared-helper change is justified by exact body-equivalence evidence.
 - Detailed reason-code, pattern, and duplicate-body inventories: JSON output only
-- Candidate detail: is_repository_data_path in src/durable_action_ledger.py, src/durable_scheduler.py, src/durable_suspension_controller.py, src/offline_safety_orchestrator.py; gross duplicate LOC 33
 
 ## Prioritized findings
 
 1. **NEEDS_RUNTIME_EVIDENCE / MEDIUM -- Repeated constrained-value validators**
-   Evidence: 41 repeated helper placements across identifier_validation=11, path_validation=9, permission_validation=2, serialization=17, timestamp_validation=7
-   Interpretation: Exact normalized bodies shared across modules: 1. Similar names alone do not establish contract equivalence.
-   Estimated removable LOC: production 33, tests 0
+   Evidence: 38 repeated helper placements across identifier_validation=11, path_validation=6, permission_validation=2, serialization=17, timestamp_validation=7
+   Interpretation: Exact normalized bodies shared across modules: 0. Similar names alone do not establish contract equivalence.
+   Estimated removable LOC: production 0, tests 0
 
 2. **NEEDS_RUNTIME_EVIDENCE / HIGH -- Transition journals are intentional durable evidence**
    Evidence: 4 transition tables: acknowledgment_transitions, alert_transitions, runner_transitions, scheduler_transitions
@@ -59,7 +58,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 10. **NO_ACTION / HIGH -- Test-heavy modules are visible, not automatically excessive**
-   Evidence: largest tests: tests/test_broker_action_saga.py (2061), tests/test_broker_saga_executor.py (1809), tests/test_broker_saga_orchestrator.py (1729), tests/test_entry_recovery.py (1509), tests/test_read_only_observation_runtime.py (1504); 23 modules have more test LOC than production LOC.
+   Evidence: largest tests: tests/test_broker_action_saga.py (2061), tests/test_broker_saga_executor.py (1809), tests/test_broker_saga_orchestrator.py (1729), tests/test_entry_recovery.py (1509), tests/test_read_only_observation_runtime.py (1504); 24 modules have more test LOC than production LOC.
    Interpretation: Higher test LOC is expected for state, boundary, restart, and adversarial matrices; remove only behaviorally duplicate cases.
    Estimated removable LOC: production 0, tests 0
 

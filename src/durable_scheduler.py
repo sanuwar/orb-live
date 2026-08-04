@@ -60,6 +60,7 @@ from src.exchange_calendar import (
     SessionClassification,
     classify as classify_calendar_session,
 )
+from src.offline_path_safety import REPOSITORY_DATA_DIRECTORY, is_repository_data_path
 
 
 class SchedulerError(RuntimeError):
@@ -506,9 +507,6 @@ class OperatorClearance:
 # --------------------------------------------------------------------------
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-REPOSITORY_DATA_DIRECTORY = os.path.normcase(
-    os.path.abspath(os.fspath(REPOSITORY_ROOT / "data"))
-)
 
 SCHEMA_VERSION = 1
 
@@ -538,19 +536,6 @@ CREATE TABLE IF NOT EXISTS scheduler_transitions (
 CREATE INDEX IF NOT EXISTS scheduler_transitions_by_run
     ON scheduler_transitions(run_id);
 """
-
-
-def is_repository_data_path(path: Path) -> bool:
-    """True when `path` lies inside the repository's production data directory."""
-    try:
-        resolved = os.path.normcase(os.path.abspath(os.fspath(path)))
-    except (TypeError, ValueError):
-        return False
-    return (
-        resolved == REPOSITORY_DATA_DIRECTORY
-        or os.path.commonpath([resolved, REPOSITORY_DATA_DIRECTORY])
-        == REPOSITORY_DATA_DIRECTORY
-    )
 
 
 def _validated_identifier(value: object, label: str) -> str:
