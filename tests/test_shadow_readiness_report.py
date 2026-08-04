@@ -194,7 +194,7 @@ def acknowledgment(state: AcknowledgmentState = AcknowledgmentState.ACKNOWLEDGED
         NOW + timedelta(hours=1), NOW - timedelta(minutes=1), "correlation-readiness",
         2, "ack-transition-safe", artifact_id, AcknowledgmentSourceKind.STATUS_REPORT,
         "source-status-report-status-safe", 1,
-        "review-item-successor" if state is AcknowledgmentState.SUPERSEDED else None,
+        "review-item-status-report-status-safe-successor-2" if state is AcknowledgmentState.SUPERSEDED else None,
         2 if state is AcknowledgmentState.SUPERSEDED else None, True,
     )
 
