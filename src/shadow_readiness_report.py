@@ -20,7 +20,7 @@ from src.durable_scheduler import RunState, ScheduledRun, SchedulerAction, Sched
 from src.durable_suspension_controller import ControllerRecord, ControllerState, SuspensionDecision, SuspensionTransitionReceipt
 from src.execution_gates import AUTHORITY_EXPLANATION, GateDecision, GateMode, GateVerdict
 from src.offline_safety_orchestrator import CycleOutcome, CycleResult
-from src.offline_shadow_runner import RunnerResult, RunnerState
+from src.offline_shadow_runner import RunnerOutcome, RunnerResult, RunnerState
 from src.operational_status_report import OperationalStatusReport, OverallStatus
 from src.operator_acknowledgment import AcknowledgmentRecord, AcknowledgmentState
 
@@ -62,6 +62,9 @@ class ReadinessReason(str, Enum):
     OPERATIONAL_REVIEW_REQUIRED = "OPERATIONAL_REVIEW_REQUIRED"
     SCHEDULER_REEVALUATION_REQUIRED = "SCHEDULER_REEVALUATION_REQUIRED"
     EXECUTION_GATE_CLOSED = "EXECUTION_GATE_CLOSED"
+    COMPONENT_WAITING = "COMPONENT_WAITING"
+    COMPONENT_DEGRADED = "COMPONENT_DEGRADED"
+    COMPONENT_EXPIRED = "COMPONENT_EXPIRED"
     OFFLINE_EVIDENCE_HEALTHY = "OFFLINE_EVIDENCE_HEALTHY"
 
 
@@ -85,6 +88,9 @@ _REASON_DOMINANCE = (
     ReadinessReason.ALERT_CONFIRMATION_RATIO_LOW,
     ReadinessReason.EXECUTION_GATE_CLOSED,
     ReadinessReason.GATE_EVIDENCE_UNVERIFIED,
+    ReadinessReason.COMPONENT_WAITING,
+    ReadinessReason.COMPONENT_DEGRADED,
+    ReadinessReason.COMPONENT_EXPIRED,
     ReadinessReason.PROTECTION_NOT_GROUNDED,
     ReadinessReason.ACTIVATION_APPROVALS_EMPTY,
     ReadinessReason.OFFLINE_EVIDENCE_HEALTHY,
@@ -118,6 +124,10 @@ class EvidenceProvenance(str, Enum):
     SELF_DECLARED = "SELF_DECLARED"
 
 
+class HistoryProvenance(str, Enum):
+    DURABLE_OFFLINE_RUNTIME = "DURABLE_OFFLINE_RUNTIME"
+
+
 @dataclass(frozen=True)
 class ReadinessEvidenceAttestation:
     attestation_id: str
@@ -125,6 +135,9 @@ class ReadinessEvidenceAttestation:
     evidence_fingerprint: str
     observed_at: datetime
     provenance: EvidenceProvenance
+    history_fingerprint: str
+    history_provenance: HistoryProvenance
+    history_producer_id: str
     permits_automated_action: bool = False
 
     def __post_init__(self) -> None:
@@ -135,6 +148,11 @@ class ReadinessEvidenceAttestation:
         _moment(self.observed_at, "attestation timestamp")
         if not isinstance(self.provenance, EvidenceProvenance):
             raise ReadinessError("evidence provenance is invalid")
+        if not isinstance(self.history_fingerprint, str) or len(self.history_fingerprint) != 64 or any(character not in "0123456789abcdef" for character in self.history_fingerprint):
+            raise ReadinessError("history fingerprint is invalid")
+        if self.history_provenance is not HistoryProvenance.DURABLE_OFFLINE_RUNTIME:
+            raise ReadinessError("history provenance is invalid")
+        _identifier(self.history_producer_id, "history-producer-", "history producer identity")
         _false(self.permits_automated_action)
 
 
@@ -431,7 +449,7 @@ class ShadowReadinessReport:
             ReadinessStatus.AMBIGUOUS: {ReadinessReason.AMBIGUOUS_RESTART},
             ReadinessStatus.SUPERVISED_BLOCKED: {ReadinessReason.ACTIVE_SUSPENSION, ReadinessReason.EXECUTION_GATE_CLOSED, ReadinessReason.PROTECTION_NOT_GROUNDED, ReadinessReason.ACTIVATION_APPROVALS_EMPTY},
             ReadinessStatus.OPERATOR_REVIEW_REQUIRED: {ReadinessReason.ALERT_DELIVERY_UNCONFIRMED, ReadinessReason.OPERATOR_ACK_PENDING, ReadinessReason.FURTHER_REVIEW_REQUIRED, ReadinessReason.OPERATIONAL_REVIEW_REQUIRED, ReadinessReason.SCHEDULER_REEVALUATION_REQUIRED},
-            ReadinessStatus.OFFLINE_DEGRADED: {ReadinessReason.MISSED_CYCLE, ReadinessReason.STALE_EVIDENCE, ReadinessReason.INSUFFICIENT_SHADOW_HISTORY, ReadinessReason.EXCESSIVE_CONSECUTIVE_FAILURES, ReadinessReason.EXCESSIVE_STALE_EVENTS, ReadinessReason.ALERT_CONFIRMATION_RATIO_LOW, ReadinessReason.GATE_EVIDENCE_UNVERIFIED},
+            ReadinessStatus.OFFLINE_DEGRADED: {ReadinessReason.MISSED_CYCLE, ReadinessReason.STALE_EVIDENCE, ReadinessReason.INSUFFICIENT_SHADOW_HISTORY, ReadinessReason.EXCESSIVE_CONSECUTIVE_FAILURES, ReadinessReason.EXCESSIVE_STALE_EVENTS, ReadinessReason.ALERT_CONFIRMATION_RATIO_LOW, ReadinessReason.GATE_EVIDENCE_UNVERIFIED, ReadinessReason.COMPONENT_WAITING, ReadinessReason.COMPONENT_DEGRADED, ReadinessReason.COMPONENT_EXPIRED},
             ReadinessStatus.OFFLINE_HEALTHY: {ReadinessReason.OFFLINE_EVIDENCE_HEALTHY},
             ReadinessStatus.LIVE_BLOCKED: {ReadinessReason.PROTECTION_NOT_GROUNDED, ReadinessReason.ACTIVATION_APPROVALS_EMPTY},
             ReadinessStatus.UNATTENDED_BLOCKED: {ReadinessReason.PROTECTION_NOT_GROUNDED, ReadinessReason.ACTIVATION_APPROVALS_EMPTY},
@@ -451,8 +469,23 @@ class ShadowReadinessReport:
             (self.suspension_state is not ControllerState.CLEAR, ReadinessReason.ACTIVE_SUSPENSION),
             (self.operational_status is OverallStatus.REVIEW_REQUIRED, ReadinessReason.OPERATIONAL_REVIEW_REQUIRED),
             (self.operational_status is OverallStatus.SUSPENDED, ReadinessReason.ACTIVE_SUSPENSION),
+            (self.liveness_state in {LivenessState.STALE, LivenessState.SUSPENSION_REQUIRED, LivenessState.FAILED_CLOSED}, ReadinessReason.ACTIVE_SUSPENSION),
+            (self.scheduler_state is RunState.SUSPENDED, ReadinessReason.ACTIVE_SUSPENSION),
+            (self.orchestrator_state is CycleOutcome.SUSPENDED, ReadinessReason.ACTIVE_SUSPENSION),
             (self.liveness_state is LivenessState.MISSED_CYCLE, ReadinessReason.MISSED_CYCLE),
             (self.liveness_state is LivenessState.STALE, ReadinessReason.STALE_EVIDENCE),
+            (self.liveness_state is LivenessState.UNKNOWN, ReadinessReason.COMPONENT_WAITING),
+            (self.liveness_state is LivenessState.DEGRADED, ReadinessReason.COMPONENT_DEGRADED),
+            (self.operational_status is OverallStatus.WAITING, ReadinessReason.COMPONENT_WAITING),
+            (self.operational_status is OverallStatus.DEGRADED, ReadinessReason.COMPONENT_DEGRADED),
+            (self.operational_status is OverallStatus.EXPIRED, ReadinessReason.COMPONENT_EXPIRED),
+            (self.scheduler_state is RunState.WAITING_FOR_SESSION, ReadinessReason.COMPONENT_WAITING),
+            (self.scheduler_state is RunState.EXPIRED, ReadinessReason.COMPONENT_EXPIRED),
+            (self.runner_state is RunnerState.EXPIRED, ReadinessReason.COMPONENT_EXPIRED),
+            (self.scheduler_state in {RunState.CREATED, RunState.PRECONDITION_CHECK, RunState.RUNNING_OFFLINE_EVALUATION}, ReadinessReason.COMPONENT_WAITING),
+            (self.scheduler_state in {RunState.READY_FOR_SUPERVISED_REVIEW, RunState.SUPERVISED_REVIEW_REQUIRED}, ReadinessReason.SCHEDULER_REEVALUATION_REQUIRED),
+            (self.orchestrator_state is CycleOutcome.WAIT_FOR_SESSION, ReadinessReason.COMPONENT_WAITING),
+            (self.orchestrator_state is CycleOutcome.REQUIRE_OPERATOR_REVIEW, ReadinessReason.SCHEDULER_REEVALUATION_REQUIRED),
             (self.completed_cycle_bucket in {CountBucket.ZERO, CountBucket.ONE}, ReadinessReason.INSUFFICIENT_SHADOW_HISTORY),
             (self.ambiguous_restart_bucket is not CountBucket.ZERO, ReadinessReason.AMBIGUOUS_RESTART),
             (self.acknowledgment_count_bucket is not CountBucket.ZERO, ReadinessReason.FURTHER_REVIEW_REQUIRED),
@@ -560,6 +593,9 @@ class ShadowReadinessReport:
                     report.evidence_attestation_id, report.evidence_set_id,
                     report.evidence_fingerprint, report.evidence_attested_at,
                     EvidenceProvenance.VERIFIED_ATTESTATION,
+                    evidence.attestation.history_fingerprint,
+                    evidence.attestation.history_provenance,
+                    evidence.attestation.history_producer_id,
                 ),
             ):
                 raise ReadinessError("stored readiness attestation is invalid")
@@ -580,6 +616,8 @@ def project_readiness(context: ReadinessContext, policy: ShadowHistoryPolicy, ev
     attestation_valid = (
         evidence.attestation.provenance is EvidenceProvenance.VERIFIED_ATTESTATION
         and evidence.attestation.evidence_fingerprint == fingerprint
+        and evidence.attestation.history_fingerprint == history_fingerprint(evidence.history)
+        and evidence.attestation.history_provenance is HistoryProvenance.DURABLE_OFFLINE_RUNTIME
         and _verify(verifier, evidence.attestation)
     )
     evidence_timestamps = [
@@ -653,7 +691,14 @@ def project_readiness(context: ReadinessContext, policy: ShadowHistoryPolicy, ev
         evidence.orchestrator.outcome is CycleOutcome.AMBIGUOUS_RESTART,
         evidence.history.ambiguous_restarts > 0,
     ))
-    suspension = evidence.suspension.state is not ControllerState.CLEAR or evidence.operational_status.suspension_active
+    suspension = (
+        evidence.suspension.state is not ControllerState.CLEAR
+        or evidence.operational_status.suspension_active
+        or evidence.liveness.suspension.request_suspension
+        or evidence.scheduler.state is RunState.SUSPENDED
+        or evidence.orchestrator.outcome is CycleOutcome.SUSPENDED
+        or evidence.runner.outcome is RunnerOutcome.STOPPED_ON_SUSPENSION
+    )
     pending_ack = any(item.state is AcknowledgmentState.PENDING for item in evidence.acknowledgments)
     further_review = any(item.requires_further_review for item in evidence.acknowledgments)
     unconfirmed_alert = any(item.state is not AlertState.DELIVERED_CONFIRMED for item in evidence.alerts)
@@ -662,6 +707,22 @@ def project_readiness(context: ReadinessContext, policy: ShadowHistoryPolicy, ev
     too_many_stale = evidence.history.stale_events > policy.maximum_allowed_stale_events
     ratio_low = _RATIO_ORDER[ratio] < _RATIO_ORDER[policy.required_alert_confirmation_ratio_bucket]
     missed = evidence.liveness.consecutive_missed_cycles > 0
+    waiting = any((
+        evidence.liveness.record.state is LivenessState.UNKNOWN,
+        evidence.operational_status.overall_status is OverallStatus.WAITING,
+        evidence.scheduler.state is RunState.WAITING_FOR_SESSION,
+        evidence.scheduler.state in {RunState.CREATED, RunState.PRECONDITION_CHECK, RunState.RUNNING_OFFLINE_EVALUATION},
+        evidence.orchestrator.outcome is CycleOutcome.WAIT_FOR_SESSION,
+    ))
+    degraded = any((
+        evidence.liveness.record.state is LivenessState.DEGRADED,
+        evidence.operational_status.overall_status is OverallStatus.DEGRADED,
+    ))
+    expired = any((
+        evidence.runner.state is RunnerState.EXPIRED,
+        evidence.operational_status.overall_status is OverallStatus.EXPIRED,
+        evidence.scheduler.state is RunState.EXPIRED,
+    ))
 
     reasons: list[ReadinessReason] = []
     def add(reason: ReadinessReason, condition: bool = True) -> None:
@@ -677,10 +738,17 @@ def project_readiness(context: ReadinessContext, policy: ShadowHistoryPolicy, ev
     add(ReadinessReason.ALERT_DELIVERY_UNCONFIRMED, unconfirmed_alert)
     add(ReadinessReason.OPERATOR_ACK_PENDING, pending_ack)
     add(ReadinessReason.FURTHER_REVIEW_REQUIRED, further_review)
-    add(ReadinessReason.OPERATIONAL_REVIEW_REQUIRED, evidence.operational_status.requires_operator_review)
+    add(
+        ReadinessReason.OPERATIONAL_REVIEW_REQUIRED,
+        evidence.operational_status.requires_operator_review
+        or evidence.runner.outcome is RunnerOutcome.STOPPED_ON_REVIEW,
+    )
     add(
         ReadinessReason.SCHEDULER_REEVALUATION_REQUIRED,
-        evidence.scheduler.reevaluation_required or evidence.suspension.requires_operator_review,
+        evidence.scheduler.reevaluation_required
+        or evidence.suspension.requires_operator_review
+        or evidence.scheduler.state in {RunState.READY_FOR_SUPERVISED_REVIEW, RunState.SUPERVISED_REVIEW_REQUIRED}
+        or evidence.orchestrator.outcome is CycleOutcome.REQUIRE_OPERATOR_REVIEW,
     )
     add(ReadinessReason.STALE_EVIDENCE, stale)
     add(ReadinessReason.INSUFFICIENT_SHADOW_HISTORY, history_short)
@@ -689,6 +757,9 @@ def project_readiness(context: ReadinessContext, policy: ShadowHistoryPolicy, ev
     add(ReadinessReason.ALERT_CONFIRMATION_RATIO_LOW, ratio_low)
     add(ReadinessReason.EXECUTION_GATE_CLOSED, evidence.execution_gate.verdict is not GateVerdict.OPEN)
     add(ReadinessReason.GATE_EVIDENCE_UNVERIFIED, not evidence.execution_gate.evidence_verified)
+    add(ReadinessReason.COMPONENT_WAITING, waiting)
+    add(ReadinessReason.COMPONENT_DEGRADED, degraded)
+    add(ReadinessReason.COMPONENT_EXPIRED, expired)
     add(ReadinessReason.PROTECTION_NOT_GROUNDED)
     add(ReadinessReason.ACTIVATION_APPROVALS_EMPTY)
 
@@ -730,6 +801,9 @@ def evidence_fingerprint(evidence: ReadinessEvidence) -> str:
         "attestation_id": evidence.attestation.attestation_id,
         "attestation_observed_at": evidence.attestation.observed_at.isoformat(),
         "attestation_provenance": evidence.attestation.provenance.value,
+        "history_fingerprint": evidence.attestation.history_fingerprint,
+        "history_provenance": evidence.attestation.history_provenance.value,
+        "history_producer_id": evidence.attestation.history_producer_id,
         "history": {
             "history_id": history.history_id, "runner_id": history.runner_id,
             "completed_cycles": history.completed_cycles,
@@ -874,6 +948,29 @@ def evidence_fingerprint(evidence: ReadinessEvidence) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def history_fingerprint(history: ShadowHistory) -> str:
+    if not isinstance(history, ShadowHistory):
+        raise ReadinessError("typed shadow history is required")
+    payload = {
+        "history_id": history.history_id,
+        "runner_id": history.runner_id,
+        "completed_cycles": history.completed_cycles,
+        "consecutive_failures": history.consecutive_failures,
+        "stale_events": history.stale_events,
+        "ambiguous_restarts": history.ambiguous_restarts,
+        "last_evidence_at": history.last_evidence_at.isoformat(),
+        "transition_sequence": history.transition_sequence,
+        "runner_transition_sequence": history.runner_transition_sequence,
+        "completed_cycle_transition_ids": list(history.completed_cycle_transition_ids),
+        "failure_transition_ids": list(history.failure_transition_ids),
+        "stale_transition_ids": list(history.stale_transition_ids),
+        "ambiguous_transition_ids": list(history.ambiguous_transition_ids),
+        "permits_automated_action": history.permits_automated_action,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _verify(verifier: ReadinessEvidenceVerifier, attestation: ReadinessEvidenceAttestation) -> bool:
     try:
         return verifier.verify(attestation) is True
@@ -907,6 +1004,9 @@ def _dominant_status(scope: AssessmentScope, reasons: set[ReadinessReason]) -> R
         ReadinessReason.EXCESSIVE_STALE_EVENTS,
         ReadinessReason.ALERT_CONFIRMATION_RATIO_LOW,
         ReadinessReason.GATE_EVIDENCE_UNVERIFIED,
+        ReadinessReason.COMPONENT_WAITING,
+        ReadinessReason.COMPONENT_DEGRADED,
+        ReadinessReason.COMPONENT_EXPIRED,
     }:
         return ReadinessStatus.OFFLINE_DEGRADED
     if scope is AssessmentScope.SUPERVISED:

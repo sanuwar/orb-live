@@ -18,7 +18,7 @@ from src.durable_alert_outbox import (
     AlertState,
     AttemptBucket,
 )
-from src.durable_runner_liveness import LivenessState
+from src.durable_runner_liveness import LivenessReason, LivenessState
 from src.durable_scheduler import RunState, SchedulerAction, SchedulerTransitionReceipt
 from src.durable_suspension_controller import ControllerRecord, ControllerState, EvidenceClass, SuspensionCause, SuspensionDecision, SuspensionTransitionReceipt
 from src.execution_gates import ACTIVATION_APPROVALS, GateDecision, GateMode, GateVerdict
@@ -37,6 +37,7 @@ from src.shadow_readiness_report import (
     REPORT_KEYS,
     AssessmentScope,
     EvidenceProvenance,
+    HistoryProvenance,
     RatioBucket,
     ReadinessContext,
     ReadinessError,
@@ -48,6 +49,7 @@ from src.shadow_readiness_report import (
     ShadowHistoryPolicy,
     ShadowReadinessReport,
     evidence_fingerprint,
+    history_fingerprint,
     project_readiness as _project_readiness,
 )
 from tests.test_operational_status_report import (
@@ -69,18 +71,36 @@ MODULE_PATH = Path(module.__file__)
 class StaticVerifier:
     verifier_id = "readiness-verifier-test"
 
-    def __init__(self, accepted_fingerprint: str | None = None) -> None:
+    def __init__(
+        self,
+        accepted_fingerprint: str,
+        accepted_history_fingerprint: str,
+        accepted_history_producer_id: str,
+    ) -> None:
         self.accepted_fingerprint = accepted_fingerprint
+        self.accepted_history_fingerprint = accepted_history_fingerprint
+        self.accepted_history_producer_id = accepted_history_producer_id
 
     def verify(self, attestation: ReadinessEvidenceAttestation) -> bool:
         return (
             attestation.provenance is EvidenceProvenance.VERIFIED_ATTESTATION
-            and (self.accepted_fingerprint is None or attestation.evidence_fingerprint == self.accepted_fingerprint)
+            and attestation.history_provenance is HistoryProvenance.DURABLE_OFFLINE_RUNTIME
+            and attestation.evidence_fingerprint == self.accepted_fingerprint
+            and attestation.history_fingerprint == self.accepted_history_fingerprint
+            and attestation.history_producer_id == self.accepted_history_producer_id
         )
 
 
 def project_readiness(selected_context, selected_policy, selected_evidence):
-    return _project_readiness(selected_context, selected_policy, selected_evidence, StaticVerifier())
+    attestation = selected_evidence.attestation
+    return _project_readiness(
+        selected_context, selected_policy, selected_evidence,
+        StaticVerifier(
+            attestation.evidence_fingerprint,
+            attestation.history_fingerprint,
+            attestation.history_producer_id,
+        ),
+    )
 
 
 def load_report(value, *, evaluation_time, maximum_age, verifier=None, selected_context=None, selected_evidence=None):
@@ -89,7 +109,11 @@ def load_report(value, *, evaluation_time, maximum_age, verifier=None, selected_
     return ShadowReadinessReport.from_dict(
         value, context=chosen_context, policy=policy(), evidence=chosen_evidence,
         evaluation_time=evaluation_time, maximum_age=maximum_age,
-        verifier=verifier or StaticVerifier(value["evidence_fingerprint"]),
+        verifier=verifier or StaticVerifier(
+            value["evidence_fingerprint"],
+            chosen_evidence.attestation.history_fingerprint,
+            chosen_evidence.attestation.history_producer_id,
+        ),
     )
 
 
@@ -216,6 +240,8 @@ def evidence(**changes) -> ReadinessEvidence:
     placeholder = ReadinessEvidenceAttestation(
         "readiness-attestation-safe", "evidence-set-safe", "0" * 64,
         NOW, EvidenceProvenance.VERIFIED_ATTESTATION,
+        history_fingerprint(selected_history), HistoryProvenance.DURABLE_OFFLINE_RUNTIME,
+        "history-producer-offline-runtime",
     )
     values = dict(
         history=selected_history, runner=selected_runner, liveness=liveness(),
@@ -262,6 +288,58 @@ def test_active_suspension_produces_supervised_blocked() -> None:
     report = project_readiness(context(), policy(), evidence(suspension=halted, operational_status=operational))
     assert report.status is ReadinessStatus.SUPERVISED_BLOCKED
     assert ReadinessReason.ACTIVE_SUSPENSION in report.reason_codes
+
+
+def test_liveness_suspension_request_cannot_hide_behind_healthy_components() -> None:
+    unsafe_liveness = liveness(
+        LivenessState.HEALTHY,
+        LivenessReason.HEARTBEAT_CURRENT,
+        request=True,
+    )
+    report = project_readiness(context(), policy(), evidence(liveness=unsafe_liveness))
+    assert report.status is ReadinessStatus.SUPERVISED_BLOCKED
+    assert ReadinessReason.ACTIVE_SUSPENSION in report.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("selected_evidence", "reason"),
+    [
+        (
+            evidence(
+                operational_status=project_status(
+                    status_context(),
+                    status_inputs(runner=None, driver=None, orchestrator=None, liveness=None),
+                ),
+            ),
+            ReadinessReason.COMPONENT_WAITING,
+        ),
+        (
+            evidence(
+                liveness=liveness(LivenessState.DEGRADED, LivenessReason.UNKNOWN_REASON),
+                operational_status=project_status(
+                    status_context(),
+                    status_inputs(liveness=liveness(LivenessState.DEGRADED, LivenessReason.UNKNOWN_REASON)),
+                ),
+            ),
+            ReadinessReason.COMPONENT_DEGRADED,
+        ),
+        (
+            evidence(
+                scheduler=scheduled(RunState.EXPIRED),
+                operational_status=project_status(
+                    status_context(), status_inputs(scheduler=scheduled(RunState.EXPIRED)),
+                ),
+            ),
+            ReadinessReason.COMPONENT_EXPIRED,
+        ),
+    ],
+)
+def test_adverse_public_component_states_never_project_healthy(
+    selected_evidence: ReadinessEvidence, reason: ReadinessReason,
+) -> None:
+    report = project_readiness(context(), policy(), selected_evidence)
+    assert report.status is ReadinessStatus.OFFLINE_DEGRADED
+    assert reason in report.reason_codes
 
 
 def test_failed_component_dominates_suspension_waiting_and_review() -> None:
@@ -440,7 +518,7 @@ def test_arbitrary_dictionaries_are_not_component_inputs() -> None:
     with pytest.raises(ReadinessError):
         replace(evidence(), history={})  # type: ignore[arg-type]
     with pytest.raises(ReadinessError):
-        project_readiness(context(), policy(), {})  # type: ignore[arg-type]
+        _project_readiness(context(), policy(), {}, object())  # type: ignore[arg-type]
 
 
 def test_duplicate_alert_or_acknowledgment_cannot_pad_counts_or_ratio() -> None:
@@ -465,7 +543,11 @@ def test_history_requires_distinct_durable_transition_references() -> None:
 
 def test_fresh_id_padding_or_replayed_observation_cannot_bypass_pinned_attestation() -> None:
     original = evidence()
-    verifier = StaticVerifier(original.attestation.evidence_fingerprint)
+    verifier = StaticVerifier(
+        original.attestation.evidence_fingerprint,
+        original.attestation.history_fingerprint,
+        original.attestation.history_producer_id,
+    )
     padded = replace(
         alert(), alert_id="alert-padding", last_transition_id="alert-transition-padding",
     )
@@ -478,6 +560,20 @@ def test_fresh_id_padding_or_replayed_observation_cannot_bypass_pinned_attestati
         attestation=replace(tampered.attestation, evidence_fingerprint=evidence_fingerprint(tampered)),
     )
     report = _project_readiness(context(), policy(), tampered, verifier)
+    assert report.status is ReadinessStatus.FAILED_CLOSED
+    assert ReadinessReason.EVIDENCE_ATTESTATION_INVALID in report.reason_codes
+
+
+def test_caller_reauthored_history_requires_the_pinned_runtime_attestation() -> None:
+    original = evidence()
+    verifier = StaticVerifier(
+        original.attestation.evidence_fingerprint,
+        original.attestation.history_fingerprint,
+        original.attestation.history_producer_id,
+    )
+    changed_history = history(consecutive_failures=1)
+    changed = evidence(history=changed_history)
+    report = _project_readiness(context(), policy(), changed, verifier)
     assert report.status is ReadinessStatus.FAILED_CLOSED
     assert ReadinessReason.EVIDENCE_ATTESTATION_INVALID in report.reason_codes
 
@@ -602,7 +698,11 @@ def test_stored_component_state_and_attestation_cannot_be_forged() -> None:
     with pytest.raises(ReadinessError, match="projection"):
         load_report(
             forged_fingerprint, evaluation_time=NOW, maximum_age=timedelta(minutes=5),
-            verifier=StaticVerifier(value["evidence_fingerprint"]),
+            verifier=StaticVerifier(
+                value["evidence_fingerprint"],
+                evidence().attestation.history_fingerprint,
+                evidence().attestation.history_producer_id,
+            ),
         )
 
 
