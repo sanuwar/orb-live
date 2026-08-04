@@ -64,14 +64,7 @@ def test_required_inventory_sections_and_classifications_are_exact(report: dict[
     assert len(report["findings"]) == 10
     assert {item["classification"] for item in report["findings"]} <= set(CLASSIFICATIONS)
     assert [item["rank"] for item in report["findings"]] == list(range(1, 11))
-    assert report["exact_body_consolidation_candidates"] == [{
-        "estimated_removable_loc": 33,
-        "helper": "is_repository_data_path",
-        "modules": [
-            "src/durable_action_ledger.py", "src/durable_scheduler.py",
-            "src/durable_suspension_controller.py", "src/offline_safety_orchestrator.py",
-        ],
-    }]
+    assert report["exact_body_consolidation_candidates"] == []
 
 
 def test_reference_counts_are_module_qualified_and_not_off_by_one(tmp_path: Path) -> None:

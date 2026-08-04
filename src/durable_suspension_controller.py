@@ -58,6 +58,7 @@ from typing import Any, Mapping
 from src.attestation_authority import AttestationAuthority, SignedAttestation
 from src.durable_scheduler import SchedulerAction
 from src.execution_gates import EvidenceSource
+from src.offline_path_safety import REPOSITORY_DATA_DIRECTORY, is_repository_data_path
 
 
 class SuspensionControllerError(RuntimeError):
@@ -377,9 +378,6 @@ def validate_clearance(
 # --------------------------------------------------------------------------
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-REPOSITORY_DATA_DIRECTORY = os.path.normcase(
-    os.path.abspath(os.fspath(REPOSITORY_ROOT / "data"))
-)
 
 SCHEMA_VERSION = 1
 
@@ -413,19 +411,6 @@ CREATE TABLE IF NOT EXISTS controller_events (
 CREATE INDEX IF NOT EXISTS controller_events_by_controller
     ON controller_events(controller_id);
 """
-
-
-def is_repository_data_path(path: Path) -> bool:
-    """True when `path` lies inside the repository's production data directory."""
-    try:
-        resolved = os.path.normcase(os.path.abspath(os.fspath(path)))
-    except (TypeError, ValueError):
-        return False
-    return (
-        resolved == REPOSITORY_DATA_DIRECTORY
-        or os.path.commonpath([resolved, REPOSITORY_DATA_DIRECTORY])
-        == REPOSITORY_DATA_DIRECTORY
-    )
 
 
 def _validated_identifier(value: object, label: str) -> str:

@@ -53,6 +53,7 @@ import os
 import sqlite3
 from pathlib import Path
 
+from src.offline_path_safety import REPOSITORY_DATA_DIRECTORY, is_repository_data_path
 from src.risk_limits import ActionLedgerBase, RiskLimitError
 
 
@@ -61,9 +62,6 @@ class DurableLedgerError(RiskLimitError):
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-REPOSITORY_DATA_DIRECTORY = os.path.normcase(
-    os.path.abspath(os.fspath(REPOSITORY_ROOT / "data"))
-)
 
 SCHEMA_VERSION = 2
 
@@ -86,19 +84,6 @@ CREATE TABLE IF NOT EXISTS spent_actions (
 CREATE INDEX IF NOT EXISTS spent_actions_by_session
     ON spent_actions(session_id);
 """
-
-
-def is_repository_data_path(path: Path) -> bool:
-    """True when `path` lies inside the repository's production data directory."""
-    try:
-        resolved = os.path.normcase(os.path.abspath(os.fspath(path)))
-    except (TypeError, ValueError):
-        return False
-    return (
-        resolved == REPOSITORY_DATA_DIRECTORY
-        or os.path.commonpath([resolved, REPOSITORY_DATA_DIRECTORY])
-        == REPOSITORY_DATA_DIRECTORY
-    )
 
 
 def _validated_identifier(value: object, label: str) -> str:
