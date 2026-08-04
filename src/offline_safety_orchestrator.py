@@ -341,6 +341,90 @@ SUSPENDING_REASONS: frozenset[CycleReason] = frozenset({
 })
 
 
+#: Scheduler states a cycle never moves, whatever it concluded.
+SCHEDULER_TERMINAL_STATES: frozenset[RunState] = frozenset({
+    RunState.COMPLETED_NO_ACTION,
+    RunState.FAILED_CLOSED,
+    RunState.AMBIGUOUS_RESTART,
+    RunState.EXPIRED,
+})
+
+#: (cycle verdict, current run state) -> the transition to request.
+#:
+#: **Orchestration policy, not scheduler truth.** The scheduler owns which
+#: transitions are legal; this owns only which legal one a verdict asks for.
+#: An absent pair means "request nothing", so the table is a strict allowlist
+#: and every unlisted combination fails closed by doing nothing.
+#:
+#: The direction of every entry is deliberate. `SUSPEND` and `FAIL_CLOSED` move
+#: a run toward halting. `REQUIRE_OPERATOR_REVIEW` moves it toward a human.
+#: `WAIT` only takes a brand-new run into waiting. The one advancing entry,
+#: `WAITING_FOR_SESSION -> PRECONDITION_CHECK`, is a step into *checking* and
+#: is unreachable today because the gate cannot open.
+ORCHESTRATION_TRANSITION_POLICY: Mapping[
+    tuple[SchedulerAction, RunState], RunState
+] = MappingProxyType({
+    # Halting: from anywhere non-terminal that is not already suspended.
+    (SchedulerAction.SUSPEND, RunState.CREATED): RunState.SUSPENDED,
+    (SchedulerAction.SUSPEND, RunState.WAITING_FOR_SESSION): RunState.SUSPENDED,
+    (SchedulerAction.SUSPEND, RunState.PRECONDITION_CHECK): RunState.SUSPENDED,
+    (SchedulerAction.SUSPEND, RunState.RUNNING_OFFLINE_EVALUATION): (
+        RunState.SUSPENDED
+    ),
+    (SchedulerAction.SUSPEND, RunState.READY_FOR_SUPERVISED_REVIEW): (
+        RunState.SUSPENDED
+    ),
+    (SchedulerAction.SUSPEND, RunState.SUPERVISED_REVIEW_REQUIRED): (
+        RunState.SUSPENDED
+    ),
+    # Failing closed.
+    (SchedulerAction.FAIL_CLOSED, RunState.CREATED): RunState.FAILED_CLOSED,
+    (SchedulerAction.FAIL_CLOSED, RunState.WAITING_FOR_SESSION): (
+        RunState.FAILED_CLOSED
+    ),
+    (SchedulerAction.FAIL_CLOSED, RunState.PRECONDITION_CHECK): (
+        RunState.FAILED_CLOSED
+    ),
+    (SchedulerAction.FAIL_CLOSED, RunState.RUNNING_OFFLINE_EVALUATION): (
+        RunState.FAILED_CLOSED
+    ),
+    (SchedulerAction.FAIL_CLOSED, RunState.READY_FOR_SUPERVISED_REVIEW): (
+        RunState.FAILED_CLOSED
+    ),
+    (SchedulerAction.FAIL_CLOSED, RunState.SUPERVISED_REVIEW_REQUIRED): (
+        RunState.FAILED_CLOSED
+    ),
+    # Waiting: only a brand-new run enters waiting; an existing one just stays.
+    (SchedulerAction.WAIT, RunState.CREATED): RunState.WAITING_FOR_SESSION,
+    # Escalating to a human, from the one state where that is a real move.
+    (SchedulerAction.REQUIRE_OPERATOR_REVIEW, RunState.PRECONDITION_CHECK): (
+        RunState.SUPERVISED_REVIEW_REQUIRED
+    ),
+    (SchedulerAction.REQUIRE_OPERATOR_REVIEW, RunState.RUNNING_OFFLINE_EVALUATION): (
+        RunState.SUPERVISED_REVIEW_REQUIRED
+    ),
+    (SchedulerAction.REQUIRE_OPERATOR_REVIEW, RunState.READY_FOR_SUPERVISED_REVIEW): (
+        RunState.SUPERVISED_REVIEW_REQUIRED
+    ),
+    # The only advancing entry, and it advances into checking rather than
+    # acting. Unreachable today: the gate cannot open.
+    (SchedulerAction.RUN_OFFLINE_CHECKS, RunState.WAITING_FOR_SESSION): (
+        RunState.PRECONDITION_CHECK
+    ),
+})
+
+#: Transitions this policy is permitted to request at all. Nothing here enters
+#: `RUNNING_OFFLINE_EVALUATION`: starting evaluation is the scheduler's own
+#: step, taken deliberately, never a side effect of a safety verdict.
+POLICY_PERMITTED_TARGETS: frozenset[RunState] = frozenset({
+    RunState.SUSPENDED,
+    RunState.FAILED_CLOSED,
+    RunState.WAITING_FOR_SESSION,
+    RunState.SUPERVISED_REVIEW_REQUIRED,
+    RunState.PRECONDITION_CHECK,
+})
+
+
 def _outcome_for(reason: CycleReason) -> tuple[CycleOutcome, SchedulerAction]:
     """Map a dominance verdict to an outcome and the scheduler's marching order."""
     if reason in SUSPENDING_REASONS:
@@ -750,7 +834,7 @@ class OfflineSafetyOrchestrator:
         # an effect was ever going to be attempted. Without that, a restart
         # cannot tell "no scheduler transition was needed" from "the scheduler
         # transition is missing", and would call the first one ambiguous.
-        target = self._scheduler_target(result, inputs)
+        target = self.orchestration_transition_policy(result, inputs)
         try:
             self._connection.execute(
                 "INSERT INTO cycle_journal (cycle_id, phase, outcome, reason, "
@@ -834,44 +918,41 @@ class OfflineSafetyOrchestrator:
         self._advance_phase(inputs.cycle_id, CyclePhase.FINALIZED, moment)
         return result
 
-    def _scheduler_target(
+    def orchestration_transition_policy(
         self, result: CycleResult, inputs: CycleInputs
     ) -> RunState | None:
-        """Which scheduler state this cycle's verdict implies, if any.
+        """Which scheduler transition this cycle's verdict asks for, if any.
 
-        `None` means the cycle records a verdict without moving the scheduler —
-        waiting is not a transition, it is the absence of one.
+        **This is orchestration policy, not scheduler truth.** The scheduler
+        owns what transitions are *legal*; this owns the much smaller question
+        of which legal transition a cycle verdict should request. Naming it
+        `_scheduler_target` invited reading it as the scheduler's own rule,
+        which it is not — a reviewer looking for the state machine should find
+        it in `durable_scheduler.ALLOWED_TRANSITIONS`, and this table should
+        never be mistaken for it.
+
+        `None` means "request nothing", and it is the default for every
+        combination the table below does not name. Waiting is not a transition;
+        it is the absence of one.
+
+        Every entry is conservative in the same direction: the mapping may move
+        a run *toward* halting or review, and never toward evaluation on its
+        own initiative. The single advancing entry —
+        `WAITING_FOR_SESSION → PRECONDITION_CHECK` — is a step into checking,
+        not into acting, and it is unreachable today because the gate cannot
+        open. The scheduler still validates every request, so an entry here
+        that named an illegal move would be refused there rather than applied.
         """
         run = self.scheduler.load_run(inputs.scheduler_run_id)
         if run is None:
             raise OrchestratorError("scheduler run is not registered")
-        if run.state in {
-            RunState.COMPLETED_NO_ACTION, RunState.FAILED_CLOSED,
-            RunState.AMBIGUOUS_RESTART, RunState.EXPIRED,
-        }:
+        if run.state in SCHEDULER_TERMINAL_STATES:
+            # A finished run is never moved by a later cycle, whatever it
+            # decided. The scheduler would refuse it; asking is still wrong.
             return None
-        if result.scheduler_action is SchedulerAction.SUSPEND:
-            return None if run.state is RunState.SUSPENDED else RunState.SUSPENDED
-        if result.scheduler_action is SchedulerAction.FAIL_CLOSED:
-            return RunState.FAILED_CLOSED
-        if result.scheduler_action is SchedulerAction.WAIT:
-            return (
-                None if run.state is not RunState.CREATED
-                else RunState.WAITING_FOR_SESSION
-            )
-        if result.scheduler_action is SchedulerAction.REQUIRE_OPERATOR_REVIEW:
-            if run.state in {
-                RunState.SUPERVISED_REVIEW_REQUIRED, RunState.SUSPENDED,
-            }:
-                return None
-            if run.state is RunState.PRECONDITION_CHECK:
-                return RunState.SUPERVISED_REVIEW_REQUIRED
-            return None
-        if result.scheduler_action is SchedulerAction.RUN_OFFLINE_CHECKS:
-            if run.state is RunState.WAITING_FOR_SESSION:
-                return RunState.PRECONDITION_CHECK
-            return None
-        return None
+        return ORCHESTRATION_TRANSITION_POLICY.get(
+            (result.scheduler_action, run.state)
+        )
 
     # -- restart ----------------------------------------------------------
 
@@ -941,18 +1022,24 @@ class OfflineSafetyOrchestrator:
         return record
 
     def _scheduler_carries(self, record: CycleRecord) -> bool:
-        row = self.scheduler._connection.execute(
-            "SELECT 1 FROM scheduler_transitions WHERE transition_id = ?",
-            (record.scheduler_transition_id,),
-        ).fetchone()
-        return row is not None
+        """Did this cycle's scheduler effect land, on the run it named?
+
+        Asked through the scheduler's public receipt API. The receipt's run
+        identity is checked too: a transition that landed against a *different*
+        run is not this cycle's effect, and counting it would be a partial
+        application reported as a complete one.
+        """
+        receipt = self.scheduler.inspect_transition(record.scheduler_transition_id)
+        if receipt is None:
+            return False
+        return receipt.run_id == record.scheduler_run_id and receipt.persisted
 
     def _controller_carries(self, record: CycleRecord) -> bool:
-        row = self.controller._connection.execute(
-            "SELECT 1 FROM controller_events WHERE transition_id = ?",
-            (record.controller_transition_id,),
-        ).fetchone()
-        return row is not None
+        """Did this cycle's controller effect land, on the controller it named?"""
+        receipt = self.controller.inspect_transition(record.controller_transition_id)
+        if receipt is None:
+            return False
+        return receipt.controller_id == record.controller_id and receipt.persisted
 
     # -- reporting --------------------------------------------------------
 
@@ -990,7 +1077,10 @@ _CAUSE_BY_REASON: Mapping[CycleReason, SuspensionCause] = MappingProxyType({
 
 __all__ = [
     "DOMINANCE_ORDER",
+    "ORCHESTRATION_TRANSITION_POLICY",
+    "POLICY_PERMITTED_TARGETS",
     "REPOSITORY_DATA_DIRECTORY",
+    "SCHEDULER_TERMINAL_STATES",
     "REQUIRED_CYCLE_ATTESTATIONS",
     "SCHEMA_VERSION",
     "SUSPENDING_REASONS",

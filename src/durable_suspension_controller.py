@@ -483,6 +483,56 @@ class ControllerRecord:
         }
 
 
+@dataclass(frozen=True)
+class SuspensionTransitionReceipt:
+    """Proof that one controller transition was persisted, and nothing more.
+
+    Frozen, allowlisted, and deliberately incapable of carrying a connection,
+    cursor, statement, database path, or raw row. A collaborator that had to
+    read `_connection` to learn whether its write landed would acquire, in the
+    same gesture, the ability to make writes nobody reviewed.
+
+    Absence is `None` rather than a receipt saying no — a falsy receipt is the
+    kind of thing a caller forgets to check.
+    """
+
+    transition_id: str
+    controller_id: str
+    from_state: ControllerState
+    to_state: ControllerState
+    cause: SuspensionCause
+    evidence_class: EvidenceClass
+    sequence: int
+    persisted: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.persisted:
+            raise SuspensionControllerError(
+                "a receipt exists only for a persisted transition"
+            )
+        for value in (self.from_state, self.to_state):
+            if not isinstance(value, ControllerState):
+                raise SuspensionControllerError("a receipt needs ControllerState values")
+        if not isinstance(self.cause, SuspensionCause):
+            raise SuspensionControllerError("a receipt needs a SuspensionCause")
+        if not isinstance(self.evidence_class, EvidenceClass):
+            raise SuspensionControllerError("a receipt needs an EvidenceClass")
+        if not isinstance(self.sequence, int) or isinstance(self.sequence, bool):
+            raise SuspensionControllerError("receipt sequence must be an int")
+        if self.sequence < 1:
+            raise SuspensionControllerError("receipt sequence must be positive")
+
+    def sanitized_facts(self) -> dict[str, str]:
+        return {
+            "from_state": self.from_state.value,
+            "to_state": self.to_state.value,
+            "suspension_cause": self.cause.value,
+            "evidence_class": self.evidence_class.value,
+            "transition_persisted": "true",
+            "permits_automated_action": "false",
+        }
+
+
 class DurableSuspensionController:
     """Persistent suspension state that outlives the process.
 
@@ -952,6 +1002,45 @@ class DurableSuspensionController:
 
     # -- reporting --------------------------------------------------------
 
+    def inspect_transition(
+        self, transition_id: str
+    ) -> "SuspensionTransitionReceipt | None":
+        """Whether a controller transition landed, and what it did. Read-only.
+
+        The public answer to "did my write persist?", so a collaborator never
+        needs this object's database to find out.
+        """
+        _validated_identifier(transition_id, "transition identity")
+        row = self._connection.execute(
+            "SELECT controller_id, from_state, to_state, cause, evidence_class, "
+            "       sequence "
+            "FROM controller_events WHERE transition_id = ?",
+            (transition_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        controller_id, from_state, to_state, cause, evidence_class, sequence = row
+        try:
+            parsed_from = ControllerState(from_state)
+            parsed_to = ControllerState(to_state)
+            parsed_cause = SuspensionCause(cause)
+            parsed_evidence = EvidenceClass(evidence_class)
+        except ValueError as exc:
+            raise SuspensionControllerError(
+                "persisted transition value is not recognized"
+            ) from exc
+        if not isinstance(sequence, int) or sequence < 1:
+            raise SuspensionControllerError("persisted transition sequence is malformed")
+        return SuspensionTransitionReceipt(
+            transition_id=transition_id,
+            controller_id=controller_id,
+            from_state=parsed_from,
+            to_state=parsed_to,
+            cause=parsed_cause,
+            evidence_class=parsed_evidence,
+            sequence=sequence,
+        )
+
     def event_count(self, controller_id: str) -> int:
         row = self._connection.execute(
             "SELECT COUNT(*) FROM controller_events WHERE controller_id = ?",
@@ -987,6 +1076,7 @@ __all__ = [
     "SuspensionClearance",
     "SuspensionControllerError",
     "SuspensionDecision",
+    "SuspensionTransitionReceipt",
     "controller_transition_is_allowed",
     "is_repository_data_path",
     "validate_clearance",

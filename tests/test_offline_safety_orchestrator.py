@@ -1280,3 +1280,284 @@ def test_probe_every_dominance_level_is_reachable():
     }
     for expected, override in reachable.items():
         assert decide_cycle(inputs(auth, **override)).reason is expected
+
+
+# --------------------------------------------------------------------------
+# 12. No private persistence coupling.
+# --------------------------------------------------------------------------
+
+
+def test_the_orchestrator_never_touches_a_private_storage_attribute():
+    """The correction this PR exists for.
+
+    Reading a collaborator's `_connection` to learn whether a write landed
+    hands the reader, in the same gesture, the ability to make writes nobody
+    reviewed. Asserted by parsing rather than grepping, so a comment mentioning
+    the attribute does not trip it and an aliased access does not slip past.
+    """
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        if not isinstance(node.value, ast.Attribute):
+            continue
+        # `self.scheduler._connection` / `self.controller._connection` shaped
+        # access: a private attribute reached through another object.
+        if node.attr.startswith("_") and node.value.attr in {
+            "scheduler", "controller"
+        }:
+            offenders.append(f"{node.value.attr}.{node.attr}")
+    assert offenders == []
+
+
+def test_the_orchestrator_only_reaches_public_collaborator_members():
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    reached = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr in {"scheduler", "controller"}
+        ):
+            reached.add(node.attr)
+    assert reached <= {
+        "inspect_transition", "apply_transition", "suspend", "load_run", "load",
+    }
+    assert not any(name.startswith("_") for name in reached)
+
+
+def test_the_orchestrator_source_names_no_collaborator_sql():
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    for table in ("scheduler_transitions", "controller_events", "scheduled_runs",
+                  "controllers"):
+        assert table not in source, table
+
+
+def test_receipts_are_what_the_orchestrator_uses(tmp_path):
+    from src.durable_scheduler import SchedulerTransitionReceipt
+    from src.durable_suspension_controller import SuspensionTransitionReceipt
+
+    auth = authority()
+    orch, scheduler, controller = stack(tmp_path)
+    orch.run_cycle(
+        inputs(auth, risk=RiskAssessment(RiskDecision.DENIED_POSITION_SIZE))
+    )
+    assert isinstance(
+        scheduler.inspect_transition("sch-1"), SchedulerTransitionReceipt
+    )
+    assert isinstance(
+        controller.inspect_transition("ctlx-1"), SuspensionTransitionReceipt
+    )
+    orch.close(); scheduler.close(); controller.close()
+
+
+def test_a_receipt_from_the_wrong_run_does_not_count_as_this_cycles_effect(tmp_path):
+    """A transition that landed against a different run is not our effect."""
+    auth = authority()
+    orch, scheduler, controller = stack(tmp_path)
+    scheduler.create_run("other-run", session_date=SESSION_DATE, now=NOW)
+    orch._connection.execute(
+        "INSERT INTO cycle_journal (cycle_id, phase, outcome, reason, "
+        " scheduler_run_id, controller_id, scheduler_transition_id, "
+        " controller_transition_id, scheduler_effect_required, "
+        " controller_effect_required, created_at, updated_at) "
+        "VALUES ('cyc-x', 'SCHEDULER_APPLIED', NULL, NULL, ?, ?, 'sch-x', "
+        " 'ctlx-x', 1, 0, ?, ?)",
+        (RUN_ID, CONTROLLER_ID, NOW.isoformat(), NOW.isoformat()),
+    )
+    # The transition exists, but on the wrong run.
+    scheduler.apply_transition(
+        "other-run", target=RunState.SUSPENDED, transition_id="sch-x", now=NOW,
+        suspension_reason="SAFETY_HALT",
+    )
+    record = orch.recover_cycle("cyc-x", now=NOW)
+    assert record.phase is CyclePhase.AMBIGUOUS_RESTART
+    orch.close(); scheduler.close(); controller.close()
+
+
+def test_a_receipt_from_the_wrong_controller_does_not_count(tmp_path):
+    auth = authority()
+    orch, scheduler, controller = stack(tmp_path)
+    controller.register("other-ctl", now=NOW)
+    orch._connection.execute(
+        "INSERT INTO cycle_journal (cycle_id, phase, outcome, reason, "
+        " scheduler_run_id, controller_id, scheduler_transition_id, "
+        " controller_transition_id, scheduler_effect_required, "
+        " controller_effect_required, created_at, updated_at) "
+        "VALUES ('cyc-y', 'CONTROLLER_APPLIED', NULL, NULL, ?, ?, 'sch-y', "
+        " 'ctlx-y', 0, 1, ?, ?)",
+        (RUN_ID, CONTROLLER_ID, NOW.isoformat(), NOW.isoformat()),
+    )
+    controller.suspend(
+        "other-ctl", cause=SuspensionCause.OPERATOR_HALT,
+        transition_id="ctlx-y", now=NOW,
+    )
+    record = orch.recover_cycle("cyc-y", now=NOW)
+    assert record.phase is CyclePhase.AMBIGUOUS_RESTART
+    orch.close(); scheduler.close(); controller.close()
+
+
+@pytest.mark.parametrize(
+    "scheduler_landed,controller_landed,expected",
+    [
+        (True, True, CyclePhase.FINALIZED),
+        (True, False, CyclePhase.AMBIGUOUS_RESTART),
+        (False, True, CyclePhase.AMBIGUOUS_RESTART),
+        (False, False, CyclePhase.AMBIGUOUS_RESTART),
+    ],
+)
+def test_partial_application_is_detected_through_public_receipts(
+    tmp_path, scheduler_landed, controller_landed, expected
+):
+    orch, scheduler, controller = crashed_at(
+        tmp_path, CyclePhase.CONTROLLER_APPLIED,
+        apply_scheduler=scheduler_landed, apply_controller=controller_landed,
+        scheduler_effect_required=True,
+    )
+    orch._connection.execute(
+        "UPDATE cycle_journal SET controller_effect_required = 1 WHERE cycle_id = ?",
+        ("cyc-crash",),
+    )
+    record = orch.recover_cycle("cyc-crash", now=NOW)
+    assert record.phase is expected
+    orch.close(); scheduler.close(); controller.close()
+
+
+# --------------------------------------------------------------------------
+# 13. Orchestration transition policy.
+# --------------------------------------------------------------------------
+
+
+def test_the_policy_is_an_allowlist_and_every_target_is_conservative():
+    from src.offline_safety_orchestrator import (
+        ORCHESTRATION_TRANSITION_POLICY,
+        POLICY_PERMITTED_TARGETS,
+    )
+
+    for (action, state), target in ORCHESTRATION_TRANSITION_POLICY.items():
+        assert isinstance(action, SchedulerAction)
+        assert isinstance(state, RunState)
+        assert target in POLICY_PERMITTED_TARGETS, (action, state, target)
+    # The policy never starts evaluation on its own initiative, and never
+    # completes a run.
+    assert RunState.RUNNING_OFFLINE_EVALUATION not in POLICY_PERMITTED_TARGETS
+    assert RunState.COMPLETED_NO_ACTION not in POLICY_PERMITTED_TARGETS
+
+
+def test_the_policy_never_requests_an_illegal_transition():
+    """Every entry must be legal in the scheduler's own matrix."""
+    from src.durable_scheduler import (
+        ALLOWED_TRANSITIONS,
+        transition_is_backward,
+    )
+    from src.offline_safety_orchestrator import ORCHESTRATION_TRANSITION_POLICY
+
+    for (action, state), target in ORCHESTRATION_TRANSITION_POLICY.items():
+        assert target in ALLOWED_TRANSITIONS[state], (action, state, target)
+        assert not transition_is_backward(state, target), (state, target)
+
+
+def test_the_policy_never_names_a_terminal_source_state():
+    from src.offline_safety_orchestrator import (
+        ORCHESTRATION_TRANSITION_POLICY,
+        SCHEDULER_TERMINAL_STATES,
+    )
+
+    for _, state in ORCHESTRATION_TRANSITION_POLICY:
+        assert state not in SCHEDULER_TERMINAL_STATES
+
+
+@pytest.mark.parametrize("action", list(SchedulerAction))
+@pytest.mark.parametrize("state", list(RunState))
+def test_every_action_and_state_combination_is_defined(tmp_path, action, state):
+    """Table-driven over the whole cross product.
+
+    An unlisted combination must produce no transition — the default is doing
+    nothing, so a combination nobody thought about cannot advance a run.
+    """
+    from src.offline_safety_orchestrator import (
+        ORCHESTRATION_TRANSITION_POLICY,
+        SCHEDULER_TERMINAL_STATES,
+    )
+
+    auth = authority()
+    orch, scheduler, controller = stack(tmp_path)
+    scheduler._connection.execute(
+        "UPDATE scheduled_runs SET state = ? WHERE run_id = ?", (state.value, RUN_ID)
+    )
+    outcome = (
+        CycleOutcome.OFFLINE_CHECKS_COMPLETE
+        if action is SchedulerAction.RUN_OFFLINE_CHECKS
+        else CycleOutcome.SUSPENDED
+        if action is SchedulerAction.SUSPEND
+        else CycleOutcome.REQUIRE_OPERATOR_REVIEW
+    )
+    result = CycleResult(outcome, CycleReason.OK, action)
+    target = orch.orchestration_transition_policy(result, inputs(auth))
+
+    if state in SCHEDULER_TERMINAL_STATES:
+        assert target is None
+    else:
+        assert target == ORCHESTRATION_TRANSITION_POLICY.get((action, state))
+    if target is not None:
+        from src.durable_scheduler import ALLOWED_TRANSITIONS
+
+        assert target in ALLOWED_TRANSITIONS[state]
+    orch.close(); scheduler.close(); controller.close()
+
+
+def test_an_unregistered_run_is_refused_by_the_policy(tmp_path):
+    auth = authority()
+    orch, scheduler, controller = stack(tmp_path)
+    result = CycleResult(
+        CycleOutcome.SUSPENDED, CycleReason.ACTIVE_SUSPENSION, SchedulerAction.SUSPEND
+    )
+    with pytest.raises(OrchestratorError):
+        orch.orchestration_transition_policy(
+            result, inputs(auth, scheduler_run_id="not-registered")
+        )
+    orch.close(); scheduler.close(); controller.close()
+
+
+# --------------------------------------------------------------------------
+# 14. The gate limitation is expected and must remain.
+# --------------------------------------------------------------------------
+
+
+def test_offline_checks_complete_is_unreachable_end_to_end(tmp_path):
+    """Not a defect. The gate cannot open while no mode is approved, and this
+    PR must not make it reachable by weakening the gate."""
+    auth = authority()
+    orch, scheduler, controller = stack(tmp_path)
+    result = orch.run_cycle(inputs(auth))
+    assert result.outcome is not CycleOutcome.OFFLINE_CHECKS_COMPLETE
+    assert result.reason is CycleReason.GATE_CLOSED
+
+    from src.execution_gates import ACTIVATION_APPROVALS
+    from src.read_only_broker_state import approved_active_protection_states
+
+    assert ACTIVATION_APPROVALS == frozenset()
+    assert approved_active_protection_states() == frozenset()
+    orch.close(); scheduler.close(); controller.close()
+
+
+def test_nothing_in_this_module_can_produce_a_gate_verdict():
+    """It reads gate decisions; it never mints one.
+
+    Comparing against `GateVerdict.OPEN` is fine and necessary — the module has
+    to recognise an open gate to refuse everything else. What must not exist is
+    a construction site, because a module that can build a `GateDecision` can
+    build an open one.
+    """
+    constructed = set()
+    for node in ast.walk(ast.parse(MODULE_PATH.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(
+                func, "id", None
+            )
+            if name in {"GateDecision", "Attestation", "SignedAttestation"}:
+                constructed.add(name)
+    assert constructed == set()
+    assert "ACTIVATION_APPROVALS" not in _code_identifiers(MODULE_PATH)

@@ -554,12 +554,22 @@ def is_repository_data_path(path: Path) -> bool:
 
 
 def _validated_identifier(value: object, label: str) -> str:
+    """A correlation identifier that is safe to store and to compare.
+
+    The charset is constrained to match `durable_suspension_controller`. Two
+    collaborating stores that disagree about what an identifier may contain is
+    an invitation for one to accept a value the other refuses, and for the
+    difference to be discovered by a partially-applied cycle rather than by a
+    test.
+    """
     if not isinstance(value, str) or not value.strip():
         raise SchedulerError(f"a {label} is required")
     if value != value.strip():
         raise SchedulerError(f"{label} has surrounding whitespace")
     if len(value) > 128:
         raise SchedulerError(f"{label} is too long")
+    if not value.replace("-", "").replace("_", "").isalnum():
+        raise SchedulerError(f"{label} has an unsupported character")
     return value
 
 
@@ -617,6 +627,50 @@ class ScheduledRun:
                 "true" if self.session_date == current_session_date else "false"
             )
         return facts
+
+
+@dataclass(frozen=True)
+class SchedulerTransitionReceipt:
+    """Proof that one transition was persisted, and nothing more.
+
+    Frozen, and every field is an enum, a count, or a constrained identifier.
+    There is deliberately no connection, cursor, statement, database path, or
+    raw row on it: a receipt that carried any of those would hand a reader the
+    ability to write, which is the coupling this type exists to remove.
+
+    `persisted` is always `True`. A receipt only exists for a transition that
+    landed — absence is expressed by returning `None`, not by a receipt that
+    says no, because a falsy receipt is the kind of thing a caller forgets to
+    check.
+    """
+
+    transition_id: str
+    run_id: str
+    from_state: RunState
+    to_state: RunState
+    sequence: int
+    persisted: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.persisted:
+            raise SchedulerError("a receipt exists only for a persisted transition")
+        if not isinstance(self.from_state, RunState) or not isinstance(
+            self.to_state, RunState
+        ):
+            raise SchedulerError("a receipt needs two RunState values")
+        if not isinstance(self.sequence, int) or isinstance(self.sequence, bool):
+            raise SchedulerError("receipt sequence must be an int")
+        if self.sequence < 1:
+            raise SchedulerError("receipt sequence must be positive")
+
+    def sanitized_facts(self) -> dict[str, str]:
+        """Identities are absent, as in every other projection here."""
+        return {
+            "from_state": self.from_state.value,
+            "to_state": self.to_state.value,
+            "transition_persisted": "true",
+            "permits_automated_action": "false",
+        }
 
 
 class DurableScheduler:
@@ -1080,6 +1134,47 @@ class DurableScheduler:
             )
         return SchedulerDecision(SchedulerAction.FAIL_CLOSED, blocking)
 
+    # -- inspection -------------------------------------------------------
+
+    def inspect_transition(
+        self, transition_id: str
+    ) -> "SchedulerTransitionReceipt | None":
+        """Whether a transition landed, and what it did. Read-only.
+
+        Exists so a caller can establish that an effect was actually persisted
+        without reaching into this object's database. A collaborator that had
+        to read `_connection` to answer "did my write land?" would hold, in
+        passing, the ability to make writes nobody reviewed — the coupling and
+        the capability arrive together.
+
+        The receipt carries only the fields the question needs. No connection,
+        cursor, SQL, path, or arbitrary row escapes, and there is no mutation
+        path on what is returned.
+        """
+        _validated_identifier(transition_id, "transition identity")
+        row = self._connection.execute(
+            "SELECT run_id, from_state, to_state, sequence "
+            "FROM scheduler_transitions WHERE transition_id = ?",
+            (transition_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        run_id, from_state, to_state, sequence = row
+        try:
+            parsed_from = RunState(from_state)
+            parsed_to = RunState(to_state)
+        except ValueError as exc:
+            raise SchedulerError("persisted transition state is not recognized") from exc
+        if not isinstance(sequence, int) or sequence < 1:
+            raise SchedulerError("persisted transition sequence is malformed")
+        return SchedulerTransitionReceipt(
+            transition_id=transition_id,
+            run_id=run_id,
+            from_state=parsed_from,
+            to_state=parsed_to,
+            sequence=sequence,
+        )
+
     # -- reporting --------------------------------------------------------
 
     @property
@@ -1134,6 +1229,7 @@ __all__ = [
     "RunState",
     "ScheduledRun",
     "SchedulerAction",
+    "SchedulerTransitionReceipt",
     "SchedulerDecision",
     "SchedulerError",
     "SchedulerReason",
