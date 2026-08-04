@@ -1544,3 +1544,132 @@ def test_probe_a_tampered_attestation_fails_verification(tmp_path):
                 authority=auth,
                 now=LATER,
             )
+
+
+# --------------------------------------------------------------------------
+# 12. Public transition inspection.
+# --------------------------------------------------------------------------
+
+
+def test_a_persisted_controller_transition_is_inspectable(tmp_path):
+    with suspended(tmp_path) as ctl:
+        receipt = ctl.inspect_transition("s-1")
+        assert receipt is not None
+        assert receipt.transition_id == "s-1"
+        assert receipt.controller_id == CONTROLLER
+        assert receipt.from_state is ControllerState.CLEAR
+        assert receipt.to_state is ControllerState.SUSPENDED
+        assert receipt.cause is SuspensionCause.RISK_LIMIT_BREACH
+        assert receipt.sequence == 1
+        assert receipt.persisted is True
+
+
+def test_an_unknown_controller_transition_is_not_found(tmp_path):
+    with suspended(tmp_path) as ctl:
+        assert ctl.inspect_transition("never-happened") is None
+
+
+@pytest.mark.parametrize("bad", ["", "   ", " s ", "x" * 129, None, 7, "s/1"])
+def test_a_malformed_controller_transition_identity_is_refused(tmp_path, bad):
+    with suspended(tmp_path) as ctl:
+        with pytest.raises(SuspensionControllerError):
+            ctl.inspect_transition(bad)
+
+
+def test_a_controller_receipt_is_immutable(tmp_path):
+    from dataclasses import FrozenInstanceError
+
+    with suspended(tmp_path) as ctl:
+        receipt = ctl.inspect_transition("s-1")
+        with pytest.raises(FrozenInstanceError):
+            receipt.to_state = ControllerState.CLEAR
+
+
+def test_a_controller_receipt_exposes_only_allowlisted_fields(tmp_path):
+    from dataclasses import fields
+
+    with suspended(tmp_path) as ctl:
+        receipt = ctl.inspect_transition("s-1")
+        assert {f.name for f in fields(receipt)} == {
+            "transition_id", "controller_id", "from_state", "to_state", "cause",
+            "evidence_class", "sequence", "persisted",
+        }
+
+
+def test_a_controller_receipt_carries_no_connection_cursor_path_or_sql(tmp_path):
+    import sqlite3 as sqlite_module
+
+    with suspended(tmp_path) as ctl:
+        receipt = ctl.inspect_transition("s-1")
+        for value in vars(receipt).values():
+            assert not isinstance(
+                value, (sqlite_module.Connection, sqlite_module.Cursor, pathlib.Path)
+            )
+            if isinstance(value, str):
+                assert "SELECT" not in value.upper()
+                assert ".sqlite" not in value
+        assert not hasattr(receipt, "_connection")
+
+
+def test_a_controller_receipt_cannot_claim_an_unpersisted_transition():
+    from src.durable_suspension_controller import SuspensionTransitionReceipt
+
+    with pytest.raises(SuspensionControllerError):
+        SuspensionTransitionReceipt(
+            transition_id="t", controller_id="c",
+            from_state=ControllerState.CLEAR, to_state=ControllerState.SUSPENDED,
+            cause=SuspensionCause.OPERATOR_HALT,
+            evidence_class=EvidenceClass.NONE, sequence=1, persisted=False,
+        )
+
+
+def test_controller_inspection_survives_restart(tmp_path):
+    path = tmp_path / "controller.sqlite"
+    with DurableSuspensionController(path) as ctl:
+        ctl.register(CONTROLLER, now=NOW)
+        ctl.suspend(
+            CONTROLLER, cause=SuspensionCause.OPERATOR_HALT,
+            transition_id="s-1", now=NOW,
+        )
+    with DurableSuspensionController(path) as reopened:
+        receipt = reopened.inspect_transition("s-1")
+        assert receipt is not None and receipt.controller_id == CONTROLLER
+
+
+def test_a_permanent_halt_transition_remains_inspectable(tmp_path):
+    with store(tmp_path) as ctl:
+        ctl.register(CONTROLLER, now=NOW)
+        ctl.escalate_to_permanent_halt(CONTROLLER, transition_id="h-1", now=NOW)
+        receipt = ctl.inspect_transition("h-1")
+        assert receipt is not None
+        assert receipt.to_state is ControllerState.PERMANENT_HALT
+
+
+def test_controller_inspection_does_not_make_an_identity_reusable(tmp_path):
+    with suspended(tmp_path) as ctl:
+        ctl.inspect_transition("s-1")
+        with pytest.raises(SuspensionControllerError):
+            ctl.suspend(
+                CONTROLLER, cause=SuspensionCause.OPERATOR_HALT,
+                transition_id="s-1", now=LATER,
+            )
+
+
+def test_controller_inspection_is_read_only(tmp_path):
+    with suspended(tmp_path) as ctl:
+        before = (ctl.total_event_count, ctl.load(CONTROLLER).state)
+        for _ in range(3):
+            ctl.inspect_transition("s-1")
+            ctl.inspect_transition("absent")
+        assert (ctl.total_event_count, ctl.load(CONTROLLER).state) == before
+
+
+def test_a_malformed_persisted_controller_transition_fails_closed(tmp_path):
+    with suspended(tmp_path) as ctl:
+        ctl._connection.execute(
+            "UPDATE controller_events SET to_state = 'ELSEWHERE' "
+            "WHERE transition_id = ?",
+            ("s-1",),
+        )
+        with pytest.raises(SuspensionControllerError):
+            ctl.inspect_transition("s-1")

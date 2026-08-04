@@ -1232,3 +1232,149 @@ def test_probe_the_scheduler_is_not_in_the_milestone_9_pinned_closure():
     from src.read_only_authorization_manifest import PINNED_IMPLEMENTATION_CLOSURE
 
     assert "src/durable_scheduler.py" not in PINNED_IMPLEMENTATION_CLOSURE
+
+
+# --------------------------------------------------------------------------
+# 12. Public transition inspection.
+# --------------------------------------------------------------------------
+
+
+def test_a_persisted_transition_is_inspectable(tmp_path):
+    with store(tmp_path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.WAITING_FOR_SESSION, tid="t-1")
+        receipt = sched.inspect_transition("t-1")
+        assert receipt is not None
+        assert receipt.transition_id == "t-1"
+        assert receipt.run_id == "run-1"
+        assert receipt.from_state is RunState.CREATED
+        assert receipt.to_state is RunState.WAITING_FOR_SESSION
+        assert receipt.sequence == 1
+        assert receipt.persisted is True
+
+
+def test_an_unknown_transition_is_not_found(tmp_path):
+    with store(tmp_path) as sched:
+        new_run(sched)
+        assert sched.inspect_transition("never-happened") is None
+
+
+@pytest.mark.parametrize("bad", ["", "   ", " t ", "x" * 129, None, 7, "t/1"])
+def test_a_malformed_transition_identity_is_refused(tmp_path, bad):
+    with store(tmp_path) as sched:
+        with pytest.raises(SchedulerError):
+            sched.inspect_transition(bad)
+
+
+def test_a_receipt_is_immutable(tmp_path):
+    from dataclasses import FrozenInstanceError
+
+    with store(tmp_path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.WAITING_FOR_SESSION, tid="t-1")
+        receipt = sched.inspect_transition("t-1")
+        with pytest.raises(FrozenInstanceError):
+            receipt.to_state = RunState.SUSPENDED
+
+
+def test_a_receipt_exposes_only_allowlisted_fields(tmp_path):
+    from dataclasses import fields
+
+    with store(tmp_path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.WAITING_FOR_SESSION, tid="t-1")
+        receipt = sched.inspect_transition("t-1")
+        assert {f.name for f in fields(receipt)} == {
+            "transition_id", "run_id", "from_state", "to_state", "sequence",
+            "persisted",
+        }
+
+
+def test_a_receipt_carries_no_connection_cursor_path_or_sql(tmp_path):
+    import sqlite3 as sqlite_module
+
+    with store(tmp_path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.WAITING_FOR_SESSION, tid="t-1")
+        receipt = sched.inspect_transition("t-1")
+        for value in vars(receipt).values():
+            assert not isinstance(
+                value, (sqlite_module.Connection, sqlite_module.Cursor, pathlib.Path)
+            )
+            if isinstance(value, str):
+                assert "SELECT" not in value.upper()
+                assert ".sqlite" not in value
+        assert not hasattr(receipt, "_connection")
+
+
+def test_a_receipt_cannot_claim_an_unpersisted_transition():
+    from src.durable_scheduler import SchedulerTransitionReceipt
+
+    with pytest.raises(SchedulerError):
+        SchedulerTransitionReceipt(
+            transition_id="t", run_id="r", from_state=RunState.CREATED,
+            to_state=RunState.SUSPENDED, sequence=1, persisted=False,
+        )
+
+
+@pytest.mark.parametrize("sequence", [0, -1, True, 1.5])
+def test_a_receipt_refuses_a_nonsensical_sequence(sequence):
+    from src.durable_scheduler import SchedulerTransitionReceipt
+
+    with pytest.raises(SchedulerError):
+        SchedulerTransitionReceipt(
+            transition_id="t", run_id="r", from_state=RunState.CREATED,
+            to_state=RunState.SUSPENDED, sequence=sequence,
+        )
+
+
+def test_inspection_survives_restart(tmp_path):
+    path = tmp_path / "scheduler.sqlite"
+    with DurableScheduler(path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.WAITING_FOR_SESSION, tid="t-1")
+    with DurableScheduler(path) as reopened:
+        receipt = reopened.inspect_transition("t-1")
+        assert receipt is not None and receipt.run_id == "run-1"
+
+
+def test_a_terminal_transition_remains_inspectable(tmp_path):
+    with store(tmp_path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.FAILED_CLOSED, tid="t-final")
+        receipt = sched.inspect_transition("t-final")
+        assert receipt is not None
+        assert receipt.to_state is RunState.FAILED_CLOSED
+
+
+def test_inspection_does_not_make_an_identity_reusable(tmp_path):
+    with store(tmp_path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.WAITING_FOR_SESSION, tid="t-1")
+        sched.inspect_transition("t-1")
+        with pytest.raises(SchedulerError):
+            advance(sched, "run-1", RunState.PRECONDITION_CHECK, tid="t-1")
+
+
+def test_inspection_is_read_only(tmp_path):
+    with store(tmp_path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.WAITING_FOR_SESSION, tid="t-1")
+        before = (sched.transition_count, sched.load_run("run-1").state)
+        for _ in range(3):
+            sched.inspect_transition("t-1")
+            sched.inspect_transition("absent")
+        assert (sched.transition_count, sched.load_run("run-1").state) == before
+
+
+def test_a_malformed_persisted_transition_state_fails_closed(tmp_path):
+    with store(tmp_path) as sched:
+        new_run(sched)
+        advance(sched, "run-1", RunState.WAITING_FOR_SESSION, tid="t-1")
+        sched._connection.execute(
+            "UPDATE scheduler_transitions SET to_state = 'ELSEWHERE' "
+            "WHERE transition_id = ?",
+            ("t-1",),
+        )
+        with pytest.raises(SchedulerError):
+            sched.inspect_transition("t-1")
