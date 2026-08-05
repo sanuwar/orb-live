@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 51966
-- Test LOC: 47953
+- Production LOC: 52136
+- Test LOC: 48000
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -13,7 +13,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
 ## Prioritized findings
 
 1. **NEEDS_RUNTIME_EVIDENCE / MEDIUM -- Repeated constrained-value validators**
-   Evidence: 43 repeated helper placements across identifier_validation=12, path_validation=6, permission_validation=2, serialization=20, timestamp_validation=8
+   Evidence: 44 repeated helper placements across identifier_validation=12, path_validation=6, permission_validation=2, serialization=21, timestamp_validation=8
    Interpretation: Exact normalized bodies shared across modules: 0. Similar names alone do not establish contract equivalence.
    Estimated removable LOC: production 0, tests 0
 
@@ -33,7 +33,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 5. **NEEDS_RUNTIME_EVIDENCE / LOW -- Enum members without qualified references**
-   Evidence: 48 enum members have no qualified construction/reference site.
+   Evidence: 50 enum members have no qualified construction/reference site.
    Interpretation: Persisted values, iteration, and indirect deserialization can make these reachable; require runtime evidence before deletion.
    Estimated removable LOC: production 0, tests 0
 
@@ -48,7 +48,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 8. **NEEDS_RUNTIME_EVIDENCE / LOW -- Serialization allowlists repeat exact-key mechanics**
-   Evidence: serialization helpers appear in 20 modules.
+   Evidence: serialization helpers appear in 21 modules.
    Interpretation: A shared primitive may reduce boilerplate, but field privacy and error contracts require equivalence evidence.
    Estimated removable LOC: production 0, tests 0
 
