@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 52204
-- Test LOC: 48072
+- Production LOC: 52325
+- Test LOC: 48144
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -13,7 +13,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
 ## Prioritized findings
 
 1. **NEEDS_RUNTIME_EVIDENCE / MEDIUM -- Repeated constrained-value validators**
-   Evidence: 44 repeated helper placements across identifier_validation=12, path_validation=6, permission_validation=2, serialization=21, timestamp_validation=8
+   Evidence: 45 repeated helper placements across identifier_validation=12, path_validation=6, permission_validation=2, serialization=21, timestamp_validation=9
    Interpretation: Exact normalized bodies shared across modules: 0. Similar names alone do not establish contract equivalence.
    Estimated removable LOC: production 0, tests 0
 
