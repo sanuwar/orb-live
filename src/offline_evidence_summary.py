@@ -55,6 +55,7 @@ _KEYS = frozenset({
     "last_safe_injected_timestamp", "blocker_reasons", "offline_health_status",
     "supervised_readiness_status", "live_ready", "unattended_ready",
     "protection_grounded", "activation_approved", "permits_automated_action",
+    "occurrence_ids", "evidence_digest",
 })
 _FORBIDDEN = ("account", "balance", "broker", "credential", "exception", "order", "price", "quantity", "secret", "symbol", "token", "username")
 _MAX_AGE = timedelta(days=1)
@@ -109,6 +110,8 @@ class OfflineEvidenceSummary:
     protection_grounded: bool = False
     activation_approved: bool = False
     permits_automated_action: bool = False
+    occurrence_ids: tuple[str, ...] = ()
+    evidence_digest: str = ""
 
     def __post_init__(self) -> None:
         _id(self.batch_id)
@@ -125,6 +128,37 @@ class OfflineEvidenceSummary:
             raise EvidenceSummaryError("summary reasons are invalid")
         if any(x is not False for x in (self.live_ready, self.unattended_ready, self.protection_grounded, self.activation_approved, self.permits_automated_action)):
             raise EvidenceSummaryError("summary cannot authorize or ground operation")
+        if not self.occurrence_ids or tuple(sorted(self.occurrence_ids)) != self.occurrence_ids or len(set(self.occurrence_ids)) != len(self.occurrence_ids):
+            raise EvidenceSummaryError("summary occurrence binding is invalid")
+        if len(self.evidence_digest) != 64 or any(x not in "0123456789abcdef" for x in self.evidence_digest):
+            raise EvidenceSummaryError("summary evidence digest is invalid")
+        expected_reasons = {SummaryReason.PROTECTION_NOT_GROUNDED, SummaryReason.ACTIVATION_APPROVALS_EMPTY}
+        counts = {
+            SummaryReason.ACTIVE_SUSPENSION: self.suspended_session_count,
+            SummaryReason.AMBIGUOUS_RESTART: self.ambiguous_restart_count,
+            SummaryReason.OPERATOR_REVIEW_PENDING: self.operator_review_count,
+            SummaryReason.MISSED_CYCLE: self.missed_cycle_count,
+            SummaryReason.ALERT_DELIVERY_UNCONFIRMED: self.unconfirmed_alert_count,
+            SummaryReason.STALE_EVIDENCE: self.stale_evidence_count,
+            SummaryReason.FAILED_COMPONENT: self.failed_session_count,
+        }
+        for reason, count in counts.items():
+            if count is CountBucket.ZERO and reason in self.blocker_reasons:
+                raise EvidenceSummaryError("summary blocker reason is unsupported")
+            if count is not CountBucket.ZERO and reason not in self.blocker_reasons:
+                raise EvidenceSummaryError("summary blocker reason is incomplete")
+            if count is not CountBucket.ZERO:
+                expected_reasons.add(reason)
+        if self.session_count is CountBucket.ONE:
+            expected_reasons.add(SummaryReason.INSUFFICIENT_SESSION_HISTORY)
+        elif SummaryReason.INSUFFICIENT_SESSION_HISTORY in self.blocker_reasons:
+            raise EvidenceSummaryError("summary history reason is unsupported")
+        if set(self.blocker_reasons) != expected_reasons:
+            raise EvidenceSummaryError("summary blocker projection is invalid")
+        adverse = expected_reasons - {SummaryReason.PROTECTION_NOT_GROUNDED, SummaryReason.ACTIVATION_APPROVALS_EMPTY}
+        expected_health = OfflineHealthStatus.FAILED_CLOSED if self.failed_session_count is not CountBucket.ZERO or self.ambiguous_restart_count is not CountBucket.ZERO else (OfflineHealthStatus.DEGRADED if adverse else OfflineHealthStatus.HEALTHY)
+        if self.offline_health_status is not expected_health or self.supervised_readiness_status is not ReadinessStatus.SUPERVISED_BLOCKED:
+            raise EvidenceSummaryError("summary status projection is invalid")
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -145,6 +179,8 @@ class OfflineEvidenceSummary:
             "live_ready": False, "unattended_ready": False,
             "protection_grounded": False, "activation_approved": False,
             "permits_automated_action": False,
+            "occurrence_ids": list(self.occurrence_ids),
+            "evidence_digest": self.evidence_digest,
         }
         return result
 
@@ -152,27 +188,31 @@ class OfflineEvidenceSummary:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
 
-def summarize_sessions(batch_id: str, sessions: Sequence[SessionEvidence], *, evaluated_at: datetime) -> OfflineEvidenceSummary:
+def _evidence_digest(batch_id: str, sessions: Sequence[SessionEvidence]) -> str:
+    bound = [{"occurrence_id": item.occurrence_id, "report": item.report.to_dict()} for item in sorted(sessions, key=lambda item: item.occurrence_id)]
+    encoded = json.dumps({"batch_id": batch_id, "evidence": bound}, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _project_summary(batch_id: str, sessions: tuple[SessionEvidence, ...], evaluated_at: datetime) -> OfflineEvidenceSummary:
     _id(batch_id)
     if not isinstance(sessions, tuple) or not sessions or any(not isinstance(x, SessionEvidence) for x in sessions):
         raise EvidenceSummaryError("session evidence is invalid")
     if evaluated_at.tzinfo is None or evaluated_at.tzinfo.utcoffset(evaluated_at) is None:
         raise EvidenceSummaryError("evaluation timestamp is invalid")
-    fingerprints: set[str] = set()
     occurrences: set[str] = set()
     reports: list[BoundedShadowSessionReport] = []
+    occurrence_prefix = "occurrence-" + batch_id.removeprefix("batch-") + "-"
     for evidence in sessions:
         session = evidence.report
+        if not evidence.occurrence_id.startswith(occurrence_prefix):
+            raise EvidenceSummaryError("session occurrence is bound to another batch")
         if evidence.occurrence_id in occurrences:
             raise EvidenceSummaryError("duplicate session evidence")
         occurrences.add(evidence.occurrence_id)
         reports.append(session)
         if session.evaluated_at > evaluated_at or evaluated_at - session.evaluated_at > _MAX_AGE:
             raise EvidenceSummaryError("session evidence is stale or future dated")
-        digest = hashlib.sha256(session.serialize().encode()).hexdigest()
-        if digest in fingerprints:
-            raise EvidenceSummaryError("duplicate session evidence")
-        fingerprints.add(digest)
     observations = [item for session in reports for item in session.observations]
     failed = sum(not session.all_passed for session in reports)
     suspended = sum(item.observed_state in {"STOPPED_ON_SUSPENSION", "SUSPENSION_REQUIRED"} for item in observations)
@@ -196,10 +236,17 @@ def summarize_sessions(batch_id: str, sessions: Sequence[SessionEvidence], *, ev
         _bucket(suspended), _bucket(ambiguous), _bucket(reviews), _bucket(missed), _bucket(alerts), _bucket(stale),
         max(session.evaluated_at for session in reports), tuple(reasons), health,
         ReadinessStatus.SUPERVISED_BLOCKED if reasons else ReadinessStatus.OFFLINE_HEALTHY,
+        occurrence_ids=tuple(sorted(occurrences)), evidence_digest=_evidence_digest(batch_id, sessions),
     )
 
 
-def load_summary(payload: str, *, evaluated_at: datetime) -> OfflineEvidenceSummary:
+def summarize_sessions(batch_id: str, sessions: Sequence[SessionEvidence], *, evaluated_at: datetime) -> OfflineEvidenceSummary:
+    if not isinstance(sessions, tuple):
+        raise EvidenceSummaryError("session evidence is invalid")
+    return _project_summary(batch_id, sessions, evaluated_at)
+
+
+def load_summary(payload: str, sessions: Sequence[SessionEvidence], *, evaluated_at: datetime) -> OfflineEvidenceSummary:
     try:
         raw: Any = json.loads(payload)
     except Exception:
@@ -209,12 +256,16 @@ def load_summary(payload: str, *, evaluated_at: datetime) -> OfflineEvidenceSumm
     try:
         result = OfflineEvidenceSummary(
             raw["batch_id"], CountBucket(raw["session_count"]), CountBucket(raw["completed_session_count"]), CountBucket(raw["failed_session_count"]), CountBucket(raw["suspended_session_count"]), CountBucket(raw["ambiguous_restart_count"]), CountBucket(raw["operator_review_count"]), CountBucket(raw["missed_cycle_count"]), CountBucket(raw["unconfirmed_alert_count"]), CountBucket(raw["stale_evidence_count"]), datetime.fromisoformat(raw["last_safe_injected_timestamp"]), tuple(SummaryReason(x) for x in raw["blocker_reasons"]), OfflineHealthStatus(raw["offline_health_status"]), ReadinessStatus(raw["supervised_readiness_status"]), raw["live_ready"], raw["unattended_ready"], raw["protection_grounded"], raw["activation_approved"], raw["permits_automated_action"],
+            tuple(raw["occurrence_ids"]), raw["evidence_digest"],
         )
         if evaluated_at.tzinfo is None or evaluated_at - result.last_safe_injected_timestamp > _MAX_AGE or result.last_safe_injected_timestamp > evaluated_at:
             raise EvidenceSummaryError("summary evidence is stale or future dated")
-        if result.offline_health_status is OfflineHealthStatus.HEALTHY and len(result.blocker_reasons) > 2:
-            raise EvidenceSummaryError("summary health conflicts with blockers")
-        return result
+        if not isinstance(sessions, tuple):
+            raise EvidenceSummaryError("summary evidence is invalid")
+        projected = _project_summary(result.batch_id, sessions, evaluated_at)
+        if result != projected:
+            raise EvidenceSummaryError("summary does not match bound evidence")
+        return projected
     except EvidenceSummaryError:
         raise
     except Exception:

@@ -26,7 +26,7 @@ _EASTERN = ZoneInfo("America/New_York")
 _ALLOWED_STATES = frozenset({
     "PRE_MARKET", "REGULAR", "CLOSED", "UNKNOWN", "COMPLETED_BOUND",
     "STOPPED_ON_REVIEW", "STOPPED_ON_SUSPENSION", "SUSPENSION_REQUIRED",
-    "DELIVERY_UNCONFIRMED", "STALE", "RECOVERED",
+    "DELIVERY_UNCONFIRMED", "STALE", "RECOVERED", "AMBIGUOUS_RESTART",
 })
 _FORBIDDEN = ("account", "credential", "password", "symbol", "quantity", "price", "balance")
 
