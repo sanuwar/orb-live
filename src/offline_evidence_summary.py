@@ -71,9 +71,21 @@ def _bucket(value: int) -> CountBucket:
 
 
 def _id(value: object) -> str:
-    if not isinstance(value, str) or not value.startswith("batch-") or not value.replace("-", "").isalnum() or any(x in value.casefold() for x in _FORBIDDEN):
+    if not isinstance(value, str) or not 8 <= len(value) <= 96 or not value.startswith("batch-") or not value.replace("-", "").isalnum() or any(x in value.casefold() for x in _FORBIDDEN):
         raise EvidenceSummaryError("batch identity is invalid")
     return value
+
+
+@dataclass(frozen=True)
+class SessionEvidence:
+    occurrence_id: str
+    report: BoundedShadowSessionReport
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.occurrence_id, str) or not 12 <= len(self.occurrence_id) <= 96 or not self.occurrence_id.startswith("occurrence-") or not self.occurrence_id.replace("-", "").isalnum():
+            raise EvidenceSummaryError("occurrence identity is invalid")
+        if not isinstance(self.report, BoundedShadowSessionReport):
+            raise EvidenceSummaryError("session report is invalid")
 
 
 @dataclass(frozen=True)
@@ -140,24 +152,29 @@ class OfflineEvidenceSummary:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
 
-def summarize_sessions(batch_id: str, sessions: Sequence[BoundedShadowSessionReport], *, evaluated_at: datetime) -> OfflineEvidenceSummary:
+def summarize_sessions(batch_id: str, sessions: Sequence[SessionEvidence], *, evaluated_at: datetime) -> OfflineEvidenceSummary:
     _id(batch_id)
-    if not isinstance(sessions, tuple) or not sessions:
+    if not isinstance(sessions, tuple) or not sessions or any(not isinstance(x, SessionEvidence) for x in sessions):
         raise EvidenceSummaryError("session evidence is invalid")
     if evaluated_at.tzinfo is None or evaluated_at.tzinfo.utcoffset(evaluated_at) is None:
         raise EvidenceSummaryError("evaluation timestamp is invalid")
     fingerprints: set[str] = set()
-    for session in sessions:
-        if not isinstance(session, BoundedShadowSessionReport):
-            raise EvidenceSummaryError("session evidence is invalid")
+    occurrences: set[str] = set()
+    reports: list[BoundedShadowSessionReport] = []
+    for evidence in sessions:
+        session = evidence.report
+        if evidence.occurrence_id in occurrences:
+            raise EvidenceSummaryError("duplicate session evidence")
+        occurrences.add(evidence.occurrence_id)
+        reports.append(session)
         if session.evaluated_at > evaluated_at or evaluated_at - session.evaluated_at > _MAX_AGE:
             raise EvidenceSummaryError("session evidence is stale or future dated")
         digest = hashlib.sha256(session.serialize().encode()).hexdigest()
         if digest in fingerprints:
             raise EvidenceSummaryError("duplicate session evidence")
         fingerprints.add(digest)
-    observations = [item for session in sessions for item in session.observations]
-    failed = sum(not session.all_passed for session in sessions)
+    observations = [item for session in reports for item in session.observations]
+    failed = sum(not session.all_passed for session in reports)
     suspended = sum(item.observed_state in {"STOPPED_ON_SUSPENSION", "SUSPENSION_REQUIRED"} for item in observations)
     ambiguous = sum(item.observed_state == "AMBIGUOUS_RESTART" for item in observations)
     reviews = sum(item.observed_state == "STOPPED_ON_REVIEW" for item in observations)
@@ -172,29 +189,36 @@ def summarize_sessions(batch_id: str, sessions: Sequence[BoundedShadowSessionRep
     if reviews: reasons.append(SummaryReason.OPERATOR_REVIEW_PENDING)
     if stale: reasons.append(SummaryReason.STALE_EVIDENCE)
     if failed: reasons.append(SummaryReason.FAILED_COMPONENT)
-    if len(sessions) < 2: reasons.append(SummaryReason.INSUFFICIENT_SESSION_HISTORY)
-    health = OfflineHealthStatus.HEALTHY if not failed and not suspended and not ambiguous and not stale else OfflineHealthStatus.DEGRADED
+    if len(reports) < 2: reasons.append(SummaryReason.INSUFFICIENT_SESSION_HISTORY)
+    health = OfflineHealthStatus.FAILED_CLOSED if failed or ambiguous else (OfflineHealthStatus.HEALTHY if not any(r not in {SummaryReason.PROTECTION_NOT_GROUNDED, SummaryReason.ACTIVATION_APPROVALS_EMPTY} for r in reasons) else OfflineHealthStatus.DEGRADED)
     return OfflineEvidenceSummary(
-        batch_id, _bucket(len(sessions)), _bucket(len(sessions) - failed), _bucket(failed),
+        batch_id, _bucket(len(reports)), _bucket(len(reports) - failed), _bucket(failed),
         _bucket(suspended), _bucket(ambiguous), _bucket(reviews), _bucket(missed), _bucket(alerts), _bucket(stale),
-        max(session.evaluated_at for session in sessions), tuple(reasons), health,
+        max(session.evaluated_at for session in reports), tuple(reasons), health,
         ReadinessStatus.SUPERVISED_BLOCKED if reasons else ReadinessStatus.OFFLINE_HEALTHY,
     )
 
 
-def load_summary(payload: str) -> OfflineEvidenceSummary:
+def load_summary(payload: str, *, evaluated_at: datetime) -> OfflineEvidenceSummary:
     try:
         raw: Any = json.loads(payload)
-    except Exception as exc:
-        raise EvidenceSummaryError("summary payload is invalid") from exc
+    except Exception:
+        raise EvidenceSummaryError("summary payload is invalid") from None
     if not isinstance(raw, dict) or set(raw) != _KEYS:
         raise EvidenceSummaryError("summary keys are invalid")
     try:
-        return OfflineEvidenceSummary(
+        result = OfflineEvidenceSummary(
             raw["batch_id"], CountBucket(raw["session_count"]), CountBucket(raw["completed_session_count"]), CountBucket(raw["failed_session_count"]), CountBucket(raw["suspended_session_count"]), CountBucket(raw["ambiguous_restart_count"]), CountBucket(raw["operator_review_count"]), CountBucket(raw["missed_cycle_count"]), CountBucket(raw["unconfirmed_alert_count"]), CountBucket(raw["stale_evidence_count"]), datetime.fromisoformat(raw["last_safe_injected_timestamp"]), tuple(SummaryReason(x) for x in raw["blocker_reasons"]), OfflineHealthStatus(raw["offline_health_status"]), ReadinessStatus(raw["supervised_readiness_status"]), raw["live_ready"], raw["unattended_ready"], raw["protection_grounded"], raw["activation_approved"], raw["permits_automated_action"],
         )
-    except Exception as exc:
-        raise EvidenceSummaryError("summary values are invalid") from exc
+        if evaluated_at.tzinfo is None or evaluated_at - result.last_safe_injected_timestamp > _MAX_AGE or result.last_safe_injected_timestamp > evaluated_at:
+            raise EvidenceSummaryError("summary evidence is stale or future dated")
+        if result.offline_health_status is OfflineHealthStatus.HEALTHY and len(result.blocker_reasons) > 2:
+            raise EvidenceSummaryError("summary health conflicts with blockers")
+        return result
+    except EvidenceSummaryError:
+        raise
+    except Exception:
+        raise EvidenceSummaryError("summary values are invalid") from None
 
 
-__all__ = ["CountBucket", "EvidenceSummaryError", "OfflineEvidenceSummary", "OfflineHealthStatus", "ReadinessStatus", "SummaryReason", "load_summary", "summarize_sessions"]
+__all__ = ["CountBucket", "EvidenceSummaryError", "OfflineEvidenceSummary", "OfflineHealthStatus", "ReadinessStatus", "SessionEvidence", "SummaryReason", "load_summary", "summarize_sessions"]

@@ -8,7 +8,7 @@ import pytest
 from src.bounded_shadow_session import SESSION_NOW, run_bounded_shadow_session
 from src.offline_evidence_summary import (
     CountBucket, EvidenceSummaryError, OfflineHealthStatus, ReadinessStatus,
-    SummaryReason, load_summary, summarize_sessions,
+    SessionEvidence, SummaryReason, load_summary, summarize_sessions,
 )
 
 
@@ -18,7 +18,7 @@ def report(tmp_path_factory):
 
 
 def test_summary_is_projection_only_and_blocked(report) -> None:
-    summary = summarize_sessions("batch-shadow-20260803", (report,), evaluated_at=SESSION_NOW)
+    summary = summarize_sessions("batch-shadow-20260803", (SessionEvidence("occurrence-shadow-20260803-01", report),), evaluated_at=SESSION_NOW)
     assert summary.offline_health_status is OfflineHealthStatus.DEGRADED
     assert summary.supervised_readiness_status is ReadinessStatus.SUPERVISED_BLOCKED
     assert SummaryReason.PROTECTION_NOT_GROUNDED in summary.blocker_reasons
@@ -28,29 +28,29 @@ def test_summary_is_projection_only_and_blocked(report) -> None:
 
 
 def test_allowlisted_deterministic_round_trip(report) -> None:
-    summary = summarize_sessions("batch-shadow-20260803", (report,), evaluated_at=SESSION_NOW)
+    summary = summarize_sessions("batch-shadow-20260803", (SessionEvidence("occurrence-shadow-20260803-01", report),), evaluated_at=SESSION_NOW)
     payload = json.loads(summary.serialize())
     assert summary.serialize() == json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    assert load_summary(summary.serialize()) == summary
+    assert load_summary(summary.serialize(), evaluated_at=SESSION_NOW) == summary
 
 
 def test_duplicate_mixed_stale_and_future_evidence_rejected(report) -> None:
     with pytest.raises(EvidenceSummaryError):
-        summarize_sessions("batch-shadow-20260803", (report, report), evaluated_at=SESSION_NOW)
+        summarize_sessions("batch-shadow-20260803", (SessionEvidence("occurrence-shadow-20260803-01", report), SessionEvidence("occurrence-shadow-20260803-02", report)), evaluated_at=SESSION_NOW)
     with pytest.raises(EvidenceSummaryError):
-        summarize_sessions("batch-shadow-20260803", (report,), evaluated_at=SESSION_NOW - timedelta(minutes=1))
+        summarize_sessions("batch-shadow-20260803", (SessionEvidence("occurrence-shadow-20260803-01", report),), evaluated_at=SESSION_NOW - timedelta(minutes=1))
     with pytest.raises(EvidenceSummaryError):
-        summarize_sessions("batch-shadow-20260803", (report,), evaluated_at=SESSION_NOW + timedelta(days=2))
+        summarize_sessions("batch-shadow-20260803", (SessionEvidence("occurrence-shadow-20260803-01", report),), evaluated_at=SESSION_NOW + timedelta(days=2))
 
 
 def test_unknown_keys_and_private_fields_rejected(report) -> None:
-    summary = summarize_sessions("batch-shadow-20260803", (report,), evaluated_at=SESSION_NOW)
+    summary = summarize_sessions("batch-shadow-20260803", (SessionEvidence("occurrence-shadow-20260803-01", report),), evaluated_at=SESSION_NOW)
     raw = summary.to_dict()
     raw["symbol"] = "X"
     with pytest.raises(EvidenceSummaryError):
-        load_summary(json.dumps(raw))
+        load_summary(json.dumps(raw), evaluated_at=SESSION_NOW)
     with pytest.raises(EvidenceSummaryError):
-        summarize_sessions("batch-account-1", (report,), evaluated_at=SESSION_NOW)
+        summarize_sessions("batch-account-1", (SessionEvidence("occurrence-shadow-20260803-01", report),), evaluated_at=SESSION_NOW)
 
 
 def test_invalid_component_inputs_rejected() -> None:
