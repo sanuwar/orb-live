@@ -4,7 +4,7 @@ Offline engineering contracts are substantially evidenced, but supervised read-o
 
 Audit question: What concrete repository, operational, and human-controlled gaps remain before ORB-LIVE may be deployed for supervised read-only operation, while live writes and unattended operation remain structurally impossible?
 
-Repository SHA: `10df280aac1df70ef2e9982e98ede1d7a709db1c`
+Repository SHA: `6e2235db86b6c640ddd103536500e669cec67a26`
 Implementation digest: `b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46`
 Pinned implementation files: 20
 
@@ -18,9 +18,9 @@ Pinned implementation files: 20
 ## Category totals
 
 - INTENTIONALLY_BLOCKED: 2
-- MISSING: 17
+- MISSING: 15
 - NOT_APPLICABLE: 0
-- PARTIALLY_VERIFIED: 13
+- PARTIALLY_VERIFIED: 15
 - VERIFIED_COMPLETE: 18
 
 ## Top P0/P1 gaps
@@ -65,7 +65,7 @@ Pinned implementation files: 20
 | Commissioning execution | VERIFIED_COMPLETE | P3_LATER_HARDENING | EVIDENCE | True |
 | Campaign verification | VERIFIED_COMPLETE | P3_LATER_HARDENING | EVIDENCE | True |
 | Operator acceptance packaging | VERIFIED_COMPLETE | P1_REQUIRED_BEFORE_DEPLOYMENT | HUMAN_APPROVAL | True |
-| Deployment configuration | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | CONFIGURATION | True |
+| Deployment configuration | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | CONFIGURATION | True |
 | Host/process supervision | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | INFRASTRUCTURE | True |
 | Backup and restore | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
 | Database durability | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | INFRASTRUCTURE | True |
@@ -79,7 +79,7 @@ Pinned implementation files: 20
 | Controlled shutdown | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
 | Clock/timezone behavior | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | INFRASTRUCTURE | True |
 | Dependency pinning | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | CONFIGURATION | True |
-| Version stamping | MISSING | P2_REQUIRED_DURING_PILOT | CONFIGURATION | True |
+| Version stamping | PARTIALLY_VERIFIED | P2_REQUIRED_DURING_PILOT | CONFIGURATION | True |
 | Release artifact identity | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | EVIDENCE | True |
 | Production observability | MISSING | P2_REQUIRED_DURING_PILOT | INFRASTRUCTURE | True |
 | Read-only credential scope | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | BROKER_DEPENDENCY | True |
@@ -325,14 +325,14 @@ Pinned implementation files: 20
 - Next action: Keep acceptance evidence separate from runtime authorization.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
-### Deployment configuration — MISSING
+### Deployment configuration — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: src/config.py, config/strategy_v0.yaml
+- References: src/read_only_deployment_profile.py:ReadOnlyDeploymentProfile, scripts/validate_read_only_deployment_profile.py, examples/read-only-deployment/
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: No supervised read-only host configuration package exists.
+- Missing evidence: A validated profile exists, but host application and external deployment controls are not defined.
 - Risk: No additional risk is established within repository scope.
-- Next action: Define a reviewed deployment configuration without enabling writes.
+- Next action: Review a profile for a controlled host without treating it as deployment authorization.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
 ### Host/process supervision — MISSING
@@ -465,14 +465,14 @@ Pinned implementation files: 20
 - Next action: Create a reviewed environment lock before host installation.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
-### Version stamping — MISSING
+### Version stamping — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: src/read_only_authorization_manifest.py
+- References: src/read_only_deployment_profile.py:release_commit_sha, src/read_only_deployment_profile.py:implementation_digest
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: No release version is stamped into an observation package.
+- Missing evidence: The profile binds source identity, but release packaging and promotion records are absent.
 - Risk: No additional risk is established within repository scope.
-- Next action: Define a release/version field outside runtime authorization.
+- Next action: Retain the bound identity in an externally reviewed release record.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
 ### Release artifact identity — PARTIALLY_VERIFIED
