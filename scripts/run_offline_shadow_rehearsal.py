@@ -251,11 +251,15 @@ def _providers(*, regular: bool = False) -> DriverProviders:
 def _stack(
     root: Path, runner_id: str, *, regular: bool = False,
     suspend: bool = False, tick_count: int = 1,
+    tick_timestamps: tuple[datetime, ...] | None = None,
+    maximum_tick_count: int | None = None,
 ) -> _Stack:
     root.mkdir(parents=True, exist_ok=False)
     config = RunnerConfig(
-        runner_id=runner_id, maximum_tick_count=tick_count,
-        tick_timestamps=tuple(NOW + timedelta(minutes=index) for index in range(tick_count)),
+        runner_id=runner_id, maximum_tick_count=maximum_tick_count or tick_count,
+        tick_timestamps=(tick_timestamps if tick_timestamps is not None else tuple(
+            NOW + timedelta(minutes=index) for index in range(tick_count)
+        )),
         session_date=SESSION_DATE, mode=RunnerMode.OFFLINE_SHADOW,
         runner_database_path=(root / "runner.sqlite").resolve(),
         driver_database_path=(root / "driver.sqlite").resolve(),
@@ -387,7 +391,10 @@ def _scenario(
     )
 
 
-def run_rehearsal(root: Path) -> RehearsalReport:
+def run_rehearsal(
+    root: Path, *, tick_timestamps: tuple[datetime, ...] | None = None,
+    maximum_tick_count: int | None = None,
+) -> RehearsalReport:
     """Run all scenarios once beneath an empty, caller-supplied directory."""
     root = Path(root).resolve(strict=False)
     if root.exists() or root == REPOSITORY_ROOT or REPOSITORY_ROOT in root.parents:
@@ -402,7 +409,10 @@ def run_rehearsal(root: Path) -> RehearsalReport:
     )
     live = ExitStack()
     try:
-        safe = live.enter_context(_stack(root / "safe", "runner-rehearsal-safe", tick_count=2))
+        safe = live.enter_context(_stack(
+            root / "safe", "runner-rehearsal-safe", tick_count=2,
+            tick_timestamps=tick_timestamps, maximum_tick_count=maximum_tick_count,
+        ))
         review = live.enter_context(_stack(root / "review", "runner-rehearsal-review", regular=True))
         suspended = live.enter_context(_stack(root / "suspended", "runner-rehearsal-suspended", suspend=True))
         safe_code, safe_result = _cli(safe)
