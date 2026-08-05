@@ -12,6 +12,7 @@ from urllib.parse import parse_qs
 from src.offline_path_safety import is_repository_data_path
 from src.operator_snapshot_history import HistoryError, HistoryNotFound, SnapshotHistory, compare_snapshots
 from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, OperatorEventTimeline, TimelineError, TimelineNotFound
+from src.operator_incident_export import IncidentError, IncidentNotFound, OperatorIncidentStore, render_incident_html
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.supervised_operator_console import (
     ConsoleError,
@@ -300,6 +301,30 @@ class OperatorWebApp:
                 payload = {"schema_version": 1, "event": event.to_dict()}
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _timeline_detail_body(event).encode("utf-8"))
+        incident_match = path.startswith("/incidents/") or path.startswith("/api/incidents/")
+        if incident_match:
+            api_detail = path.startswith("/api/")
+            export_json = path.endswith("/export.json")
+            export_html = path.endswith("/export.html")
+            prefix = "/api/incidents/" if api_detail else "/incidents/"
+            incident_id = path.removeprefix(prefix).removesuffix("/export.json").removesuffix("/export.html")
+            try:
+                query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+                if query:
+                    raise IncidentError("incident query is invalid")
+                store = OperatorIncidentStore(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
+                incident = store.get(incident_id=incident_id, as_of=self.config.default_as_of)
+            except IncidentNotFound:
+                return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
+            except IncidentError:
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8" if api_detail or export_json else "text/html; charset=utf-8", b'{"status":"FAIL_CLOSED_INCIDENT_LOAD"}\n' if api_detail or export_json else _error_body().encode("utf-8"))
+            if api_detail:
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (incident.serialize()).encode("utf-8"))
+            if export_json:
+                response = _response(start_response, "200 OK", "application/json; charset=utf-8", incident.serialize().encode("utf-8"))
+                return response
+            html_body = render_incident_html(incident, template_path=TEMPLATE_ROOT / "operator_incident.html").encode("utf-8")
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", html_body)
         if path not in {"/", "/api/snapshot"}:
             return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
         try:
