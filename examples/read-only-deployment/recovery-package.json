@@ -1,0 +1,14 @@
+{
+  "artifact_count": 10,
+  "artifact_inventory": [],
+  "created_at_injected": "2026-08-05T12:00:00Z",
+  "deployment_profile_id": "deployment-profile-supervised-read-only-v1",
+  "lifecycle_contract_id": "lifecycle-contract-supervised-read-only-v1",
+  "recovery_package_id": "recovery-package-supervised-read-only-v1",
+  "recovery_point_class": "LAST_VERIFIED_DURABLE_COMMIT",
+  "recovery_time_class": "FAIL_CLOSED_UNTIL_VALIDATED",
+  "schema_version": 1,
+  "source_implementation_digest": "b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46",
+  "source_pinned_file_count": 20,
+  "source_release_commit_sha": "a8c7b29debee12d5c839dff2833ad6af24c2be22"
+}
