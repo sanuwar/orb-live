@@ -204,6 +204,40 @@ class SupervisedOperatorConsoleResult:
     evidence_freshness: str
     source_component_statuses: tuple[tuple[str, str], ...]
 
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "SupervisedOperatorConsoleResult":
+        if not isinstance(raw, Mapping) or set(raw) != RESULT_KEYS:
+            raise ConsoleError("snapshot schema is not exact")
+        if raw["schema_version"] != CONSOLE_SCHEMA_VERSION or type(raw["schema_version"]) is not int:
+            raise ConsoleError("snapshot schema version is unsupported")
+        if not isinstance(raw["blocker_reasons"], list) or any(not isinstance(value, str) for value in raw["blocker_reasons"]):
+            raise ConsoleError("snapshot blockers are malformed")
+        components = raw["source_component_statuses"]
+        if not isinstance(components, Mapping) or set(components) != set(_COMPONENTS) or any(not isinstance(value, str) for value in components.values()):
+            raise ConsoleError("snapshot components are malformed")
+        if any(type(raw[field]) is not bool for field in ("strategy_enabled", "activation_approvals_present", "protection_grounded", "activation_approved", "permits_automated_action", "live_ready", "unattended_ready")) or type(raw["approved_protection_state_count"]) is not int or raw["approved_protection_state_count"] != 0:
+            raise ConsoleSafetyError("snapshot safety boundary is not closed")
+        if raw["strategy_enabled"] or raw["activation_approvals_present"] or raw["protection_grounded"] or raw["activation_approved"] or raw["permits_automated_action"] or raw["live_ready"] or raw["unattended_ready"]:
+            raise ConsoleSafetyError("snapshot safety boundary is not closed")
+        try:
+            action = OperatorAction(raw["recommended_operator_action"])
+        except (TypeError, ValueError):
+            raise ConsoleError("snapshot action is invalid") from None
+        _timestamp(raw["generated_as_of"], "generated_as_of")
+        _reject_private(raw)
+        return cls(
+            schema_version=raw["schema_version"], release_commit_sha=raw["release_commit_sha"], implementation_digest=raw["implementation_digest"],
+            generated_as_of=raw["generated_as_of"], operating_mode=raw["operating_mode"], scheduler_status=raw["scheduler_status"],
+            runner_status=raw["runner_status"], suspension_status=raw["suspension_status"], heartbeat_status=raw["heartbeat_status"],
+            alert_status=raw["alert_status"], acknowledgment_status=raw["acknowledgment_status"], recovery_status=raw["recovery_status"],
+            operational_status=raw["operational_status"], supervised_readiness_status=raw["supervised_readiness_status"],
+            blocker_reasons=tuple(sorted(set(raw["blocker_reasons"]))), recommended_operator_action=action,
+            strategy_enabled=False, activation_approvals_present=False, approved_protection_state_count=0,
+            protection_grounded=False, activation_approved=False, permits_automated_action=False, live_ready=False,
+            unattended_ready=False, evidence_completeness=raw["evidence_completeness"], evidence_freshness=raw["evidence_freshness"],
+            source_component_statuses=tuple((key, components[key]) for key in sorted(_COMPONENTS)),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,

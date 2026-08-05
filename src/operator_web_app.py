@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from src.offline_path_safety import is_repository_data_path
+from src.operator_snapshot_history import HistoryError, HistoryNotFound, SnapshotHistory, compare_snapshots
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.supervised_operator_console import (
     ConsoleError,
@@ -99,6 +100,39 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 
+def _history_list_body(items, *, page: int, page_size: int, total: int) -> str:
+    template = (TEMPLATE_ROOT / "operator_history.html").read_text(encoding="utf-8")
+    rows = "".join(
+        "<tr>" + "".join((f"<td>{html.escape(str(value))}</td>" if key != "snapshot_id" else f'<td><a href="/history/{html.escape(str(value), quote=True)}">{html.escape(str(value))}</a></td>') for key, value in (
+            ("snapshot_id", item["snapshot_id"]), ("generated_as_of", item["generated_as_of"]), ("operational_status", item["operational_status"]),
+            ("supervised_readiness_status", item["supervised_readiness_status"]), ("recommended_operator_action", item["recommended_operator_action"]),
+            ("blocker_reasons", ", ".join(item["blocker_reasons"])), ("suspension_status", item["suspension_status"]),
+            ("heartbeat_status", item["heartbeat_status"]), ("alert_status", item["alert_status"]), ("recovery_status", item["recovery_status"]),
+        )) + "</tr>"
+        for item in items
+    ) or "<tr><td colspan=10>No snapshots found.</td></tr>"
+    values = {"ROWS": rows, "PAGE": str(page), "PAGE_SIZE": str(page_size), "TOTAL": str(total)}
+    for key, value in values.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
+
+
+def _history_detail_body(item, comparison: dict[str, Any]) -> str:
+    template = (TEMPLATE_ROOT / "operator_history_detail.html").read_text(encoding="utf-8")
+    data = item.to_dict()
+    values = {
+        "ID": html.escape(item.snapshot_id), "TIMESTAMP": html.escape(data["generated_as_of"]),
+        "STATUS": html.escape(data["operational_status"]), "READINESS": html.escape(data["supervised_readiness_status"]),
+        "ACTION": html.escape(data["recommended_operator_action"]), "BLOCKERS": html.escape(", ".join(data["blocker_reasons"]) or "None"),
+        "SUSPENSION": html.escape(data["suspension_status"]), "HEARTBEAT": html.escape(data["heartbeat_status"]),
+        "ALERT": html.escape(data["alert_status"]), "RECOVERY": html.escape(data["recovery_status"]),
+        "COMPARISON": "".join(f"<li>{html.escape(key.replace('_', ' ').title())}: {html.escape(', '.join(value) if isinstance(value, list) else str(value))}</li>" for key, value in comparison.items()),
+    }
+    for key, value in values.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
+
+
 def _dashboard_body(result) -> str:
     source = Path(TEMPLATE_ROOT / "operator_dashboard.html").read_text(encoding="utf-8")
     css = Path(STATIC_ROOT / "operator_dashboard.css").read_text(encoding="utf-8")
@@ -141,6 +175,21 @@ class OperatorWebApp:
         as_of = self.config.default_as_of if "as_of" not in query else _parse_as_of(query["as_of"][0])
         return load_console_snapshot(runtime_root=self.config.runtime_root, as_of=as_of)
 
+    def _history_request(self, environ):
+        query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+        allowed = {"as_of", "status", "blocker", "from", "to", "page", "page_size"}
+        if set(query) - allowed or any(len(values) != 1 for values in query.values()):
+            raise HistoryError("history query is invalid")
+        as_of = self.config.default_as_of if "as_of" not in query else _parse_as_of(query["as_of"][0])
+        def integer(name: str, default: int) -> int:
+            try:
+                return default if name not in query else int(query[name][0])
+            except ValueError:
+                raise HistoryError("history pagination is invalid") from None
+        history = SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
+        items, total = history.query(as_of=as_of, status=query.get("status", [None])[0], blocker=query.get("blocker", [None])[0], from_value=query.get("from", [None])[0], to_value=query.get("to", [None])[0], page=integer("page", 1), page_size=integer("page_size", 25))
+        return as_of, history, items, total, integer("page", 1), integer("page_size", 25)
+
     def __call__(self, environ, start_response):
         method = environ.get("REQUEST_METHOD", "GET").upper()
         path = environ.get("PATH_INFO", "/")
@@ -150,6 +199,37 @@ class OperatorWebApp:
             return _response(start_response, "200 OK", "application/json; charset=utf-8", b'{"mode":"READ_ONLY_OPERATOR_UI","status":"UP"}\n')
         if path == "/about":
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _about_body().encode("utf-8"))
+        if path in {"/history", "/api/history"}:
+            try:
+                as_of, history, items, total, page, page_size = self._history_request(environ)
+            except (HistoryError, WebAppConfigError):
+                if path == "/api/history":
+                    return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_HISTORY_LOAD"}\n')
+                return _response(start_response, "503 Service Unavailable", "text/html; charset=utf-8", _error_body().encode("utf-8"))
+            if path == "/api/history":
+                payload = {"schema_version": 1, "page": page, "page_size": page_size, "total_count": total, "items": [item.to_dict() for item in items]}
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _history_list_body([item.to_dict() for item in items], page=page, page_size=page_size, total=total).encode("utf-8"))
+        history_match = path.startswith("/history/") or path.startswith("/api/history/")
+        if history_match:
+            api_detail = path.startswith("/api/")
+            snapshot_id = path.split("/", 3)[-1] if api_detail else path.split("/", 2)[-1]
+            try:
+                query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+                if set(query) - {"as_of"} or len(query.get("as_of", [])) > 1:
+                    raise HistoryError("history query is invalid")
+                as_of = self.config.default_as_of if "as_of" not in query else _parse_as_of(query["as_of"][0])
+                history = SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
+                item = history.get(snapshot_id=snapshot_id, as_of=as_of)
+                current = load_console_snapshot(runtime_root=self.config.runtime_root, as_of=as_of)
+            except HistoryNotFound:
+                return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
+            except (HistoryError, ConsoleError, ConsoleIdentityError, ConsoleSafetyError):
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8" if api_detail else "text/html; charset=utf-8", b'{"status":"FAIL_CLOSED_HISTORY_LOAD"}\n' if api_detail else _error_body().encode("utf-8"))
+            if api_detail:
+                payload = {"schema_version": 1, "snapshot_id": item.snapshot_id, "snapshot": item.snapshot.to_dict(), "comparison": compare_snapshots(current, item.snapshot)}
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _history_detail_body(item, compare_snapshots(current, item.snapshot)).encode("utf-8"))
         if path not in {"/", "/api/snapshot"}:
             return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
         try:
