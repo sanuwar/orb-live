@@ -11,6 +11,7 @@ from urllib.parse import parse_qs
 
 from src.offline_path_safety import is_repository_data_path
 from src.operator_snapshot_history import HistoryError, HistoryNotFound, SnapshotHistory, compare_snapshots
+from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, OperatorEventTimeline, TimelineError, TimelineNotFound
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.supervised_operator_console import (
     ConsoleError,
@@ -133,6 +134,33 @@ def _history_detail_body(item, comparison: dict[str, Any]) -> str:
     return template
 
 
+def _timeline_list_body(events, *, page: int, page_size: int, total: int) -> str:
+    template = (TEMPLATE_ROOT / "operator_timeline.html").read_text(encoding="utf-8")
+    rows = "".join(
+        f'<tr><td><a href="/timeline/{html.escape(event.event_id, quote=True)}">{html.escape(event.occurred_at)}</a></td><td>{html.escape(event.severity.value)}</td><td>{html.escape(event.event_type.value)}</td><td>{html.escape(event.headline)}</td><td>{html.escape(event.source_component)}</td><td>{html.escape(event.operator_action)}</td><td>{html.escape(", ".join(event.blocker_reasons) or "None")}</td></tr>'
+        for event in events
+    ) or "<tr><td colspan=7>No events found.</td></tr>"
+    for key, value in {"ROWS": rows, "PAGE": str(page), "PAGE_SIZE": str(page_size), "TOTAL": str(total)}.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
+
+
+def _timeline_detail_body(event) -> str:
+    template = (TEMPLATE_ROOT / "operator_timeline_detail.html").read_text(encoding="utf-8")
+    data = event.to_dict()
+    values = {
+        "ID": html.escape(data["event_id"]), "TYPE": html.escape(data["event_type"]), "SEVERITY": html.escape(data["severity"]),
+        "OCCURRED": html.escape(data["occurred_at"]), "SOURCE": html.escape(data["source_snapshot_id"]),
+        "COMPONENT": html.escape(data["source_component"]), "HEADLINE": html.escape(data["headline"]),
+        "CODE": html.escape(data["detail_code"]), "STATUS": html.escape(data["operational_status"]),
+        "READINESS": html.escape(data["supervised_readiness_status"]), "BLOCKERS": html.escape(", ".join(data["blocker_reasons"]) or "None"),
+        "ACTION": html.escape(data["operator_action"]),
+    }
+    for key, value in values.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
+
+
 def _dashboard_body(result) -> str:
     source = Path(TEMPLATE_ROOT / "operator_dashboard.html").read_text(encoding="utf-8")
     css = Path(STATIC_ROOT / "operator_dashboard.css").read_text(encoding="utf-8")
@@ -210,6 +238,29 @@ class OperatorWebApp:
                 payload = {"schema_version": 1, "page": page, "page_size": page_size, "total_count": total, "items": [item.to_dict() for item in items]}
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _history_list_body([item.to_dict() for item in items], page=page, page_size=page_size, total=total).encode("utf-8"))
+        if path in {"/timeline", "/api/timeline"}:
+            try:
+                query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+                allowed = {"as_of", "event_type", "severity", "from", "to", "page", "page_size"}
+                if set(query) - allowed or any(len(values) != 1 for values in query.values()):
+                    raise TimelineError("timeline query is invalid")
+                as_of = self.config.default_as_of if "as_of" not in query else _parse_as_of(query["as_of"][0])
+                def integer(name: str, default: int) -> int:
+                    try:
+                        return default if name not in query else int(query[name][0])
+                    except ValueError:
+                        raise TimelineError("timeline pagination is invalid") from None
+                timeline = OperatorEventTimeline(SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT))
+                events, total = timeline.query(as_of=as_of, event_type=query.get("event_type", [None])[0], severity=query.get("severity", [None])[0], from_value=query.get("from", [None])[0], to_value=query.get("to", [None])[0], page=integer("page", 1), page_size=integer("page_size", 25))
+                page, page_size = integer("page", 1), integer("page_size", 25)
+            except TimelineError:
+                if path == "/api/timeline":
+                    return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_TIMELINE_LOAD"}\n')
+                return _response(start_response, "503 Service Unavailable", "text/html; charset=utf-8", _error_body().encode("utf-8"))
+            if path == "/api/timeline":
+                payload = {"schema_version": 1, "page": page, "page_size": page_size, "total_count": total, "items": [event.to_dict() for event in events]}
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _timeline_list_body(events, page=page, page_size=page_size, total=total).encode("utf-8"))
         history_match = path.startswith("/history/") or path.startswith("/api/history/")
         if history_match:
             api_detail = path.startswith("/api/")
@@ -230,6 +281,25 @@ class OperatorWebApp:
                 payload = {"schema_version": 1, "snapshot_id": item.snapshot_id, "snapshot": item.snapshot.to_dict(), "comparison": compare_snapshots(current, item.snapshot)}
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _history_detail_body(item, compare_snapshots(current, item.snapshot)).encode("utf-8"))
+        timeline_match = path.startswith("/timeline/") or path.startswith("/api/timeline/")
+        if timeline_match:
+            api_detail = path.startswith("/api/")
+            event_id = path.split("/", 3)[-1] if api_detail else path.split("/", 2)[-1]
+            try:
+                query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+                if set(query) - {"as_of"} or len(query.get("as_of", [])) > 1:
+                    raise TimelineError("timeline query is invalid")
+                as_of = self.config.default_as_of if "as_of" not in query else _parse_as_of(query["as_of"][0])
+                timeline = OperatorEventTimeline(SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT))
+                event = timeline.get(event_id=event_id, as_of=as_of)
+            except TimelineNotFound:
+                return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
+            except TimelineError:
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8" if api_detail else "text/html; charset=utf-8", b'{"status":"FAIL_CLOSED_TIMELINE_LOAD"}\n' if api_detail else _error_body().encode("utf-8"))
+            if api_detail:
+                payload = {"schema_version": 1, "event": event.to_dict()}
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _timeline_detail_body(event).encode("utf-8"))
         if path not in {"/", "/api/snapshot"}:
             return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
         try:
