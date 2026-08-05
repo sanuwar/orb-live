@@ -4,7 +4,7 @@ Offline engineering contracts are substantially evidenced, but supervised read-o
 
 Audit question: What concrete repository, operational, and human-controlled gaps remain before ORB-LIVE may be deployed for supervised read-only operation, while live writes and unattended operation remain structurally impossible?
 
-Repository SHA: `aaa611b4632b3e92857e74c1232661c8ae5c11a4`
+Repository SHA: `a8c7b29debee12d5c839dff2833ad6af24c2be22`
 Implementation digest: `b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46`
 Pinned implementation files: 20
 
@@ -18,9 +18,9 @@ Pinned implementation files: 20
 ## Category totals
 
 - INTENTIONALLY_BLOCKED: 2
-- MISSING: 13
+- MISSING: 10
 - NOT_APPLICABLE: 0
-- PARTIALLY_VERIFIED: 17
+- PARTIALLY_VERIFIED: 20
 - VERIFIED_COMPLETE: 18
 
 ## Top P0/P1 gaps
@@ -67,10 +67,10 @@ Pinned implementation files: 20
 | Operator acceptance packaging | VERIFIED_COMPLETE | P1_REQUIRED_BEFORE_DEPLOYMENT | HUMAN_APPROVAL | True |
 | Deployment configuration | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | CONFIGURATION | True |
 | Host/process supervision | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | INFRASTRUCTURE | True |
-| Backup and restore | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
+| Backup and restore | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
 | Database durability | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | INFRASTRUCTURE | True |
-| Recovery-point objectives | MISSING | P2_REQUIRED_DURING_PILOT | OPERATIONS | True |
-| Recovery-time objectives | MISSING | P2_REQUIRED_DURING_PILOT | OPERATIONS | True |
+| Recovery-point objectives | PARTIALLY_VERIFIED | P2_REQUIRED_DURING_PILOT | OPERATIONS | True |
+| Recovery-time objectives | PARTIALLY_VERIFIED | P2_REQUIRED_DURING_PILOT | OPERATIONS | True |
 | Log retention | MISSING | P2_REQUIRED_DURING_PILOT | OPERATIONS | True |
 | Alert routing ownership | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | HUMAN_APPROVAL | True |
 | On-call or operator ownership | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | HUMAN_APPROVAL | True |
@@ -345,44 +345,44 @@ Pinned implementation files: 20
 - Next action: Define operator-controlled host supervision outside the runtime.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
-### Backup and restore — MISSING
+### Backup and restore — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: src/offline_evidence_summary.py
+- References: src/offline_recovery_package.py, scripts/validate_offline_recovery_package.py, BACKUP_RESTORE_RECOVERY_RUNBOOK.md
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: No backup target or restore exercise is documented.
+- Missing evidence: The offline package and isolated validation are not a deployed backup target or production restore exercise.
 - Risk: No additional risk is established within repository scope.
-- Next action: Define backup and restore procedures for evidence only.
+- Next action: Choose operator-owned storage and exercise recovery outside runtime authorization.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
 ### Database durability — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: src/durable_alert_outbox.py, src/operator_acknowledgment.py
+- References: src/durable_alert_outbox.py, src/operator_acknowledgment.py, src/offline_recovery_package.py
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: SQLite durability exists in modules, but host storage and recovery semantics are absent.
+- Missing evidence: Existing SQLite stores are integrity-checked offline, but host storage and recovery semantics remain external.
 - Risk: No additional risk is established within repository scope.
-- Next action: Choose durable host storage and exercise recovery.
+- Next action: Define durable host storage and perform an isolated recovery exercise.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
-### Recovery-point objectives — MISSING
+### Recovery-point objectives — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: src/offline_evidence_summary.py
+- References: src/offline_recovery_package.py:RecoveryPointClass, RECOVERY_VALIDATION_CHECKLIST.md
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: No evidence-loss tolerance is defined.
+- Missing evidence: Categorical recovery boundaries exist, but no operator-approved evidence-loss target is established.
 - Risk: No additional risk is established within repository scope.
-- Next action: Set an operator-approved evidence recovery point objective.
+- Next action: Select and approve a recovery-point class for the supervised host.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
-### Recovery-time objectives — MISSING
+### Recovery-time objectives — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: src/offline_safety_orchestrator.py
+- References: src/offline_recovery_package.py:RecoveryTimeClass, RECOVERY_VALIDATION_CHECKLIST.md
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: No restoration time target is defined.
+- Missing evidence: Categorical recovery handling exists, but no measured restoration time target is established.
 - Risk: No additional risk is established within repository scope.
-- Next action: Set and exercise a bounded recovery time objective.
+- Next action: Select and exercise a recovery-time class during pilot preparation.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
 ### Log retention — MISSING
