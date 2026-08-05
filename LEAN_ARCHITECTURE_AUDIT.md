@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 52708
-- Test LOC: 48412
+- Production LOC: 52925
+- Test LOC: 48518
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -38,7 +38,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 6. **NEEDS_RUNTIME_EVIDENCE / HIGH -- Fingerprint and provenance layers bind distinct trust boundaries**
-   Evidence: Trust-related modules include src/attestation_authority.py, src/shadow_readiness_report.py.
+   Evidence: Trust-related modules include scripts/deployment_readiness_audit.py, src/attestation_authority.py, src/shadow_readiness_report.py.
    Interpretation: Preserve by default. Filename and vocabulary overlap cannot prove equivalent identities or trust semantics.
    Estimated removable LOC: production 0, tests 0
 
