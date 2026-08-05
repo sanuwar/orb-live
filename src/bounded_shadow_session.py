@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import json
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Sequence
 from zoneinfo import ZoneInfo
-
 from src.exchange_calendar import CalendarSession, ClassificationReason, DayKind, classify
-from src.offline_fixture_package import (
-    FixtureScenario, OfflineFixturePackage, available_scenarios, build_fixture,
-)
+from src.offline_fixture_package import FixtureScenario, OfflineFixturePackage, available_scenarios, build_fixture
 from scripts.run_offline_shadow_rehearsal import (
     RehearsalReport, ScenarioResult, run_rehearsal,
 )
@@ -33,8 +30,6 @@ _FORBIDDEN = ("account", "credential", "password", "symbol", "quantity", "price"
 
 class ShadowSessionError(ValueError):
     """A bounded session request or projection is invalid."""
-
-
 class MarketDayScenario(str, Enum):
     PRE_MARKET_WAIT = "PRE_MARKET_WAIT"
     REGULAR_SESSION_CALENDAR_BOUNDARY = "REGULAR_SESSION_CALENDAR_BOUNDARY"
@@ -79,7 +74,6 @@ class SessionObservation:
     @property
     def fixture_id(self) -> str:
         return self.fixture.fixture_id
-
     @property
     def passed(self) -> bool:
         return self.expected_state == self.observed_state
@@ -103,7 +97,7 @@ class BoundedShadowSessionReport:
     unattended_ready: bool = False
     protection_grounded: bool = False
     activation_approved: bool = False
-    permits_automated_action: bool = False
+    permits_automated_action: bool = False; _readiness_projection: dict[str, object] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or self.session_id != "shadow-session-market-day":
@@ -118,7 +112,6 @@ class BoundedShadowSessionReport:
     @property
     def all_passed(self) -> bool:
         return all(item.passed for item in self.observations)
-
     def to_dict(self) -> dict[str, object]:
         return {"session_id": self.session_id, "observations": [x.to_dict() for x in self.observations], "evaluated_at": self.evaluated_at.isoformat(), "all_passed": self.all_passed, "live_ready": False, "unattended_ready": False, "protection_grounded": False, "activation_approved": False, "permits_automated_action": False}
 
@@ -159,10 +152,13 @@ def _typed_rehearsal(scenario: MarketDayScenario, fixture: OfflineFixturePackage
     return SessionObservation(scenario, fixture, expected, result.actual_state, result.durable_files)
 
 
-def run_bounded_shadow_session(root: Path, *, tick_timestamps: tuple[datetime, ...] | None = None, maximum_tick_count: int = 2) -> BoundedShadowSessionReport:
+def run_bounded_shadow_session(root: Path, *, tick_timestamps: tuple[datetime, ...] | None = None, maximum_tick_count: int = 2, evaluation_time: datetime = SESSION_NOW) -> BoundedShadowSessionReport:
     """Run one finite synthetic day; every supplied timestamp is runner input."""
+    # The caller owns both the finite schedule and its evaluation instant.
     if not isinstance(maximum_tick_count, int) or isinstance(maximum_tick_count, bool) or maximum_tick_count < 1:
         raise ShadowSessionError("maximum tick count is invalid")
+    if not isinstance(evaluation_time, datetime) or evaluation_time.tzinfo is None or evaluation_time.tzinfo.utcoffset(evaluation_time) is None:
+        raise ShadowSessionError("evaluation timestamp is invalid")
     ticks = (SESSION_NOW - timedelta(minutes=1), SESSION_NOW) if tick_timestamps is None else tick_timestamps
     if not isinstance(ticks, tuple) or len(ticks) != 2 or len(ticks) > maximum_tick_count:
         raise ShadowSessionError("tick schedule is invalid")
@@ -193,7 +189,7 @@ def run_bounded_shadow_session(root: Path, *, tick_timestamps: tuple[datetime, .
         _early_close(packages[FixtureScenario.SAFE_OFFLINE_COMPLETION]),
         _unsupported(packages[FixtureScenario.SAFE_OFFLINE_COMPLETION]),
     )
-    return BoundedShadowSessionReport("shadow-session-market-day", obs)
+    return BoundedShadowSessionReport("shadow-session-market-day", obs, evaluated_at=evaluation_time, _readiness_projection=rehearsal._readiness_projection)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

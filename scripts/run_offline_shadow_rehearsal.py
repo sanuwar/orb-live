@@ -8,7 +8,7 @@ import json
 import os
 import sys
 from contextlib import ExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Sequence
@@ -110,7 +110,7 @@ class RehearsalReport:
     scenarios: tuple[ScenarioResult, ...]
     permits_automated_action: bool = False
     protection_grounded: bool = False
-    activation_approved: bool = False
+    activation_approved: bool = False; _readiness_projection: dict[str, object] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if tuple(item.scenario for item in self.scenarios) != _SCENARIOS:
@@ -635,7 +635,7 @@ def run_rehearsal(
             safe.root, global_safety, recovered, persisted_alert, persisted_ack,
         ))
 
-    return RehearsalReport(tuple(results))
+    return RehearsalReport(tuple(results), _readiness_projection=readiness.to_dict())
 
 
 def main(argv: Sequence[str] | None = None) -> int:
