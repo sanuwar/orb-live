@@ -4,7 +4,7 @@ Offline engineering contracts are substantially evidenced, but supervised read-o
 
 Audit question: What concrete repository, operational, and human-controlled gaps remain before ORB-LIVE may be deployed for supervised read-only operation, while live writes and unattended operation remain structurally impossible?
 
-Repository SHA: `6e2235db86b6c640ddd103536500e669cec67a26`
+Repository SHA: `aaa611b4632b3e92857e74c1232661c8ae5c11a4`
 Implementation digest: `b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46`
 Pinned implementation files: 20
 
@@ -18,15 +18,15 @@ Pinned implementation files: 20
 ## Category totals
 
 - INTENTIONALLY_BLOCKED: 2
-- MISSING: 15
+- MISSING: 13
 - NOT_APPLICABLE: 0
-- PARTIALLY_VERIFIED: 15
+- PARTIALLY_VERIFIED: 17
 - VERIFIED_COMPLETE: 18
 
 ## Top P0/P1 gaps
 
 - P1_REQUIRED_BEFORE_DEPLOYMENT: Runtime entrypoint — Define and review a read-only host invocation without adding write capability.
-- P1_REQUIRED_BEFORE_DEPLOYMENT: Process lifecycle — Choose an operator-controlled process lifecycle and document it.
+- P1_REQUIRED_BEFORE_DEPLOYMENT: Process lifecycle — Review the contract against the selected host procedure without installing a supervisor in this change.
 - P1_REQUIRED_BEFORE_DEPLOYMENT: Environment separation — Define separate offline and supervised-read-only configuration handling.
 - P1_REQUIRED_BEFORE_DEPLOYMENT: Secret-handling boundaries — Review secret injection and redaction at the host boundary without exposing values.
 - P1_REQUIRED_BEFORE_DEPLOYMENT: Broker read-only interface boundary — Perform a separately controlled read-only interface review.
@@ -43,7 +43,7 @@ Pinned implementation files: 20
 | Category | Status | Priority | Type | Applicable to supervised read-only |
 |---|---|---|---|---|
 | Runtime entrypoint | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | CODE | True |
-| Process lifecycle | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
+| Process lifecycle | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
 | Configuration loading | VERIFIED_COMPLETE | P3_LATER_HARDENING | CONFIGURATION | True |
 | Environment separation | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | CONFIGURATION | True |
 | Secret-handling boundaries | VERIFIED_COMPLETE | P1_REQUIRED_BEFORE_DEPLOYMENT | BROKER_DEPENDENCY | True |
@@ -75,7 +75,7 @@ Pinned implementation files: 20
 | Alert routing ownership | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | HUMAN_APPROVAL | True |
 | On-call or operator ownership | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | HUMAN_APPROVAL | True |
 | Runbook completeness | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | DOCUMENTATION | True |
-| Rollback procedure | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
+| Rollback procedure | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
 | Controlled shutdown | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | OPERATIONS | True |
 | Clock/timezone behavior | PARTIALLY_VERIFIED | P1_REQUIRED_BEFORE_DEPLOYMENT | INFRASTRUCTURE | True |
 | Dependency pinning | MISSING | P1_REQUIRED_BEFORE_DEPLOYMENT | CONFIGURATION | True |
@@ -105,14 +105,14 @@ Pinned implementation files: 20
 - Next action: Define and review a read-only host invocation without adding write capability.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
-### Process lifecycle — MISSING
+### Process lifecycle — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: src/read_only_observation_runtime.py
+- References: src/host_process_lifecycle.py:HostProcessLifecycleContract, HOST_PROCESS_LIFECYCLE_RUNBOOK.md
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: No host process start, stop, restart, or supervision evidence exists.
+- Missing evidence: The lifecycle contract is offline evidence; no deployed host process or supervisor has been exercised.
 - Risk: A process can stop or duplicate without controlled operator visibility.
-- Next action: Choose an operator-controlled process lifecycle and document it.
+- Next action: Review the contract against the selected host procedure without installing a supervisor in this change.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
 ### Configuration loading — VERIFIED_COMPLETE
@@ -417,22 +417,22 @@ Pinned implementation files: 20
 
 ### Runbook completeness — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: OFFLINE_COMMISSIONING_CAMPAIGN.md, OFFLINE_CAMPAIGN_ACCEPTANCE.md
+- References: HOST_PROCESS_LIFECYCLE_RUNBOOK.md, CONTROLLED_SHUTDOWN_AND_RESTART.md, OFFLINE_CAMPAIGN_ACCEPTANCE.md
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: Host deployment, recovery, and rollback procedures are absent.
+- Missing evidence: Host deployment and external recovery ownership remain absent.
 - Risk: No additional risk is established within repository scope.
-- Next action: Extend the runbook with only supervised read-only procedures.
+- Next action: Review the lifecycle runbooks with the operator and retain external host procedures.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
-### Rollback procedure — MISSING
+### Rollback procedure — PARTIALLY_VERIFIED
 - Repository evidence: Repository evidence is partial or absent for deployment use.
-- References: src/read_only_observation_runtime.py
+- References: HOST_PROCESS_LIFECYCLE_RUNBOOK.md, CONTROLLED_SHUTDOWN_AND_RESTART.md
 - Test evidence: No test result alone is treated as deployment evidence.
 - Operational evidence: No live operational evidence was used by this offline audit.
-- Missing evidence: No deployment rollback procedure is documented.
+- Missing evidence: The rollback boundary is documented, but a host-specific rollback exercise and owner are absent.
 - Risk: No additional risk is established within repository scope.
-- Next action: Document removal and rollback without changing runtime authorization.
+- Next action: Review and exercise rollback outside runtime authorization.
 - Code required: False; human action required: True; broker access required: False; manifest/checkpoint required: False; stronger-model review: False
 
 ### Controlled shutdown — PARTIALLY_VERIFIED
