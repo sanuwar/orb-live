@@ -113,3 +113,9 @@ def verify_store_integrity(database):
     c=_conn(database,readonly=True)
     try:return not c.execute("PRAGMA integrity_check").fetchone()[0] != "ok" and c.execute("SELECT count(*) FROM operator_events e LEFT JOIN operator_snapshots s ON s.snapshot_id=e.source_snapshot_id WHERE e.source_snapshot_id IS NOT NULL AND s.snapshot_id IS NULL").fetchone()[0]==0
     finally:c.close()
+def inspect_store_content(database):
+    c=_conn(database,readonly=True)
+    try:
+        def one(sql): return c.execute(sql).fetchone()[0]
+        return {"import_batch_count":one("SELECT count(*) FROM import_batches"),"snapshot_count":one("SELECT count(*) FROM operator_snapshots"),"event_count":one("SELECT count(*) FROM operator_events"),"incident_count":one("SELECT count(*) FROM operator_incidents"),"evidence_link_count":one("SELECT count(*) FROM incident_evidence_links"),"newest_imported_at":one("SELECT max(imported_at) FROM import_batches"),"newest_snapshot_at":one("SELECT max(generated_as_of) FROM operator_snapshots"),"newest_event_at":one("SELECT max(occurred_at) FROM operator_events"),"newest_incident_at":one("SELECT max(latest_observed_at) FROM operator_incidents")}
+    finally:c.close()

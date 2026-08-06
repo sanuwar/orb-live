@@ -14,6 +14,7 @@ from src.operator_snapshot_history import HistoryError, HistoryNotFound, Snapsho
 from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, OperatorEventTimeline, TimelineError, TimelineNotFound
 from src.operator_incident_export import IncidentError, IncidentNotFound, OperatorIncidentStore, render_incident_html
 from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, get_incident_projection, snapshot_projection, event_projection)
+from src.operator_store_status import read_store_status
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.supervised_operator_console import (
     ConsoleError,
@@ -142,6 +143,12 @@ def _error_body() -> str:
 def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
+def _store_status_body(status) -> str:
+    template=(TEMPLATE_ROOT / "operator_store_status.html").read_text(encoding="utf-8"); d=status.to_dict()
+    values={"STATUS":d["status"],"SCHEMA":str(d["schema_version"] or "unknown"),"SHA":d["release_commit_sha_short"] or "unknown","DIGEST":d["implementation_digest_short"] or "unknown","INTEGRITY":d["integrity_status"],"IDENTITY":d["identity_status"],"IMPORTS":str(d["import_batch_count"]),"SNAPSHOTS":str(d["snapshot_count"]),"EVENTS":str(d["event_count"]),"INCIDENTS":str(d["incident_count"]),"LINKS":str(d["evidence_link_count"]),"NEWEST_IMPORT":str(d["newest_imported_at"] or "none"),"NEWEST_SNAPSHOT":str(d["newest_snapshot_at"] or "none"),"NEWEST_EVENT":str(d["newest_event_at"] or "none"),"NEWEST_INCIDENT":str(d["newest_incident_at"] or "none"),"BLOCKERS":"".join("<li>"+html.escape(x)+"</li>" for x in d["blocker_reasons"]) or "<li>None</li>"}
+    for key,value in values.items(): template=template.replace("{{"+key+"}}",html.escape(value) if key!="BLOCKERS" else value)
+    return template
+
 
 def _history_list_body(items, *, page: int, page_size: int, total: int) -> str:
     template = (TEMPLATE_ROOT / "operator_history.html").read_text(encoding="utf-8")
@@ -269,6 +276,11 @@ class OperatorWebApp:
             return _response(start_response, "200 OK", "application/json; charset=utf-8", b'{"mode":"READ_ONLY_OPERATOR_UI","status":"UP"}\n')
         if path == "/about":
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _about_body().encode("utf-8"))
+        if path in {"/data-status", "/api/data-status"}:
+            status = read_store_status(self.config.database_path, generated_as_of=self.config.default_as_of.isoformat()) if self.config.backend_mode == "SQLITE_READ_MODEL" else read_store_status(None, generated_as_of=self.config.default_as_of.isoformat())
+            if path == "/api/data-status":
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(status.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode("utf-8"))
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _store_status_body(status).encode("utf-8"))
         if path in {"/history", "/api/history"}:
             try:
                 as_of, history, items, total, page, page_size = self._history_request(environ)
