@@ -375,8 +375,11 @@ class OperatorWebApp:
             if self.config.backend_mode != "SQLITE_READ_MODEL":
                 return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
             try:
-                freshness = summarize_freshness(self.config.database_path, self.config.default_as_of.isoformat())
-            except (OperatorAppStoreError, KeyError):
+                q=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True)
+                if set(q)-{"as_of"} or any(len(v)!=1 for v in q.values()): raise ValueError
+                as_of=self.config.default_as_of if "as_of" not in q else _parse_as_of(q["as_of"][0])
+                freshness = summarize_freshness(self.config.database_path, as_of.isoformat())
+            except (OperatorAppStoreError, KeyError, ValueError):
                 return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_FRESHNESS"}\n')
             payload = freshness.to_dict()
             if path == "/api/freshness":
