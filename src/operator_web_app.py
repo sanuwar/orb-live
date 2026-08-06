@@ -317,12 +317,16 @@ class OperatorWebApp:
             if self.config.backend_mode != "SQLITE_READ_MODEL":
                 return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
             query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
-            if set(query) - {"metric", "bucket"} or any(len(values) != 1 for values in query.values()):
+            if set(query) - {"metric", "bucket", "from", "to", "max_buckets"} or any(len(values) != 1 for values in query.values()):
                 return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_TREND_QUERY"}\n')
             try:
                 events, _ = list_events(self.config.database_path, page=1, page_size=100)
                 values = tuple((row["occurred_at"], 1) for row in events)
-                payload = summarize_trends(values, self.config.default_as_of.isoformat(), query.get("metric", ["event_count"])[0], query.get("bucket", ["HOUR"])[0]).to_dict()
+                start = query.get("from", [None])[0]
+                end = query.get("to", [None])[0]
+                values = tuple((t, v) for t, v in values if (start is None or t >= start) and (end is None or t <= end))
+                max_buckets = int(query["max_buckets"][0]) if "max_buckets" in query else None
+                payload = summarize_trends(values, self.config.default_as_of.isoformat(), query.get("metric", ["event_count"])[0], query.get("bucket", ["HOUR"])[0], max_buckets).to_dict()
             except (ValueError, OperatorAppStoreError, KeyError):
                 return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_TREND_QUERY"}\n')
             if path == "/api/trends":
