@@ -31,7 +31,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check out requested exact SHA
+      - name: Validate requested exact SHA
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
@@ -42,6 +42,22 @@ jobs:
             echo "commit_sha must be exactly 40 hexadecimal characters" >&2
             exit 1
           fi
+
+      - name: Check out requested exact SHA
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assert requested exact SHA is checked out
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
           requested_sha_lower="${REQUESTED_SHA,,}"
           git fetch --no-tags --depth=1 origin "$requested_sha_lower"
           git checkout --detach "$requested_sha_lower"
