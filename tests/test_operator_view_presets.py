@@ -12,3 +12,10 @@ def test_view_catalog_routes_are_read_only(tmp_path):
         result = {}
         body = b"".join(app({"REQUEST_METHOD": "GET", "PATH_INFO": path, "QUERY_STRING": ""}, lambda status, headers: result.update(status=status))).decode()
         assert result["status"] == "200 OK" and "LIVE_READY" not in body and "https://" not in body
+
+def test_preset_api_and_html_use_same_encoded_url(tmp_path):
+    app = OperatorWebApp(OperatorWebAppConfig(runtime_root=tmp_path, default_as_of=datetime(2026, 8, 5, 16, tzinfo=timezone.utc)))
+    result={}; api=b"".join(app({"REQUEST_METHOD":"GET","PATH_INFO":"/api/views","QUERY_STRING":""},lambda status,headers: result.update(status=status))).decode()
+    assert result["status"]=="200 OK" and '"url":"/incidents?active_only=true"' in api
+    result={}; html=b"".join(app({"REQUEST_METHOD":"GET","PATH_INFO":"/views","QUERY_STRING":""},lambda status,headers: result.update(status=status))).decode()
+    assert 'href="/incidents?active_only=true"' in html

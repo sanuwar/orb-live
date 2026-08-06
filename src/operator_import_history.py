@@ -2,10 +2,16 @@
 from __future__ import annotations
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from src.operator_app_store import OperatorAppStoreError, get_import_batch, inspect_store_identity, list_import_batches, verify_store_integrity
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 CONSISTENCY_VALUES=frozenset({"CONSISTENT","COUNT_MISMATCH","IDENTITY_MISMATCH","RELATIONSHIP_MISMATCH","INTEGRITY_FAILURE","UNKNOWN_FAIL_CLOSED"})
+def _time(value):
+    try: parsed=datetime.fromisoformat(value.replace("Z","+00:00"))
+    except (AttributeError,ValueError): raise OperatorAppStoreError("import time filter is invalid") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None: raise OperatorAppStoreError("import time filter is invalid")
+    return parsed
 @dataclass(frozen=True)
 class OperatorImportBatch:
     schema_version:int; import_batch_id:str; imported_at:str; source_release_commit_sha_short:str; source_implementation_digest_short:str; source_count:int; accepted_count:int; rejected_count:int; snapshot_count:int; event_count:int; incident_count:int; evidence_link_count:int; batch_digest_short:str; consistency_status:str; blocker_reasons:tuple[str,...]
@@ -21,8 +27,13 @@ def _project(d):
         state=blockers[0] if blockers else "CONSISTENT"
         return OperatorImportBatch(1,d["import_batch_id"],d["imported_at"],d["source_release_commit_sha"][:12],d["source_implementation_digest"][:12],d["source_count"],d["accepted_count"],d["rejected_count"],d["snapshot_count"],d["event_count"],d["incident_count"],d["evidence_link_count"],d["batch_digest"][:12],state,tuple(blockers))
     except Exception:return OperatorImportBatch(1,str(d.get("import_batch_id","unknown")),str(d.get("imported_at","unknown")),"unknown","unknown",0,0,0,0,0,0,0,"unknown","UNKNOWN_FAIL_CLOSED",("CONSISTENCY_UNAVAILABLE",))
-def list_operator_imports(database, *, page=1, page_size=25):
-    rows,total=list_import_batches(database,page=page,page_size=page_size); out=[]
+def list_operator_imports(database, *, page=1, page_size=25, from_value=None, to_value=None, consistency_status=None, release_sha=None):
+    where=[]; params=[]
+    if from_value: _time(from_value); where.append("imported_at>=?"); params.append(from_value)
+    if to_value: _time(to_value); where.append("imported_at<?"); params.append(to_value)
+    if consistency_status not in {None,"CONSISTENT","COUNT_MISMATCH","IDENTITY_MISMATCH","RELATIONSHIP_MISMATCH","INTEGRITY_FAILURE","UNKNOWN_FAIL_CLOSED"}: raise OperatorAppStoreError("import filter is invalid")
+    if release_sha: where.append("substr(source_release_commit_sha,1,12)=?"); params.append(release_sha)
+    rows,total=list_import_batches(database,page=page,page_size=page_size,where=" AND ".join(where),params=tuple(params)); out=[]
     for row in rows: row["_database"]=database; detail=get_import_batch(database,row["import_batch_id"]); detail["_database"]=database; out.append(_project(detail))
     return tuple(out),total
 def get_operator_import(database, batch_id):

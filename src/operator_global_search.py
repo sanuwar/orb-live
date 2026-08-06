@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from datetime import datetime
-from src.operator_app_store import list_snapshots, list_events, list_incidents, OperatorAppStoreError
+from src.operator_app_store import list_all_table, OperatorAppStoreError
 from src.operator_import_history import list_operator_imports
 TYPES=frozenset({"ALL","SNAPSHOT","EVENT","INCIDENT","IMPORT_BATCH"})
 @dataclass(frozen=True)
@@ -26,17 +26,17 @@ def search_store(database, query, *, result_type="ALL", from_value=None, to_valu
     if lower and upper and lower > upper: raise OperatorAppStoreError("search time range is invalid")
     out=[]
     if result_type in {"ALL","SNAPSHOT"}:
-        rows,_=list_snapshots(database,page=1,page_size=100)
+        rows=list_all_table(database,"operator_snapshots")
         for d in rows:
             fields=[d["snapshot_id"],d["operational_status"],d["supervised_readiness_status"],d["recommended_operator_action"],d["blocker_reasons_json"],d["source_component_statuses_json"]]
             if any(q in str(x).casefold() for x in fields): out.append(SearchResult("SNAPSHOT",d["snapshot_id"],d["generated_as_of"],d["operational_status"],d["supervised_readiness_status"],"operator",(),"/history/"+d["snapshot_id"]))
     if result_type in {"ALL","EVENT"}:
-        rows,_=list_events(database,page=1,page_size=100)
+        rows=list_all_table(database,"operator_events")
         for d in rows:
             fields=[d["event_id"],d["event_type"],d["severity"],d["source_component"],d["headline"],d["detail_code"],d["blocker_reasons_json"],d["operator_action"]]
             if any(q in str(x).casefold() for x in fields): out.append(SearchResult("EVENT",d["event_id"],d["occurred_at"],d["headline"],d["severity"],d["source_component"],tuple(),"/timeline/"+d["event_id"]))
     if result_type in {"ALL","INCIDENT"}:
-        rows,_=list_incidents(database,page=1,page_size=100)
+        rows=list_all_table(database,"operator_incidents")
         for d in rows:
             fields=[d["incident_id"],d["incident_type"],d["severity"],d["observation_status"],d["source_component"],d["headline"],d["detail_code"],d["blocker_reasons_json"],d["recommended_operator_action"]]
             if any(q in str(x).casefold() for x in fields): out.append(SearchResult("INCIDENT",d["incident_id"],d["latest_observed_at"],d["headline"],d["severity"],d["source_component"],tuple(),"/incidents/"+d["incident_id"]))

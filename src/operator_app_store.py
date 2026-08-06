@@ -200,6 +200,20 @@ def list_incidents(database, *, incident_type=None, severity=None, page=1, page_
     if incident_type:w.append("incident_type=?");p.append(incident_type)
     if severity:w.append("severity=?");p.append(severity)
     return _list(database,"operator_incidents",where=" AND ".join(w),params=tuple(p),page=page,page_size=page_size)
+
+def list_all_incidents(database, *, incident_type=None, severity=None):
+    w=[]; p=[]
+    if incident_type: w.append("incident_type=?"); p.append(incident_type)
+    if severity: w.append("severity=?"); p.append(severity)
+    c=_conn(database,readonly=True)
+    try: return [dict(x) for x in c.execute("SELECT * FROM operator_incidents"+(" WHERE "+" AND ".join(w) if w else "")+" ORDER BY latest_observed_at DESC, rowid DESC",tuple(p)).fetchall()]
+    finally: c.close()
+
+def list_all_table(database, table):
+    if table not in {"operator_snapshots","operator_events","operator_incidents"}: raise OperatorAppStoreError("table is invalid")
+    c=_conn(database,readonly=True)
+    try: return [dict(x) for x in c.execute("SELECT * FROM "+table+" ORDER BY rowid DESC").fetchall()]
+    finally: c.close()
 def _get(database,table,key,value):
     c=_conn(database,readonly=True)
     try:
@@ -239,11 +253,11 @@ def inspect_store_content(database):
         def one(sql): return c.execute(sql).fetchone()[0]
         return {"import_batch_count":one("SELECT count(*) FROM import_batches"),"snapshot_count":one("SELECT count(*) FROM operator_snapshots"),"event_count":one("SELECT count(*) FROM operator_events"),"incident_count":one("SELECT count(*) FROM operator_incidents"),"evidence_link_count":one("SELECT count(*) FROM incident_evidence_links"),"newest_imported_at":one("SELECT max(imported_at) FROM import_batches"),"newest_snapshot_at":one("SELECT max(generated_as_of) FROM operator_snapshots"),"newest_event_at":one("SELECT max(occurred_at) FROM operator_events"),"newest_incident_at":one("SELECT max(latest_observed_at) FROM operator_incidents")}
     finally:c.close()
-def list_import_batches(database, *, page=1, page_size=25):
+def list_import_batches(database, *, page=1, page_size=25, where="", params=()):
     if type(page)!=int or page<1 or type(page_size)!=int or not 1<=page_size<=100: raise OperatorAppStoreError("pagination is invalid")
     c=_conn(database,readonly=True)
     try:
-        total=c.execute("SELECT count(*) FROM import_batches").fetchone()[0]; rows=c.execute("SELECT * FROM import_batches ORDER BY imported_at DESC, import_batch_id DESC LIMIT ? OFFSET ?",(page_size,(page-1)*page_size)).fetchall(); return [dict(x) for x in rows],total
+        clause=(" WHERE "+where) if where else ""; total=c.execute("SELECT count(*) FROM import_batches"+clause,params).fetchone()[0]; rows=c.execute("SELECT * FROM import_batches"+clause+" ORDER BY imported_at DESC, import_batch_id DESC LIMIT ? OFFSET ?",(*params,page_size,(page-1)*page_size)).fetchall(); return [dict(x) for x in rows],total
     finally:c.close()
 def get_import_batch(database, batch_id):
     c=_conn(database,readonly=True)
