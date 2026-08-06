@@ -29,6 +29,7 @@ from src.operator_incident_index import list_incident_index
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
+from src.operator_route_contracts import route_matches
 from src.supervised_operator_console import (
     ConsoleError,
     ConsoleIdentityError,
@@ -299,6 +300,8 @@ class OperatorWebApp:
         path = environ.get("PATH_INFO", "/")
         if method != "GET":
             return _response(start_response, "405 Method Not Allowed", "text/plain; charset=utf-8", b"Method not allowed\n")
+        if not route_matches(path):
+            return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
         if path == "/healthz":
             return _response(start_response, "200 OK", "application/json; charset=utf-8", b'{"mode":"READ_ONLY_OPERATOR_UI","status":"UP"}\n')
         if path == "/about":
