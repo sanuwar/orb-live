@@ -15,6 +15,7 @@ from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, Oper
 from src.operator_incident_export import IncidentError, IncidentNotFound, OperatorIncidentStore, render_incident_html
 from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, get_incident_projection, snapshot_projection, event_projection)
 from src.operator_store_status import read_store_status
+from src.operator_app_diagnostics import read_app_diagnostics
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
@@ -146,7 +147,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Imports","/imports"),("Search","/search"),("Data Status","/data-status"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Imports","/imports"),("Search","/search"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -292,6 +293,11 @@ class OperatorWebApp:
             return _response(start_response, "200 OK", "application/json; charset=utf-8", b'{"mode":"READ_ONLY_OPERATOR_UI","status":"UP"}\n')
         if path == "/about":
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _about_body().encode("utf-8"))
+        if path in {"/diagnostics", "/api/diagnostics"}:
+            projection=read_app_diagnostics(self.config,self.config.default_as_of.isoformat())
+            if path=="/api/diagnostics": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(projection.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode())
+            template=(TEMPLATE_ROOT/"operator_diagnostics.html").read_text(encoding="utf-8"); data=projection.to_dict(); template=template.replace("{{STATUS}}",html.escape(data["application_status"])).replace("{{BACKEND}}",html.escape(data["backend_mode"])).replace("{{SCHEMA}}",html.escape(data["schema_status"])).replace("{{IDENTITY}}",html.escape(data["identity_status"])).replace("{{INTEGRITY}}",html.escape(data["integrity_status"])).replace("{{LOOPBACK}}","YES" if data["loopback_only"] else "NO").replace("{{BLOCKERS}}","".join("<li>"+html.escape(x)+"</li>" for x in data["blocker_reasons"]) or "<li>None</li>")
+            return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Diagnostics")+template).encode())
         if path in {"/search", "/api/search"}:
             if self.config.backend_mode != "SQLITE_READ_MODEL":
                 return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
