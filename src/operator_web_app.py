@@ -24,6 +24,7 @@ from src.operator_evidence_freshness import summarize_freshness
 from src.operator_evidence_coverage import read_coverage
 from src.operator_view_presets import list_presets
 from src.operator_evidence_trends import summarize_trends
+from src.operator_release_info import read_release_info
 from src.operator_incident_index import list_incident_index
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
@@ -156,7 +157,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Activity","/activity"),("Blockers","/blockers"),("Freshness","/freshness"),("Coverage","/coverage"),("Views","/views"),("Trends","/trends"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Activity","/activity"),("Blockers","/blockers"),("Freshness","/freshness"),("Coverage","/coverage"),("Views","/views"),("Trends","/trends"),("Release","/release"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -328,6 +329,12 @@ class OperatorWebApp:
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
             rows = "".join(f'<li>{html.escape(str(row["bucket_start"]))}: {html.escape(str(row["value"]))}</li>' for row in payload["buckets"]) or "<li>No trend evidence available.</li>"
             return _response(start_response, "200 OK", "text/html; charset=utf-8", (_navigation("Trends") + f'<main id="content"><h1>Evidence trends</h1><p>READ-ONLY descriptive summary; no forecast or recommendation.</p><ul>{rows}</ul></main>').encode())
+        if path in {"/release", "/api/release"}:
+            payload = read_release_info(REPOSITORY_ROOT).to_dict()
+            if path == "/api/release":
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            rows = "".join(f'<li>{html.escape(str(key))}: {html.escape(str(value))}</li>' for key, value in payload.items())
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", (_navigation("Release") + f'<main id="content"><h1>Local release information</h1><p>READ-ONLY build identity; no runtime authority.</p><ul>{rows}</ul></main>').encode())
         if path in {"/compare", "/api/compare"}:
             try:
                 q=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"left","right","view"}
