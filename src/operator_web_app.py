@@ -15,6 +15,7 @@ from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, Oper
 from src.operator_incident_export import IncidentError, IncidentNotFound, OperatorIncidentStore, render_incident_html
 from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, get_incident_projection, snapshot_projection, event_projection)
 from src.operator_store_status import read_store_status
+from src.operator_import_history import list_operator_imports, get_operator_import
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.supervised_operator_console import (
     ConsoleError,
@@ -149,6 +150,16 @@ def _store_status_body(status) -> str:
     for key,value in values.items(): template=template.replace("{{"+key+"}}",html.escape(value) if key!="BLOCKERS" else value)
     return template
 
+def _imports_body(items):
+    template=(TEMPLATE_ROOT / "operator_import_history.html").read_text(encoding="utf-8")
+    rows=[]
+    for x in items:
+        values=(x.import_batch_id,x.imported_at,x.source_release_commit_sha_short,x.source_count,x.accepted_count,x.rejected_count,x.snapshot_count,x.event_count,x.incident_count,x.consistency_status)
+        cells=[f'<td><a href="/imports/{html.escape(x.import_batch_id,quote=True)}">{html.escape(str(x.import_batch_id))}</a></td>']+[f"<td>{html.escape(str(v))}</td>" for v in values[1:]]
+        rows.append("<tr>"+"".join(cells)+"</tr>")
+    rows="".join(rows) or '<tr><td colspan="10">No imports found.</td></tr>'
+    return template.replace("{{ROWS}}",rows)
+
 
 def _history_list_body(items, *, page: int, page_size: int, total: int) -> str:
     template = (TEMPLATE_ROOT / "operator_history.html").read_text(encoding="utf-8")
@@ -281,6 +292,27 @@ class OperatorWebApp:
             if path == "/api/data-status":
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(status.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode("utf-8"))
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _store_status_body(status).encode("utf-8"))
+        if path in {"/imports", "/api/imports"}:
+            if self.config.backend_mode != "SQLITE_READ_MODEL":
+                return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            try:
+                query=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"from","to","consistency_status","release_sha","page","page_size"}
+                if set(query)-allowed or any(len(v)!=1 for v in query.values()): raise OperatorAppStoreError("invalid filter")
+                page=int(query.get("page",[1])[0]); size=int(query.get("page_size",[25])[0]); items,total=list_operator_imports(self.config.database_path,page=page,page_size=size)
+                if query.get("consistency_status"): items=tuple(x for x in items if x.consistency_status==query["consistency_status"][0])
+                if query.get("release_sha"): items=tuple(x for x in items if x.source_release_commit_sha_short==query["release_sha"][0])
+            except Exception:
+                return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_IMPORT_HISTORY"}\n')
+            if path=="/api/imports":
+                payload={"schema_version":1,"page":page,"page_size":size,"total_count":total,"items":[x.to_dict() for x in items]}; return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\n").encode())
+            return _response(start_response,"200 OK","text/html; charset=utf-8",_imports_body(items).encode())
+        if path.startswith("/imports/") or path.startswith("/api/imports/"):
+            api=path.startswith("/api/"); batch_id=path.split("/",3)[-1]
+            if self.config.backend_mode!="SQLITE_READ_MODEL": return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            try: item=get_operator_import(self.config.database_path,batch_id)
+            except Exception: return _response(start_response,"404 Not Found","text/plain; charset=utf-8",b"Not found\n")
+            if api: return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps({"schema_version":1,"import_batch":item.to_dict()},sort_keys=True,separators=(",",":"))+"\n").encode())
+            return _response(start_response,"200 OK","text/html; charset=utf-8",(TEMPLATE_ROOT/"operator_import_detail.html").read_text(encoding="utf-8").replace("{{DATA}}",html.escape(json.dumps(item.to_dict(),sort_keys=True,indent=2))).encode())
         if path in {"/history", "/api/history"}:
             try:
                 as_of, history, items, total, page, page_size = self._history_request(environ)
