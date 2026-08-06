@@ -1,6 +1,7 @@
 """Hardcoded, relative, non-persistent operator view presets."""
 from __future__ import annotations
 from dataclasses import dataclass
+import json
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 
@@ -28,6 +29,46 @@ def get_preset(preset_id):
     for preset in PRESETS:
         if preset.preset_id==preset_id:return preset
     raise KeyError("preset is unknown")
+
+
+def _request(application, path, query="", method="GET"):
+    captured = {}
+    body = b"".join(application({"REQUEST_METHOD": method, "PATH_INFO": path, "QUERY_STRING": query}, lambda status, headers: captured.update(status=status, headers=headers)))
+    return captured.get("status", ""), captured.get("headers", []), body
+
+
+def _query_result(payload, query):
+    """Apply the independently authored query semantics to an unfiltered payload."""
+    if "items" in payload:
+        items = list(payload["items"])
+        for key, value in query.items():
+            if key == "active_only":
+                items = [item for item in items if item.get("active") == "ACTIVE"]
+            elif key == "severity":
+                items = [item for item in items if item.get("severity") == value]
+            elif key == "status":
+                items = [item for item in items if item.get("operational_status") == value]
+            else:
+                raise ValueError("preset query semantic is not independently defined")
+        expected = dict(payload)
+        expected["items"] = items
+        if "total_count" in expected:
+            expected["total_count"] = len(items)
+        return expected
+    if "blocker_rows" in payload:
+        rows = list(payload["blocker_rows"])
+        if query.get("active_only") == "true":
+            rows = [row for row in rows if row.get("currently_observed") is True]
+        elif query:
+            raise ValueError("blocker query semantic is not independently defined")
+        expected = dict(payload)
+        expected["blocker_rows"] = rows
+        expected["unique_blocker_count"] = len(rows)
+        expected["total_blocker_occurrences"] = sum(row.get("occurrence_count", 0) for row in rows)
+        return expected
+    if query:
+        raise ValueError("preset query target has no independently observable state")
+    return dict(payload)
 
 
 def validate_preset_routes(application, presets=None):
@@ -62,6 +103,19 @@ def validate_preset_routes(application, presets=None):
             raise ValueError("preset target did not return HTML")
         if any(key.lower() == "set-cookie" for key, _ in captured.get("headers", [])) or b"https://" in body or b"http://" in body:
             raise ValueError("preset response is not local and stateless")
+        api_path = "/api" + preset.target_route
+        api_status, api_headers, api_body = _request(application, api_path, query)
+        baseline_status, _, baseline_body = _request(application, api_path)
+        if api_status != "200 OK" or baseline_status != "200 OK":
+            raise ValueError("preset API parser route was not executable")
+        try:
+            actual_state = json.loads(api_body.decode("utf-8"))
+            baseline_state = json.loads(baseline_body.decode("utf-8"))
+            expected_state = _query_result(baseline_state, expected)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError("preset normalized query state is not independently observable") from exc
+        if actual_state != expected_state:
+            raise ValueError("preset parser normalized query state mismatch")
         unknown = dict(expected); unknown["__unknown_preset_key"] = "1"
         invalid_capture={}; application({"REQUEST_METHOD":"GET","PATH_INFO":path,"QUERY_STRING":urlencode(unknown,safe="")}, lambda status, headers: invalid_capture.update(status=status))
         if invalid_capture.get("status") == "200 OK":
