@@ -186,7 +186,6 @@ def list_trend_records(database, metric):
     queries={
         "event_count": ("SELECT occurred_at, 1 AS value FROM operator_events ORDER BY occurred_at ASC, event_id ASC", lambda r:int(r["value"])),
         "blocker_occurrences": ("SELECT occurred_at, blocker_reasons_json FROM operator_events ORDER BY occurred_at ASC, event_id ASC", lambda r:len(_validate_json(r["blocker_reasons_json"],list))),
-        "active_incidents": ("SELECT latest_observed_at, observation_status FROM operator_incidents ORDER BY latest_observed_at ASC, incident_id ASC", lambda r:1 if r["observation_status"]=="ACTIVE" else 0),
         "stale_evidence": ("SELECT generated_as_of, evidence_freshness FROM operator_snapshots ORDER BY generated_as_of ASC, snapshot_id ASC", lambda r:1 if r["evidence_freshness"]=="STALE" else 0),
         "missing_evidence": ("SELECT generated_as_of, evidence_completeness FROM operator_snapshots ORDER BY generated_as_of ASC, snapshot_id ASC", lambda r:1 if r["evidence_completeness"]!="COMPLETE" else 0),
         "import_count": ("SELECT imported_at, 1 AS value FROM import_batches ORDER BY imported_at ASC, import_batch_id ASC", lambda r:int(r["value"])),
