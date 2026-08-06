@@ -16,6 +16,7 @@ from src.operator_incident_export import IncidentError, IncidentNotFound, Operat
 from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, get_incident_projection, snapshot_projection, event_projection)
 from src.operator_store_status import read_store_status
 from src.operator_app_diagnostics import read_app_diagnostics
+from src.operator_incident_index import list_incident_index
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
@@ -147,7 +148,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Imports","/imports"),("Search","/search"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -298,6 +299,16 @@ class OperatorWebApp:
             if path=="/api/diagnostics": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(projection.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode())
             template=(TEMPLATE_ROOT/"operator_diagnostics.html").read_text(encoding="utf-8"); data=projection.to_dict(); template=template.replace("{{STATUS}}",html.escape(data["application_status"])).replace("{{BACKEND}}",html.escape(data["backend_mode"])).replace("{{SCHEMA}}",html.escape(data["schema_status"])).replace("{{IDENTITY}}",html.escape(data["identity_status"])).replace("{{INTEGRITY}}",html.escape(data["integrity_status"])).replace("{{LOOPBACK}}","YES" if data["loopback_only"] else "NO").replace("{{BLOCKERS}}","".join("<li>"+html.escape(x)+"</li>" for x in data["blocker_reasons"]) or "<li>None</li>")
             return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Diagnostics")+template).encode())
+        if path in {"/incidents", "/api/incidents"}:
+            if self.config.backend_mode!="SQLITE_READ_MODEL": return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            try:
+                q=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"incident_type","severity","observation_status","source_component","active_only","from","to","page","page_size"}
+                if set(q)-allowed or any(len(v)!=1 for v in q.values()): raise OperatorAppStoreError("invalid incident filter")
+                items,total=list_incident_index(self.config.database_path,incident_type=q.get("incident_type",[None])[0],severity=q.get("severity",[None])[0],observation_status=q.get("observation_status",[None])[0],source_component=q.get("source_component",[None])[0],active_only=q.get("active_only",["false"])[0]=="true",from_value=q.get("from",[None])[0],to_value=q.get("to",[None])[0],page=int(q.get("page",[1])[0]),page_size=int(q.get("page_size",[25])[0])); payload={"schema_version":1,"page":int(q.get("page",[1])[0]),"page_size":int(q.get("page_size",[25])[0]),"total_count":total,"items":[x.to_dict() for x in items]}
+            except (ValueError,OperatorAppStoreError): return _response(start_response,"400 Bad Request","application/json; charset=utf-8",b'{"status":"INVALID_INCIDENT_FILTER"}\n')
+            if path=="/api/incidents": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\n").encode())
+            rows="".join(f'<li><a href="{html.escape(x.to_dict()["detail_url"],quote=True)}">{html.escape(x.to_dict()["incident_id"])}</a> {html.escape(x.to_dict()["severity"])} {html.escape(x.to_dict()["headline"])}</li>' for x in items) or "<li>No incidents found.</li>"
+            return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Incidents")+f'<main id="content"><h1>Incidents</h1><p>READ-ONLY</p><ul>{rows}</ul></main>').encode())
         if path in {"/search", "/api/search"}:
             if self.config.backend_mode != "SQLITE_READ_MODEL":
                 return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
