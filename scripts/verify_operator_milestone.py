@@ -18,7 +18,7 @@ from scripts.create_operator_demo import create_demo
 from src.operator_app_store import CONTENT_VERIFIED, compute_operator_content_digest, inspect_store_content, read_model_integrity_status
 from src.operator_framework import ApplicationRouteTable
 from src.operator_route_contracts import construct_operator_application, discover_application_routes, verify_contracts
-from src.operator_view_presets import validate_preset_routes
+from src.operator_view_presets import PRESETS, validate_preset_routes
 from src.operator_web_app import OperatorWebApp, OperatorWebAppConfig
 from src.read_only_authorization_manifest import checkpoint_implementation_digest
 
@@ -77,6 +77,29 @@ def _route_negative_controls():
         raise RuntimeError("application route table is not the runtime route gate")
 
 
+class _AlwaysSuccessParser:
+    def __init__(self, application):
+        self.route_table = application.route_table
+        self.config = application.config
+
+    def __call__(self, environ, start_response):
+        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
+        return [b"<html><body>accepted</body></html>"]
+
+
+def _preset_negative_controls(application):
+    from dataclasses import replace
+    def expect_failure(action, label):
+        try:
+            action()
+        except ValueError:
+            return
+        raise RuntimeError(label + " negative control unexpectedly passed")
+    expect_failure(lambda: validate_preset_routes(application, (replace(PRESETS[0], target_route="/removed-verifier-route"),)), "missing preset route")
+    expect_failure(lambda: validate_preset_routes(application, (replace(PRESETS[0], target_route="/renamed-verifier-route"),)), "renamed preset route")
+    expect_failure(lambda: validate_preset_routes(_AlwaysSuccessParser(application)), "parser drift")
+
+
 def main():
     as_of = datetime(2026, 8, 5, 16, tzinfo=timezone.utc)
     repository = Path(__file__).resolve().parents[1]
@@ -89,6 +112,7 @@ def main():
             raise RuntimeError("framework-derived route count changed")
         rows = verify_contracts(app)
         _route_negative_controls()
+        _preset_negative_controls(app)
         before_digest = compute_operator_content_digest(database)
         before_counts = inspect_store_content(database)
         before_safety_hash = _safety_hash(database)
@@ -112,7 +136,7 @@ def main():
         app_source = (repository / "src/operator_web_app.py").read_text(encoding="utf-8")
         if any(token in app_source for token in ("requests", "httpx", "socket", "robin_stocks", "INSERT ", "UPDATE ", "DELETE ")):
             raise RuntimeError("operator app has a forbidden mutation or network surface")
-        report = {"status":"PASS","demo":"deterministic synthetic SQLite read model","route_discovery":"CONSTRUCTED_APPLICATION_ROUTE_TABLE","route_count":len(routes),"contract_route_count":len(rows),"route_statuses":statuses,"preset_count":len(preset_results),"negative_controls":{"undocumented_route":"PASS","prefix_route":"PASS","mounted_route":"PASS"},"trend_metrics":5,"trend_bucket_modes":["HOUR","DAY"],"before_database_content_digest":before_digest,"after_database_content_digest":after_digest,"independent_anchor_status":CONTENT_VERIFIED,"before_row_counts":before_counts,"after_row_counts":after_counts,"before_safety_hash":before_safety_hash,"after_safety_hash":after_safety_hash,"implementation_digest":checkpoint_implementation_digest(repository),"implementation_digest_scope":"SOURCE_CHECKPOINT_CLOSURE","read_model_authority":"NON_AUTHORITATIVE","safety":{"strategy_enabled":False,"activation_approved":False,"permits_automated_action":False,"live_ready":False,"unattended_ready":False},"no_broker":True,"no_outbound_network":True,"no_private_data":True}
+        report = {"status":"PASS","demo":"deterministic synthetic SQLite read model","route_discovery":"CONSTRUCTED_APPLICATION_ROUTE_TABLE","route_count":len(routes),"contract_route_count":len(rows),"route_statuses":statuses,"preset_count":len(preset_results),"preset_validation":"ALL_CURRENT_PRESETS_ACTUAL_ROUTES_AND_PARSERS","negative_controls":{"undocumented_route":"PASS","prefix_route":"PASS","mounted_route":"PASS","missing_preset_route":"PASS","parser_drift":"PASS"},"trend_metrics":5,"trend_bucket_modes":["HOUR","DAY"],"before_database_content_digest":before_digest,"after_database_content_digest":after_digest,"independent_anchor_status":CONTENT_VERIFIED,"before_row_counts":before_counts,"after_row_counts":after_counts,"before_safety_hash":before_safety_hash,"after_safety_hash":after_safety_hash,"implementation_digest":checkpoint_implementation_digest(repository),"implementation_digest_scope":"SOURCE_CHECKPOINT_CLOSURE","read_model_authority":"NON_AUTHORITATIVE","safety":{"strategy_enabled":False,"activation_approved":False,"permits_automated_action":False,"live_ready":False,"unattended_ready":False},"no_broker":True,"no_outbound_network":True,"no_private_data":True}
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
         gc.collect()
     return 0

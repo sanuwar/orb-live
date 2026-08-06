@@ -11,7 +11,7 @@ from urllib.parse import parse_qs
 
 from src.offline_path_safety import is_repository_data_path
 from src.operator_snapshot_history import HistoryError, HistoryNotFound, SnapshotHistory, compare_snapshots
-from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, OperatorEventTimeline, TimelineError, TimelineNotFound
+from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, SEVERITY_FILTERS, OperatorEventTimeline, TimelineError, TimelineNotFound
 from src.operator_incident_export import IncidentError, IncidentNotFound, OperatorIncidentStore, render_incident_html
 from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, list_incidents, get_incident_projection, snapshot_projection, event_projection, list_trend_records)
 from src.operator_store_status import read_store_status
@@ -47,6 +47,8 @@ PORT_MINIMUM = 1024
 PORT_MAXIMUM = 65535
 REFRESH_MINIMUM = 0
 REFRESH_MAXIMUM = 300
+_HISTORY_STATUS_FILTERS = frozenset({"COMPLETE", "INCOMPLETE", "REVIEW_ONLY", "REVIEW_REQUIRED", "OFFLINE_HEALTHY", "SUSPENDED", "CONFIGURATION_INVALID", "CONFIGURATION_REVIEW_REQUIRED", "BLOCKED", "STALE", "ACTIVE"})
+_PRESET_SEVERITY_FILTERS = SEVERITY_FILTERS | {"HIGH"}
 
 
 _OPERATOR_BASE_PATHS = (
@@ -181,6 +183,8 @@ def _parse_as_of(value: str) -> datetime:
 class _SQLiteHistory:
     def __init__(self, database): self.database = database
     def query(self, *, as_of, status=None, blocker=None, from_value=None, to_value=None, page=1, page_size=25):
+        if status is not None and status not in _HISTORY_STATUS_FILTERS:
+            raise HistoryError("history status filter is invalid")
         rows, _ = list_snapshots(self.database, page=1, page_size=100); items=[snapshot_projection(x) for x in rows]
         if status: items=[x for x in items if x.to_dict()["operational_status"]==status or x.to_dict()["supervised_readiness_status"]==status]
         if blocker: items=[x for x in items if blocker in x.to_dict()["blocker_reasons"]]
@@ -378,6 +382,8 @@ class OperatorWebApp:
             return _response(start_response, "405 Method Not Allowed", "text/plain; charset=utf-8", b"Method not allowed\n")
         if self.route_table.match(path, method) is None:
             return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
+        if path in {"/activity", "/api/activity", "/data-status", "/api/data-status"} and parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True):
+            return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_QUERY"}\n')
         if path == "/healthz":
             return _response(start_response, "200 OK", "application/json; charset=utf-8", b'{"mode":"READ_ONLY_OPERATOR_UI","status":"UP"}\n')
         if path == "/about":
@@ -469,6 +475,8 @@ class OperatorWebApp:
             rows = "".join(f'<li>{html.escape(str(row["evidence_type"]))}: {html.escape(str(row["freshness_class"]))} at {html.escape(str(row["observed_at"]))}</li>' for row in payload["evidence_rows"]) or "<li>No evidence available.</li>"
             return _response(start_response, "200 OK", "text/html; charset=utf-8", (_navigation("Freshness") + f'<main id="content"><h1>Evidence freshness</h1><p>READ-ONLY; freshness does not imply runtime readiness.</p><ul>{rows}</ul></main>').encode())
         if path in {"/coverage", "/api/coverage"}:
+            if parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True):
+                return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_QUERY"}\n')
             if self.config.backend_mode != "SQLITE_READ_MODEL":
                 return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
             try:
@@ -502,7 +510,7 @@ class OperatorWebApp:
             if self.config.backend_mode!="SQLITE_READ_MODEL": return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
             try:
                 q=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"incident_type","severity","observation_status","source_component","active_only","from","to","page","page_size"}
-                if set(q)-allowed or any(len(v)!=1 for v in q.values()): raise OperatorAppStoreError("invalid incident filter")
+                if set(q)-allowed or any(len(v)!=1 for v in q.values()) or q.get("active_only",["false"])[0] not in {"true","false"}: raise OperatorAppStoreError("invalid incident filter")
                 items,total=list_incident_index(self.config.database_path,incident_type=q.get("incident_type",[None])[0],severity=q.get("severity",[None])[0],observation_status=q.get("observation_status",[None])[0],source_component=q.get("source_component",[None])[0],active_only=q.get("active_only",["false"])[0]=="true",from_value=q.get("from",[None])[0],to_value=q.get("to",[None])[0],page=int(q.get("page",[1])[0]),page_size=int(q.get("page_size",[25])[0])); payload={"schema_version":1,"page":int(q.get("page",[1])[0]),"page_size":int(q.get("page_size",[25])[0]),"total_count":total,"items":[x.to_dict() for x in items]}
             except (ValueError,OperatorAppStoreError): return _response(start_response,"400 Bad Request","application/json; charset=utf-8",b'{"status":"INVALID_INCIDENT_FILTER"}\n')
             if path=="/api/incidents": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\n").encode())
@@ -563,6 +571,8 @@ class OperatorWebApp:
                 allowed = {"as_of", "event_type", "severity", "from", "to", "page", "page_size"}
                 if set(query) - allowed or any(len(values) != 1 for values in query.values()):
                     raise TimelineError("timeline query is invalid")
+                if query.get("severity", [None])[0] is not None and query["severity"][0] not in _PRESET_SEVERITY_FILTERS:
+                    raise TimelineError("timeline severity is invalid")
                 as_of = self.config.default_as_of if "as_of" not in query else _parse_as_of(query["as_of"][0])
                 def integer(name: str, default: int) -> int:
                     try:
