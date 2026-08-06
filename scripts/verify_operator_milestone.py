@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from src.operator_app_store import compute_operator_content_digest, inspect_store_content
 from src.operator_route_contracts import discover_application_routes, route_contracts, verify_contracts
+from src.operator_view_presets import validate_preset_routes
 from src.operator_web_app import OperatorWebApp, OperatorWebAppConfig
 from scripts.create_operator_demo import create_demo
 
@@ -25,13 +26,15 @@ def main():
         before_digest=compute_operator_content_digest(database); before_counts=inspect_store_content(database)
         paths=[x for x in discover_application_routes() if "{" not in x and x not in {"/api/snapshot"}]
         statuses={path:_request(app,path)[0] for path in paths}
-        for metric in ("blocker_occurrences","active_incidents","event_count","stale_evidence","missing_evidence","import_count"):
+        if _request(app,"/api/trends","metric=active_incidents&bucket=HOUR")[0] != "400 Bad Request": raise RuntimeError("unsupported active incident history did not fail closed")
+        for metric in ("blocker_occurrences","event_count","stale_evidence","missing_evidence","import_count"):
             for bucket in ("HOUR","DAY"): _request(app,"/api/trends",f"metric={metric}&bucket={bucket}")
         for preset in ("/views","/api/views","/freshness","/api/freshness","/api/release","/api/data-status","/api/diagnostics"): _request(app,preset)
         after_digest=compute_operator_content_digest(database); after_counts=inspect_store_content(database)
         if before_digest!=after_digest or before_counts!=after_counts: raise RuntimeError("GET mutated read model")
         if not all(not row["permits_database_write"] and not row["permits_outbound_network"] and not row["exposes_private_data"] for row in verify_contracts()): raise RuntimeError("route safety contract mismatch")
-        report={"status":"PASS","demo":"deterministic synthetic SQLite read model","route_count":len(discover_application_routes()),"contract_route_count":len(verify_contracts()),"route_statuses":statuses,"trend_metrics":5,"trend_bucket_modes":["HOUR","DAY"],"before_database_content_digest":before_digest,"after_database_content_digest":after_digest,"before_row_counts":before_counts,"after_row_counts":after_counts,"implementation_digest_scope":"SOURCE_CHECKPOINT_CLOSURE","read_model_authority":"NON_AUTHORITATIVE","safety":{"strategy_enabled":False,"activation_approved":False,"permits_automated_action":False,"live_ready":False,"unattended_ready":False},"no_broker":True,"no_outbound_network":True,"no_private_data":True}
+        preset_results=validate_preset_routes(app)
+        report={"status":"PASS","demo":"deterministic synthetic SQLite read model","route_count":len(discover_application_routes()),"contract_route_count":len(verify_contracts()),"route_statuses":statuses,"preset_count":len(preset_results),"trend_metrics":5,"trend_bucket_modes":["HOUR","DAY"],"before_database_content_digest":before_digest,"after_database_content_digest":after_digest,"before_row_counts":before_counts,"after_row_counts":after_counts,"implementation_digest_scope":"SOURCE_CHECKPOINT_CLOSURE","read_model_authority":"NON_AUTHORITATIVE","safety":{"strategy_enabled":False,"activation_approved":False,"permits_automated_action":False,"live_ready":False,"unattended_ready":False},"no_broker":True,"no_outbound_network":True,"no_private_data":True}
         print(json.dumps(report,sort_keys=True,separators=(",",":")))
     return 0
 
