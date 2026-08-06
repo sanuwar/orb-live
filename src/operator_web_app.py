@@ -17,6 +17,7 @@ from src.operator_app_store import (OperatorAppStoreError, inspect_store_identit
 from src.operator_store_status import read_store_status
 from src.operator_app_diagnostics import read_app_diagnostics
 from src.operator_snapshot_compare import compare_snapshot_items
+from src.operator_evidence_export import catalog_event,catalog_import,catalog_incident,catalog_snapshot,safe_json
 from src.operator_incident_index import list_incident_index
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
@@ -149,7 +150,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -306,6 +307,29 @@ class OperatorWebApp:
             if path=="/api/compare": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps({"schema_version":1,"comparison":comparison},sort_keys=True,separators=(",",":"))+"\n").encode())
             rows="".join(f'<li>{html.escape(k)}: {html.escape(str(v))}</li>' for k,v in comparison.items() if k not in {"permits_automated_action","live_ready","unattended_ready"})
             return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Compare")+f'<main id="content"><h1>Snapshot comparison</h1><p>READ-ONLY observational comparison; causality cannot be established.</p><ul>{rows}</ul></main>').encode())
+        if path in {"/exports", "/api/exports"}:
+            if self.config.backend_mode!="SQLITE_READ_MODEL": return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            try:
+                snaps,_=list_snapshots(self.config.database_path,page=1,page_size=100); events,_=list_events(self.config.database_path,page=1,page_size=100); incidents,_=list_incidents(self.config.database_path,page=1,page_size=100); imports,_=list_operator_imports(self.config.database_path,page=1,page_size=100)
+                catalog=[catalog_snapshot(snapshot_projection(x)) for x in snaps]+[catalog_event(event_projection(x)) for x in events]+[catalog_incident(get_incident_projection(self.config.database_path,x["incident_id"])) for x in incidents]+[catalog_import(x) for x in imports]
+                payload={"schema_version":1,"items":[x.to_dict() for x in catalog]}
+            except (OperatorAppStoreError,KeyError): return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_EXPORT_CATALOG"}\n')
+            if path=="/api/exports": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\n").encode())
+            rows="".join(f'<li>{html.escape(x.export_type)} <a href="{html.escape(x.download_url,quote=True)}">{html.escape(x.source_id)}</a> {html.escape(x.title)}</li>' for x in catalog) or "<li>No exports available.</li>"
+            return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Exports")+f'<main id="content"><h1>Evidence exports</h1><p>READ-ONLY; OPERATOR_SAFE</p><ul>{rows}</ul></main>').encode())
+        if path.startswith("/exports/"):
+            try:
+                parts=path.split("/"); kind=parts[2]; ident=parts[3].removesuffix(".json").removesuffix(".html")
+                if kind=="snapshot": body=snapshot_projection(get_snapshot(self.config.database_path,ident)).snapshot.serialize().encode(); content="application/json; charset=utf-8"
+                elif kind=="event": body=(json.dumps(event_projection(get_event(self.config.database_path,ident)).to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode(); content="application/json; charset=utf-8"
+                elif kind=="incident":
+                    incident=get_incident_projection(self.config.database_path,ident)
+                    if path.endswith(".html"): body=render_incident_html(incident,template_path=TEMPLATE_ROOT/"operator_incident.html").encode(); content="text/html; charset=utf-8"
+                    else: body=incident.serialize().encode(); content="application/json; charset=utf-8"
+                elif kind=="import": body=safe_json(get_operator_import(self.config.database_path,ident).to_dict()).encode(); content="application/json; charset=utf-8"
+                else: raise OperatorAppStoreError("export type invalid")
+            except (OperatorAppStoreError,KeyError,ValueError): return _response(start_response,"404 Not Found","text/plain; charset=utf-8",b"Not found\n")
+            return _response(start_response,"200 OK",content,body)
         if path in {"/diagnostics", "/api/diagnostics"}:
             projection=read_app_diagnostics(self.config,self.config.default_as_of.isoformat())
             if path=="/api/diagnostics": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(projection.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode())
