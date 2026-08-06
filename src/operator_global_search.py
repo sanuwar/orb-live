@@ -43,8 +43,8 @@ def search_store(database, query, *, result_type="ALL", from_value=None, to_valu
     if result_type in {"ALL", "IMPORT_BATCH"}:
         rows, _ = list_operator_imports(database, page=1, page_size=100)
         for d in rows:
-            fields=[d["import_batch_id"],d["consistency_status"],d["blocker_reasons"],d["source_release_commit_sha_short"]]
-            if any(q in str(x).casefold() for x in fields): out.append(SearchResult("IMPORT_BATCH",d["import_batch_id"],d["imported_at"],d["consistency_status"],d["consistency_status"],"operator_app",tuple(d["blocker_reasons"]),"/imports/"+d["import_batch_id"]))
+            fields=[d.import_batch_id,d.consistency_status,d.blocker_reasons,d.source_release_commit_sha_short]
+            if any(q in str(x).casefold() for x in fields): out.append(SearchResult("IMPORT_BATCH",d.import_batch_id,d.imported_at,d.consistency_status,d.consistency_status,"operator_app",tuple(d.blocker_reasons),"/imports/"+d.import_batch_id))
     if lower or upper:
         out=[x for x in out if (not lower or _timestamp(x.occurred_at)>=lower) and (not upper or _timestamp(x.occurred_at)<=upper)]
     out.sort(key=lambda x:(x.occurred_at,x.result_type,x.result_id),reverse=True); start=(page-1)*page_size; return tuple(out[start:start+page_size]),len(out)
