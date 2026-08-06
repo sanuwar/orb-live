@@ -107,6 +107,7 @@ def _route_probe_links(routes, generated_links: tuple[str, ...]) -> dict[str, st
         if path.startswith("/api/incidents/") and "/export." not in path:
             candidates.add(path + "/export.json" + (("?" + query) if query else ""))
             candidates.add(path.removeprefix("/api") + "/export.html" + (("?" + query) if query else ""))
+            candidates.add(path.removeprefix("/api") + "/export.json" + (("?" + query) if query else ""))
         if path.startswith("/exports/") and path.endswith(".json"):
             candidates.add(path.removesuffix(".json") + ".html" + (("?" + query) if query else ""))
     candidates.update({"/search?q=event", "/api/search?q=event", "/compare?left=missing&right=missing", "/api/compare?left=missing&right=missing"})
