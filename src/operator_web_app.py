@@ -13,7 +13,7 @@ from src.offline_path_safety import is_repository_data_path
 from src.operator_snapshot_history import HistoryError, HistoryNotFound, SnapshotHistory, compare_snapshots
 from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, OperatorEventTimeline, TimelineError, TimelineNotFound
 from src.operator_incident_export import IncidentError, IncidentNotFound, OperatorIncidentStore, render_incident_html
-from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, list_incidents, get_incident_projection, snapshot_projection, event_projection)
+from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, list_incidents, get_incident_projection, snapshot_projection, event_projection, list_trend_records)
 from src.operator_store_status import read_store_status
 from src.operator_app_diagnostics import read_app_diagnostics
 from src.operator_snapshot_compare import compare_snapshot_items
@@ -320,13 +320,12 @@ class OperatorWebApp:
             if set(query) - {"metric", "bucket", "from", "to", "max_buckets"} or any(len(values) != 1 for values in query.values()):
                 return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_TREND_QUERY"}\n')
             try:
-                events, _ = list_events(self.config.database_path, page=1, page_size=100)
-                values = tuple((row["occurred_at"], 1) for row in events)
+                metric=query.get("metric", ["event_count"])[0]
+                values = list_trend_records(self.config.database_path, metric)
                 start = query.get("from", [None])[0]
                 end = query.get("to", [None])[0]
-                values = tuple((t, v) for t, v in values if (start is None or t >= start) and (end is None or t <= end))
                 max_buckets = int(query["max_buckets"][0]) if "max_buckets" in query else None
-                payload = summarize_trends(values, self.config.default_as_of.isoformat(), query.get("metric", ["event_count"])[0], query.get("bucket", ["HOUR"])[0], max_buckets).to_dict()
+                payload = summarize_trends(values, self.config.default_as_of.isoformat(), metric, query.get("bucket", ["HOUR"])[0], max_buckets, start, end).to_dict()
             except (ValueError, OperatorAppStoreError, KeyError):
                 return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_TREND_QUERY"}\n')
             if path == "/api/trends":
