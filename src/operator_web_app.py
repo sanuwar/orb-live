@@ -19,6 +19,7 @@ from src.operator_app_diagnostics import read_app_diagnostics
 from src.operator_snapshot_compare import compare_snapshot_items
 from src.operator_evidence_export import catalog_event,catalog_import,catalog_incident,catalog_snapshot,safe_json
 from src.operator_activity_summary import summarize_store
+from src.operator_blocker_analytics import summarize_blockers
 from src.operator_incident_index import list_incident_index
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
@@ -151,7 +152,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Activity","/activity"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Activity","/activity"),("Blockers","/blockers"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -324,6 +325,12 @@ class OperatorWebApp:
             except (OperatorAppStoreError,KeyError): return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_ACTIVITY"}\n')
             if path=="/api/activity": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(summary.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode())
             d=summary.to_dict(); rows="".join(f"<li>{html.escape(str(k))}: {html.escape(str(v))}</li>" for k,v in d.items()); return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Activity")+f'<main id="content"><h1>Operator activity</h1><p>READ-ONLY observational summary.</p><ul>{rows}</ul></main>').encode())
+        if path in {"/blockers", "/api/blockers"}:
+            if self.config.backend_mode!="SQLITE_READ_MODEL": return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            try: blockers=summarize_blockers(self.config.database_path,self.config.default_as_of.isoformat())
+            except (OperatorAppStoreError,KeyError): return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_BLOCKERS"}\n')
+            if path=="/api/blockers": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(blockers.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode())
+            d=blockers.to_dict(); rows="".join("<li>"+html.escape(str(x))+"</li>" for x in d["blocker_rows"]); return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Blockers")+f'<main id="content"><h1>Blocker analytics</h1><p>READ-ONLY; observational only.</p><ul>{rows or "<li>None observed.</li>"}</ul></main>').encode())
         if path.startswith("/exports/"):
             try:
                 parts=path.split("/"); kind=parts[2]; ident=parts[3].removesuffix(".json").removesuffix(".html")
