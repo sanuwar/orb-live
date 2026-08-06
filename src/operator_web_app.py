@@ -144,6 +144,10 @@ def _error_body() -> str:
 def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
+def _navigation(active: str) -> str:
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Data Status","/data-status"),("About","/about"))
+    return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
+
 def _store_status_body(status) -> str:
     template=(TEMPLATE_ROOT / "operator_store_status.html").read_text(encoding="utf-8"); d=status.to_dict()
     values={"STATUS":d["status"],"SCHEMA":str(d["schema_version"] or "unknown"),"SHA":d["release_commit_sha_short"] or "unknown","DIGEST":d["implementation_digest_short"] or "unknown","INTEGRITY":d["integrity_status"],"IDENTITY":d["identity_status"],"IMPORTS":str(d["import_batch_count"]),"SNAPSHOTS":str(d["snapshot_count"]),"EVENTS":str(d["event_count"]),"INCIDENTS":str(d["incident_count"]),"LINKS":str(d["evidence_link_count"]),"NEWEST_IMPORT":str(d["newest_imported_at"] or "none"),"NEWEST_SNAPSHOT":str(d["newest_snapshot_at"] or "none"),"NEWEST_EVENT":str(d["newest_event_at"] or "none"),"NEWEST_INCIDENT":str(d["newest_incident_at"] or "none"),"BLOCKERS":"".join("<li>"+html.escape(x)+"</li>" for x in d["blocker_reasons"]) or "<li>None</li>"}
@@ -247,7 +251,7 @@ def _dashboard_body(result) -> str:
     }
     for key, value in values.items():
         source = source.replace("{{" + key + "}}", value)
-    return source
+    return _navigation("Current") + source
 
 
 class OperatorWebApp:
