@@ -29,7 +29,7 @@ from src.operator_incident_index import list_incident_index
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
-from src.operator_route_contracts import route_matches
+from src.operator_framework import ApplicationRoute, ApplicationRouteTable
 from src.supervised_operator_console import (
     ConsoleError,
     ConsoleIdentityError,
@@ -47,6 +47,80 @@ PORT_MINIMUM = 1024
 PORT_MAXIMUM = 65535
 REFRESH_MINIMUM = 0
 REFRESH_MAXIMUM = 300
+
+
+_OPERATOR_BASE_PATHS = (
+    "/", "/about", "/healthz", "/history", "/timeline", "/incidents", "/imports",
+    "/data-status", "/search", "/compare", "/exports", "/activity", "/blockers",
+    "/freshness", "/coverage", "/views", "/diagnostics", "/trends", "/release",
+)
+_OPERATOR_API_PATHS = ("/api/snapshot",) + tuple(
+    "/api" + path for path in _OPERATOR_BASE_PATHS if path not in {"/", "/about", "/healthz"}
+)
+
+
+def _route_name(path: str) -> str:
+    if path == "/":
+        return "operator.dashboard"
+    value = path.strip("/").replace("/", ".").replace("{", "by_").replace("}", "")
+    return "operator." + value.replace("-", "_").replace(".", "_")
+
+
+def _application_route(path: str, *, route_type: str, classification: str, endpoint: str | None = None) -> ApplicationRoute:
+    requires_store = "{" in path or path not in {"/", "/about", "/healthz"}
+    return ApplicationRoute(
+        path=path,
+        methods=("GET",),
+        name=_route_name(path),
+        endpoint=endpoint or f"operator_web_app:{_route_name(path)}",
+        route_type=route_type,
+        classification=classification,
+        privacy_classification="PUBLIC_OPERATOR_EVIDENCE",
+        safety_authority="NONE",
+        permits_database_write=False,
+        permits_runtime_write=False,
+        permits_outbound_network=False,
+        exposes_private_data=False,
+        response_kind="JSON_OR_HTML",
+        requires_store=requires_store,
+        supports_file_fixture=path in {"/", "/history", "/timeline"},
+        supports_sqlite="{" in path or path not in {"/about", "/healthz"},
+        auto_refresh_eligible=path in {"/", "/diagnostics", "/activity", "/blockers", "/freshness", "/coverage", "/incidents", "/history", "/timeline", "/imports", "/data-status", "/search", "/trends"},
+    )
+
+
+def _register_prefixed_routes(table: ApplicationRouteTable, prefix: str, paths: tuple[str, ...], *, route_type: str, classification: str) -> None:
+    for path in paths:
+        full_path = prefix.rstrip("/") + ("" if path == "/" else path)
+        table.add(_application_route(full_path, route_type=route_type, classification=classification))
+
+
+def _build_mounted_detail_router(*paths: str) -> ApplicationRouteTable:
+    child = ApplicationRouteTable()
+    for path in paths:
+        child.add(_application_route(path, route_type="MOUNTED", classification="API" if path.endswith(".json") else "HTML"))
+    return child
+
+
+def build_operator_route_table() -> ApplicationRouteTable:
+    """Construct the route table registered by the actual operator app."""
+    table = ApplicationRouteTable()
+    for path in _OPERATOR_BASE_PATHS:
+        route_type = "HEALTH" if path == "/healthz" else ("EXPORT" if path == "/exports" else "HTML")
+        table.add(_application_route(path, route_type=route_type, classification="HTML" if path != "/healthz" else "HEALTH"))
+    _register_prefixed_routes(table, "/api", tuple(path for path in _OPERATOR_BASE_PATHS if path not in {"/", "/about", "/healthz"}), route_type="API", classification="API")
+    table.add(_application_route("/api/snapshot", route_type="API", classification="API"))
+    table.mount("/history", _build_mounted_detail_router("/{snapshot_id}"), name_prefix="history", endpoint_prefix="operator_web_app")
+    table.mount("/api/history", _build_mounted_detail_router("/{snapshot_id}"), name_prefix="api_history", endpoint_prefix="operator_web_app", classification="API")
+    table.mount("/timeline", _build_mounted_detail_router("/{event_id}"), name_prefix="timeline", endpoint_prefix="operator_web_app")
+    table.mount("/api/timeline", _build_mounted_detail_router("/{event_id}"), name_prefix="api_timeline", endpoint_prefix="operator_web_app", classification="API")
+    table.mount("/incidents", _build_mounted_detail_router("/{incident_id}", "/{incident_id}/export.html"), name_prefix="incidents", endpoint_prefix="operator_web_app")
+    table.mount("/api/incidents", _build_mounted_detail_router("/{incident_id}", "/{incident_id}/export.json"), name_prefix="api_incidents", endpoint_prefix="operator_web_app", classification="API")
+    table.mount("/imports", _build_mounted_detail_router("/{batch_id}"), name_prefix="imports", endpoint_prefix="operator_web_app")
+    table.mount("/api/imports", _build_mounted_detail_router("/{batch_id}"), name_prefix="api_imports", endpoint_prefix="operator_web_app", classification="API")
+    table.mount("/exports", _build_mounted_detail_router("/{kind}/{id}.json", "/{kind}/{id}.html"), name_prefix="exports", endpoint_prefix="operator_web_app")
+    table.validate()
+    return table
 
 
 class WebAppConfigError(ValueError):
@@ -273,6 +347,7 @@ class OperatorWebApp:
 
     def __init__(self, config: OperatorWebAppConfig):
         self.config = config.validate()
+        self.route_table = build_operator_route_table()
 
     def _snapshot(self, environ):
         query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
@@ -301,7 +376,7 @@ class OperatorWebApp:
         path = environ.get("PATH_INFO", "/")
         if method != "GET":
             return _response(start_response, "405 Method Not Allowed", "text/plain; charset=utf-8", b"Method not allowed\n")
-        if not route_matches(path):
+        if self.route_table.match(path, method) is None:
             return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
         if path == "/healthz":
             return _response(start_response, "200 OK", "application/json; charset=utf-8", b'{"mode":"READ_ONLY_OPERATOR_UI","status":"UP"}\n')
