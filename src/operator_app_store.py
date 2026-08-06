@@ -119,3 +119,16 @@ def inspect_store_content(database):
         def one(sql): return c.execute(sql).fetchone()[0]
         return {"import_batch_count":one("SELECT count(*) FROM import_batches"),"snapshot_count":one("SELECT count(*) FROM operator_snapshots"),"event_count":one("SELECT count(*) FROM operator_events"),"incident_count":one("SELECT count(*) FROM operator_incidents"),"evidence_link_count":one("SELECT count(*) FROM incident_evidence_links"),"newest_imported_at":one("SELECT max(imported_at) FROM import_batches"),"newest_snapshot_at":one("SELECT max(generated_as_of) FROM operator_snapshots"),"newest_event_at":one("SELECT max(occurred_at) FROM operator_events"),"newest_incident_at":one("SELECT max(latest_observed_at) FROM operator_incidents")}
     finally:c.close()
+def list_import_batches(database, *, page=1, page_size=25):
+    if type(page)!=int or page<1 or type(page_size)!=int or not 1<=page_size<=100: raise OperatorAppStoreError("pagination is invalid")
+    c=_conn(database,readonly=True)
+    try:
+        total=c.execute("SELECT count(*) FROM import_batches").fetchone()[0]; rows=c.execute("SELECT * FROM import_batches ORDER BY imported_at DESC, import_batch_id DESC LIMIT ? OFFSET ?",(page_size,(page-1)*page_size)).fetchall(); return [dict(x) for x in rows],total
+    finally:c.close()
+def get_import_batch(database, batch_id):
+    c=_conn(database,readonly=True)
+    try:
+        row=c.execute("SELECT * FROM import_batches WHERE import_batch_id=?",(batch_id,)).fetchone()
+        if not row: raise OperatorAppStoreError("record not found")
+        d=dict(row); d["snapshot_count"]=c.execute("SELECT count(*) FROM operator_snapshots WHERE import_batch_id=?",(batch_id,)).fetchone()[0]; d["event_count"]=c.execute("SELECT count(*) FROM operator_events WHERE import_batch_id=?",(batch_id,)).fetchone()[0]; d["incident_count"]=c.execute("SELECT count(*) FROM operator_incidents WHERE import_batch_id=?",(batch_id,)).fetchone()[0]; d["evidence_link_count"]=c.execute("SELECT count(*) FROM incident_evidence_links l JOIN operator_incidents i ON i.incident_id=l.incident_id WHERE i.import_batch_id=?",(batch_id,)).fetchone()[0]; return d
+    finally:c.close()
