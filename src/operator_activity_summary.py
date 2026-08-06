@@ -13,4 +13,5 @@ def summarize_store(database, generated_as_of):
         import json
         for code in json.loads(row["blocker_reasons_json"]): blockers[code]=blockers.get(code,0)+1
     for row in events: severities[row["severity"]]=severities.get(row["severity"],0)+1; types[row["event_type"]]=types.get(row["event_type"],0)+1
-    return OperatorActivitySummary(generated_as_of,None,None,content["snapshot_count"],content["event_count"],content["incident_count"],sum(1 for x in incidents if x["active"]=="ACTIVE"),content["import_batch_count"],content["newest_snapshot_at"],content["newest_event_at"],content["newest_incident_at"],content["newest_imported_at"],tuple(sorted(blockers)),tuple(sorted(severities.items())),tuple(sorted(types.items())),sum(1 for x in incidents if x["active"]=="ACTIVE"),"COMPLETE","CURRENT")
+    active_count=sum(1 for x in incidents if x["observation_status"]=="ACTIVE")
+    return OperatorActivitySummary(generated_as_of,None,None,content["snapshot_count"],content["event_count"],content["incident_count"],active_count,content["import_batch_count"],content["newest_snapshot_at"],content["newest_event_at"],content["newest_incident_at"],content["newest_imported_at"],tuple(sorted(blockers)),tuple(sorted(severities.items())),tuple(sorted(types.items())),active_count,"COMPLETE","CURRENT")

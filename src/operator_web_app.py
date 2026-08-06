@@ -13,7 +13,7 @@ from src.offline_path_safety import is_repository_data_path
 from src.operator_snapshot_history import HistoryError, HistoryNotFound, SnapshotHistory, compare_snapshots
 from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, OperatorEventTimeline, TimelineError, TimelineNotFound
 from src.operator_incident_export import IncidentError, IncidentNotFound, OperatorIncidentStore, render_incident_html
-from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, get_incident_projection, snapshot_projection, event_projection)
+from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, list_incidents, get_incident_projection, snapshot_projection, event_projection)
 from src.operator_store_status import read_store_status
 from src.operator_app_diagnostics import read_app_diagnostics
 from src.operator_snapshot_compare import compare_snapshot_items
