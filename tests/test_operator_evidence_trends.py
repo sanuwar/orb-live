@@ -10,6 +10,21 @@ def test_trends_are_descriptive_and_bounded():
 def test_unknown_metric_rejected():
     with pytest.raises(ValueError): summarize_trends((),"2026-08-05T14:00:00Z",metric="forecast")
 
+def test_hour_and_day_buckets_aggregate_and_zero_fill():
+    values=(("2026-08-05T12:05:00-04:00",1),("2026-08-05T12:55:00-04:00",2),("2026-08-05T14:01:00-04:00",4))
+    hourly=summarize_trends(values,"2026-08-05T16:00:00Z",window_start="2026-08-05T16:00:00Z",window_end="2026-08-05T20:00:00Z")
+    assert [x["value"] for x in hourly.buckets]==[3,0,4,0]
+    daily=summarize_trends(values,"2026-08-05T16:00:00Z",bucket="DAY",window_start="2026-08-05T00:00:00Z",window_end="2026-08-07T00:00:00Z")
+    assert [x["value"] for x in daily.buckets]==[7,0]
+
+def test_trend_boundaries_are_start_inclusive_end_exclusive():
+    out=summarize_trends((("2026-08-05T13:00:00Z",1),("2026-08-05T14:00:00Z",1)),"2026-08-05T15:00:00Z",window_start="2026-08-05T13:00:00Z",window_end="2026-08-05T14:00:00Z")
+    assert out.total_count==1 and out.buckets[0]["source_record_count"]==1
+
+def test_trend_bucket_limit_keeps_latest_deterministically():
+    out=summarize_trends(tuple((f"2026-08-05T{hour:02d}:00:00Z",1) for hour in range(5)),"2026-08-05T06:00:00Z",max_buckets=2)
+    assert [x["bucket_start"] for x in out.buckets]==["2026-08-05T03:00:00Z","2026-08-05T04:00:00Z"]
+
 def test_trend_routes_fail_closed_without_external_resources(tmp_path):
     as_of = datetime(2026, 8, 5, 16, tzinfo=timezone.utc)
     database = tmp_path / "operator.sqlite"
