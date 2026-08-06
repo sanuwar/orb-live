@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
-from src.operator_app_store import OperatorAppStoreError, get_incident_projection, list_incidents
+from src.operator_app_store import OperatorAppStoreError, get_incident_projection, list_all_incidents
 
 @dataclass(frozen=True)
 class IncidentIndexItem:
@@ -21,7 +21,7 @@ def list_incident_index(database, *, incident_type=None, severity=None, observat
     if type(page) is not int or page<1 or type(page_size) is not int or not 1<=page_size<=100: raise OperatorAppStoreError("incident pagination is invalid")
     low=_time(from_value) if from_value else None; high=_time(to_value) if to_value else None
     if low and high and low>high: raise OperatorAppStoreError("incident time range is invalid")
-    rows,_=list_incidents(database,incident_type=incident_type,severity=severity,page=1,page_size=100); out=[]
+    rows=list_all_incidents(database,incident_type=incident_type,severity=severity); out=[]
     for row in rows:
         p=get_incident_projection(database,row["incident_id"]); d=p.to_dict()
         if observation_status and d["active"]!=observation_status: continue

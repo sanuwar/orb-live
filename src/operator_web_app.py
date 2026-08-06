@@ -311,7 +311,7 @@ class OperatorWebApp:
             payload = {"schema_version": 1, "items": items}
             if path == "/api/views":
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
-            rows = "".join(f'<li><a href="{html.escape(p["target_route"], quote=True)}">{html.escape(p["title"])}</a> — {html.escape(p["description"])}</li>' for p in items)
+            rows = "".join(f'<li><a href="{html.escape(p["url"], quote=True)}">{html.escape(p["title"])}</a> — {html.escape(p["description"])}</li>' for p in items)
             return _response(start_response, "200 OK", "text/html; charset=utf-8", (_navigation("Views") + f'<main id="content"><h1>Read-only view presets</h1><p>Presets are fixed local links; no preferences are persisted.</p><ul>{rows}</ul></main>').encode())
         if path in {"/trends", "/api/trends"}:
             if self.config.backend_mode != "SQLITE_READ_MODEL":
@@ -367,8 +367,11 @@ class OperatorWebApp:
             d=summary.to_dict(); rows="".join(f"<li>{html.escape(str(k))}: {html.escape(str(v))}</li>" for k,v in d.items()); return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Activity")+f'<main id="content"><h1>Operator activity</h1><p>READ-ONLY observational summary.</p><ul>{rows}</ul></main>').encode())
         if path in {"/blockers", "/api/blockers"}:
             if self.config.backend_mode!="SQLITE_READ_MODEL": return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
-            try: blockers=summarize_blockers(self.config.database_path,self.config.default_as_of.isoformat())
-            except (OperatorAppStoreError,KeyError): return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_BLOCKERS"}\n')
+            try:
+                blocker_query=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True)
+                if set(blocker_query)-{"active_only"} or any(len(v)!=1 for v in blocker_query.values()) or blocker_query.get("active_only",["false"])[0] not in {"true","false"}: raise ValueError
+                blockers=summarize_blockers(self.config.database_path,self.config.default_as_of.isoformat(),active_only=blocker_query.get("active_only",["false"])[0]=="true")
+            except (OperatorAppStoreError,KeyError,ValueError): return _response(start_response,"400 Bad Request","application/json; charset=utf-8",b'{"status":"INVALID_BLOCKER_FILTER"}\n')
             if path=="/api/blockers": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(blockers.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode())
             d=blockers.to_dict(); rows="".join("<li>"+html.escape(str(x))+"</li>" for x in d["blocker_rows"]); return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Blockers")+f'<main id="content"><h1>Blocker analytics</h1><p>READ-ONLY; observational only.</p><ul>{rows or "<li>None observed.</li>"}</ul></main>').encode())
         if path in {"/freshness", "/api/freshness"}:
@@ -451,9 +454,7 @@ class OperatorWebApp:
             try:
                 query=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"from","to","consistency_status","release_sha","page","page_size"}
                 if set(query)-allowed or any(len(v)!=1 for v in query.values()): raise OperatorAppStoreError("invalid filter")
-                page=int(query.get("page",[1])[0]); size=int(query.get("page_size",[25])[0]); items,total=list_operator_imports(self.config.database_path,page=page,page_size=size)
-                if query.get("consistency_status"): items=tuple(x for x in items if x.consistency_status==query["consistency_status"][0])
-                if query.get("release_sha"): items=tuple(x for x in items if x.source_release_commit_sha_short==query["release_sha"][0])
+                page=int(query.get("page",[1])[0]); size=int(query.get("page_size",[25])[0]); items,total=list_operator_imports(self.config.database_path,page=page,page_size=size,from_value=query.get("from",[None])[0],to_value=query.get("to",[None])[0],consistency_status=query.get("consistency_status",[None])[0],release_sha=query.get("release_sha",[None])[0])
             except Exception:
                 return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_IMPORT_HISTORY"}\n')
             if path=="/api/imports":
