@@ -13,9 +13,9 @@ def main(argv=None):
         if (a.output_root/MARKER).is_file():
             marker=json.loads((a.output_root/MARKER).read_text(encoding="utf-8"))
             if marker.get("tool_id") != TOOL_ID or not (a.output_root/"operator_app.sqlite").is_file(): raise ValueError("demo root is invalid")
-            data={"root":str(a.output_root.resolve()),"database":str((a.output_root/"operator_app.sqlite").resolve())}
+            data={"root":str(a.output_root.resolve()),"database":str((a.output_root/"operator_app.sqlite").resolve()),"expected_content_digest":marker.get("expected_content_digest")}
         else: data=create_demo(a.output_root,_as_of(a.as_of))
-        app=OperatorWebApp(OperatorWebAppConfig(runtime_root=Path(data["root"]),database_path=Path(data["database"]),backend_mode="SQLITE_READ_MODEL",default_as_of=_as_of(a.as_of),host=a.host,port=a.port))
+        app=OperatorWebApp(OperatorWebAppConfig(runtime_root=Path(data["root"]),database_path=Path(data["database"]),backend_mode="SQLITE_READ_MODEL",expected_content_digest=data.get("expected_content_digest"),default_as_of=_as_of(a.as_of),host=a.host,port=a.port))
     except (OSError,ValueError,WebAppConfigError) as exc: p.error(str(exc))
     print(f"ORB-LIVE demo: http://{a.host}:{a.port}/ (READ-ONLY)",flush=True)
     try:

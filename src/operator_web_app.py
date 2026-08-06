@@ -62,6 +62,7 @@ class OperatorWebAppConfig:
     refresh_interval: int = 0
     backend_mode: str = "FILE_FIXTURE"
     database_path: Path | None = None
+    expected_content_digest: str | None = None
 
     def validate(self) -> "OperatorWebAppConfig":
         if self.host != ALLOWED_HOST:
@@ -87,7 +88,7 @@ class OperatorWebAppConfig:
                 raise WebAppConfigError("SQLite database is required")
             try:
                 identity = inspect_store_identity(self.database_path)
-                if identity["schema_version"] != 1 or identity["release_commit_sha"] != resolve_head_sha(REPOSITORY_ROOT) or identity["implementation_digest"] != checkpoint_implementation_digest(REPOSITORY_ROOT) or not verify_store_integrity(self.database_path):
+                if identity["schema_version"] != 1 or identity["release_commit_sha"] != resolve_head_sha(REPOSITORY_ROOT) or identity["implementation_digest"] != checkpoint_implementation_digest(REPOSITORY_ROOT) or (self.expected_content_digest is not None and not verify_store_integrity(self.database_path,self.expected_content_digest)):
                     raise WebAppConfigError("SQLite read model identity is invalid")
             except (OperatorAppStoreError, OSError, KeyError):
                 raise WebAppConfigError("SQLite read model is unavailable") from None
@@ -355,7 +356,7 @@ class OperatorWebApp:
         if path in {"/exports", "/api/exports"}:
             if self.config.backend_mode!="SQLITE_READ_MODEL": return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
             try:
-                snaps,_=list_snapshots(self.config.database_path,page=1,page_size=100); events,_=list_events(self.config.database_path,page=1,page_size=100); incidents,_=list_incidents(self.config.database_path,page=1,page_size=100); imports,_=list_operator_imports(self.config.database_path,page=1,page_size=100)
+                snaps,_=list_snapshots(self.config.database_path,page=1,page_size=100); events,_=list_events(self.config.database_path,page=1,page_size=100); incidents,_=list_incidents(self.config.database_path,page=1,page_size=100); imports,_=list_operator_imports(self.config.database_path,page=1,page_size=100,expected_content_digest=self.config.expected_content_digest)
                 catalog=[catalog_snapshot(snapshot_projection(x)) for x in snaps]+[catalog_event(event_projection(x)) for x in events]+[catalog_incident(get_incident_projection(self.config.database_path,x["incident_id"])) for x in incidents]+[catalog_import(x) for x in imports]
                 payload={"schema_version":1,"items":[x.to_dict() for x in catalog]}
             except (OperatorAppStoreError,KeyError): return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_EXPORT_CATALOG"}\n')
@@ -396,7 +397,7 @@ class OperatorWebApp:
             if self.config.backend_mode != "SQLITE_READ_MODEL":
                 return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
             try:
-                coverage = read_coverage(self.config.database_path, self.config.default_as_of.isoformat())
+                coverage = read_coverage(self.config.database_path, self.config.default_as_of.isoformat(), self.config.expected_content_digest)
             except (OperatorAppStoreError, KeyError):
                 return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_COVERAGE"}\n')
             payload = coverage.to_dict()
@@ -439,7 +440,7 @@ class OperatorWebApp:
                 query=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"q","type","from","to","page","page_size"}
                 if set(query)-allowed or any(len(v)!=1 for v in query.values()) or "q" not in query: raise OperatorAppStoreError("invalid search")
                 page=int(query.get("page",[1])[0]); size=int(query.get("page_size",[25])[0]); kind=query.get("type",["ALL"])[0]
-                items,total=search_store(self.config.database_path,query["q"][0],result_type=kind,from_value=query.get("from",[None])[0],to_value=query.get("to",[None])[0],page=page,page_size=size)
+                items,total=search_store(self.config.database_path,query["q"][0],result_type=kind,from_value=query.get("from",[None])[0],to_value=query.get("to",[None])[0],page=page,page_size=size,expected_content_digest=self.config.expected_content_digest)
             except (ValueError, OperatorAppStoreError):
                 return _response(start_response,"400 Bad Request","application/json; charset=utf-8",b'{"status":"INVALID_SEARCH"}\n')
             payload={"schema_version":1,"page":page,"page_size":size,"total_count":total,"items":[x.to_dict() for x in items]}
@@ -447,7 +448,7 @@ class OperatorWebApp:
             rows="".join(f'<li><a href="{html.escape(x.detail_url,quote=True)}">{html.escape(x.result_type)} {html.escape(x.result_id)}</a> — {html.escape(x.headline)} ({html.escape(x.occurred_at)})</li>' for x in items) or "<li>No matches found.</li>"
             return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Search")+f'<main id="content"><h1>Operator search</h1><p class="readonly">READ-ONLY</p><ul>{rows}</ul></main>').encode())
         if path in {"/data-status", "/api/data-status"}:
-            status = read_store_status(self.config.database_path, generated_as_of=self.config.default_as_of.isoformat()) if self.config.backend_mode == "SQLITE_READ_MODEL" else read_store_status(None, generated_as_of=self.config.default_as_of.isoformat())
+            status = read_store_status(self.config.database_path, generated_as_of=self.config.default_as_of.isoformat(), expected_content_digest=self.config.expected_content_digest) if self.config.backend_mode == "SQLITE_READ_MODEL" else read_store_status(None, generated_as_of=self.config.default_as_of.isoformat())
             if path == "/api/data-status":
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(status.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode("utf-8"))
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _store_status_body(status).encode("utf-8"))
@@ -457,7 +458,7 @@ class OperatorWebApp:
             try:
                 query=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"from","to","consistency_status","release_sha","page","page_size"}
                 if set(query)-allowed or any(len(v)!=1 for v in query.values()): raise OperatorAppStoreError("invalid filter")
-                page=int(query.get("page",[1])[0]); size=int(query.get("page_size",[25])[0]); items,total=list_operator_imports(self.config.database_path,page=page,page_size=size,from_value=query.get("from",[None])[0],to_value=query.get("to",[None])[0],consistency_status=query.get("consistency_status",[None])[0],release_sha=query.get("release_sha",[None])[0])
+                page=int(query.get("page",[1])[0]); size=int(query.get("page_size",[25])[0]); items,total=list_operator_imports(self.config.database_path,page=page,page_size=size,from_value=query.get("from",[None])[0],to_value=query.get("to",[None])[0],consistency_status=query.get("consistency_status",[None])[0],release_sha=query.get("release_sha",[None])[0],expected_content_digest=self.config.expected_content_digest)
             except Exception:
                 return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_IMPORT_HISTORY"}\n')
             if path=="/api/imports":

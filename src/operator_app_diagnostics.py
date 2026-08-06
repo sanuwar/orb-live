@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from src.operator_app_store import OperatorAppStoreError, inspect_store_identity, verify_store_integrity
+from src.operator_app_store import CONTENT_VERIFIED, OperatorAppStoreError, inspect_store_identity, read_model_integrity_status
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 
 @dataclass(frozen=True)
@@ -18,11 +18,11 @@ def read_app_diagnostics(config, generated_as_of:str) -> OperatorAppDiagnostics:
     if sqlite:
         try:
             identity_data=inspect_store_identity(config.database_path); expected_sha=resolve_head_sha(Path(__file__).resolve().parents[1]); expected_digest=checkpoint_implementation_digest(Path(__file__).resolve().parents[1])
-            schema="VALID" if identity_data.get("schema_version")==1 else "INVALID"; identity="VALID" if identity_data.get("release_commit_sha")==expected_sha and identity_data.get("implementation_digest")==expected_digest else "INVALID"; integrity="PASS" if verify_store_integrity(config.database_path) else "FAIL"
+            schema="VALID" if identity_data.get("schema_version")==1 else "INVALID"; identity="VALID" if identity_data.get("release_commit_sha")==expected_sha and identity_data.get("implementation_digest")==expected_digest else "INVALID"; integrity=read_model_integrity_status(config.database_path,expected_content_digest=config.expected_content_digest)
         except (OperatorAppStoreError,OSError,KeyError): schema=identity=integrity="UNKNOWN_FAIL_CLOSED"
         if schema!="VALID": blockers.append("SCHEMA_UNAVAILABLE")
         if identity!="VALID": blockers.append("IDENTITY_UNAVAILABLE")
-        if integrity!="PASS": blockers.append("INTEGRITY_UNAVAILABLE")
+        if integrity!=CONTENT_VERIFIED: blockers.append("INTEGRITY_UNAVAILABLE")
     status="HEALTHY_LOCAL_APP" if not blockers else "DEGRADED_LOCAL_APP"
     if sqlite and blockers: status="INVALID_CONFIGURATION"
     return OperatorAppDiagnostics(1,generated_as_of,status,"LOCAL_READ_ONLY",config.backend_mode,schema,identity,integrity,True,True,True,True,sqlite,sqlite,True,Path(config.runtime_root, ".operator_demo_owned").is_file(),config.host=="127.0.0.1",False,False,"EXTERNAL","NON_AUTHORITATIVE",True,False,False,False,tuple(blockers))

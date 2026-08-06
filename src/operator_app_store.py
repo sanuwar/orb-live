@@ -12,6 +12,12 @@ from src.operator_event_timeline import OperatorEvent, EventType, EventSeverity
 from src.operator_incident_export import OperatorIncident
 
 class OperatorAppStoreError(ValueError): pass
+CONTENT_VERIFIED="CONTENT_VERIFIED"
+CONTENT_MISMATCH="CONTENT_MISMATCH"
+CONTENT_UNVERIFIED="CONTENT_UNVERIFIED"
+SCHEMA_INVALID="SCHEMA_INVALID"
+IDENTITY_MISMATCH="IDENTITY_MISMATCH"
+UNKNOWN_FAIL_CLOSED="UNKNOWN_FAIL_CLOSED"
 _SNAP_FIELDS=("snapshot_id","generated_as_of","release_commit_sha","implementation_digest","operating_mode","operational_status","supervised_readiness_status","recommended_operator_action","evidence_completeness","evidence_freshness","suspension_status","heartbeat_status","alert_status","acknowledgment_status","recovery_status","blocker_reasons_json","source_component_statuses_json","strategy_enabled","activation_approvals_present","approved_protection_state_count","protection_grounded","activation_approved","permits_automated_action","live_ready","unattended_ready","canonical_digest","import_batch_id")
 _TABLE_FIELDS={
     "schema_metadata": ("singleton_id","schema_version","release_commit_sha","implementation_digest"),
@@ -56,8 +62,10 @@ def initialize_store(database, *, release_commit_sha, implementation_digest):
             if row["schema_version"] != 1 or "content_digest" not in row.keys(): raise OperatorAppStoreError("unknown schema version")
             if row["release_commit_sha"] != release_commit_sha or row["implementation_digest"] != implementation_digest: raise OperatorAppStoreError("store identity conflicts")
         else: create_schema(c, release_commit_sha=release_commit_sha, implementation_digest=implementation_digest)
-        c.execute("UPDATE schema_metadata SET content_digest=? WHERE singleton_id=1", (_canonical_content_digest(c),))
+        content_digest=_canonical_content_digest(c)
+        c.execute("UPDATE schema_metadata SET content_digest=? WHERE singleton_id=1", (content_digest,))
         c.commit()
+        return content_digest
     except Exception: c.rollback(); raise
     finally:c.close()
 def inspect_store_identity(database):
@@ -106,7 +114,7 @@ def _validate_json(value, expected):
     if not isinstance(parsed, expected): raise OperatorAppStoreError("invalid read-model JSON")
     return parsed
 
-def _validate_operator_content(connection):
+def _validate_operator_content(connection, *, check_content_digest=True):
     tables={r["name"] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if tables != _EXPECTED_TABLES: raise OperatorAppStoreError("unsupported read-model schema")
     for table, fields in _TABLE_FIELDS.items():
@@ -136,7 +144,36 @@ def _validate_operator_content(connection):
             if table=="operator_incidents" and any(d[k] != 0 for k in ("strategy_enabled","activation_approvals_present","protection_grounded","activation_approved")): raise OperatorAppStoreError("unsafe read-model invariant")
             if d[_ROW_DIGEST_COLUMNS[table]] != _row_digest(table,d): raise OperatorAppStoreError("read-model row digest mismatch")
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None: raise OperatorAppStoreError("read-model relationship mismatch")
-    if _canonical_content_digest(connection) != meta[0]["content_digest"]: raise OperatorAppStoreError("read-model content digest mismatch")
+    if check_content_digest and _canonical_content_digest(connection) != meta[0]["content_digest"]: raise OperatorAppStoreError("read-model content digest mismatch")
+
+def compute_operator_content_digest(database):
+    c=_conn(database,readonly=True)
+    try:
+        _validate_operator_content(c,check_content_digest=False)
+        return _canonical_content_digest(c)
+    finally:c.close()
+
+def read_model_integrity_status(database, *, expected_content_digest=None, expected_release_commit_sha=None):
+    c=None
+    try:
+        c=_conn(database,readonly=True)
+        if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok": return UNKNOWN_FAIL_CLOSED
+        _validate_operator_content(c,check_content_digest=False)
+        meta=dict(c.execute("SELECT * FROM schema_metadata WHERE singleton_id=1").fetchone() or {})
+        if expected_release_commit_sha is not None and meta.get("release_commit_sha") != expected_release_commit_sha: return IDENTITY_MISMATCH
+        if expected_content_digest is None: return CONTENT_UNVERIFIED
+        if not isinstance(expected_content_digest,str) or len(expected_content_digest)!=64:
+            return CONTENT_MISMATCH
+        try: int(expected_content_digest,16)
+        except ValueError: return CONTENT_MISMATCH
+        computed=_canonical_content_digest(c)
+        return CONTENT_VERIFIED if computed == expected_content_digest and meta.get("content_digest") == computed else CONTENT_MISMATCH
+    except OperatorAppStoreError as exc:
+        return SCHEMA_INVALID if "schema" in str(exc) or "shape" in str(exc) or "identity unavailable" in str(exc) else CONTENT_MISMATCH
+    except (sqlite3.DatabaseError,TypeError,ValueError,KeyError,OSError):
+        return UNKNOWN_FAIL_CLOSED
+    finally:
+        if c is not None: c.close()
 
 def operator_content_digest(database):
     c=_conn(database,readonly=True)
@@ -240,13 +277,8 @@ def event_projection(row):
     d=dict(row); return OperatorEvent(1,d["event_id"],EventType(d["event_type"]),EventSeverity(d["severity"]),d["occurred_at"],d["source_snapshot_id"],d["source_component"],d["headline"],d["detail_code"],d["operational_status"],d["supervised_readiness_status"],tuple(json.loads(d["blocker_reasons_json"])),d["operator_action"])
 def incident_projection(row):
     d=dict(row); return OperatorIncident(1,d["incident_id"],d["source_event_id"],d["incident_type"],d["severity"],d["opened_at"],d["latest_observed_at"],d["observation_status"],d["source_component"],d["headline"],d["detail_code"],tuple(json.loads(d["blocker_reasons_json"])),d["recommended_operator_action"],tuple(d.get("supporting_snapshot_ids",())),tuple(d.get("supporting_event_ids",())),d["operational_status"],d["supervised_readiness_status"],d["evidence_completeness"],d["evidence_freshness"])
-def verify_store_integrity(database):
-    c=_conn(database,readonly=True)
-    try:
-        if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok": return False
-        _validate_operator_content(c); return True
-    except (OperatorAppStoreError, sqlite3.DatabaseError, TypeError, ValueError, KeyError): return False
-    finally: c.close()
+def verify_store_integrity(database, expected_content_digest=None):
+    return read_model_integrity_status(database,expected_content_digest=expected_content_digest)==CONTENT_VERIFIED
 def inspect_store_content(database):
     c=_conn(database,readonly=True)
     try:

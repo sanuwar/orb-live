@@ -4,7 +4,7 @@ import argparse, hashlib, json, shutil, sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.operator_app_store import import_projection_batch, initialize_store, verify_store_integrity
+from src.operator_app_store import compute_operator_content_digest, import_projection_batch, initialize_store, verify_store_integrity
 from src.operator_event_timeline import OperatorEventTimeline
 from src.operator_incident_export import ADVERSE_EVENT_TYPES, OperatorIncident, _INCIDENT_TYPE
 from src.operator_snapshot_history import SnapshotHistory
@@ -34,7 +34,7 @@ def _safe_root(root: Path, replace: bool) -> Path:
         if not replace or not marker.is_file(): raise ValueError("existing demo root is not owned")
         try: data=json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError): raise ValueError("demo ownership marker is invalid") from None
-        if data.get("tool_id") != TOOL_ID or set(data) != {"tool_id","schema_version","created_at","release_sha","implementation_digest"}:
+        if data.get("tool_id") != TOOL_ID or set(data) != {"tool_id","schema_version","created_at","release_sha","implementation_digest","expected_content_digest"}:
             raise ValueError("demo ownership marker is invalid")
         unexpected=[p for p in root.iterdir() if p.name != MARKER]
         if any(p.is_symlink() for p in unexpected): raise ValueError("demo root contains an unsafe symlink")
@@ -63,9 +63,10 @@ def create_demo(output_root: Path, as_of: datetime, *, replace_demo=False) -> di
         if event.event_type.value in ADVERSE_EVENT_TYPES:
             snap=history.get(snapshot_id=event.source_snapshot_id,as_of=as_of).snapshot; incidents.append(OperatorIncident(1,"incident-"+event.event_id,event.event_id,_INCIDENT_TYPE[event.event_type.value],event.severity.value,event.occurred_at,event.occurred_at,"ACTIVE",event.source_component,event.headline,event.detail_code,event.blocker_reasons,event.operator_action,(event.source_snapshot_id,),(event.event_id,),snap.operational_status,snap.supervised_readiness_status,snap.evidence_completeness,snap.evidence_freshness))
     db=root/"operator_app.sqlite"; initialize_store(db,release_commit_sha=sha,implementation_digest=digest); batch=import_projection_batch(db,snapshots=tuple(_ImportSnapshot(x) for x in history.load(as_of=as_of)),events=events,incidents=incidents,imported_at=as_of.isoformat(),source_release_commit_sha=sha,source_implementation_digest=digest)
-    if not verify_store_integrity(db): raise ValueError("demo store integrity failed")
-    marker={"tool_id":TOOL_ID,"schema_version":1,"created_at":as_of.isoformat(),"release_sha":sha,"implementation_digest":digest}; (root/MARKER).write_text(json.dumps(marker,sort_keys=True)+"\n",encoding="utf-8")
-    return {"root":str(root),"database":str(db),"snapshot_count":len(snapshots),"event_count":len(events),"incident_count":len(incidents),"import_batch_id":batch}
+    expected_content_digest=compute_operator_content_digest(db)
+    if not verify_store_integrity(db,expected_content_digest): raise ValueError("demo store integrity failed")
+    marker={"tool_id":TOOL_ID,"schema_version":1,"created_at":as_of.isoformat(),"release_sha":sha,"implementation_digest":digest,"expected_content_digest":expected_content_digest}; (root/MARKER).write_text(json.dumps(marker,sort_keys=True)+"\n",encoding="utf-8")
+    return {"root":str(root),"database":str(db),"snapshot_count":len(snapshots),"event_count":len(events),"incident_count":len(incidents),"import_batch_id":batch,"expected_content_digest":expected_content_digest}
 
 def main(argv=None):
     p=argparse.ArgumentParser(); p.add_argument("--output-root",required=True,type=Path); p.add_argument("--as-of",required=True); p.add_argument("--replace-demo",action="store_true"); a=p.parse_args(argv)

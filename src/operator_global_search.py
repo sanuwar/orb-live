@@ -18,7 +18,7 @@ def _timestamp(value):
     except (AttributeError, ValueError):
         raise OperatorAppStoreError("search timestamp is invalid") from None
 
-def search_store(database, query, *, result_type="ALL", from_value=None, to_value=None, page=1, page_size=25):
+def search_store(database, query, *, result_type="ALL", from_value=None, to_value=None, page=1, page_size=25, expected_content_digest=None):
     q=" ".join(query.casefold().split())
     if not 2<=len(q)<=80 or result_type not in TYPES or type(page)!=int or page<1 or type(page_size)!=int or not 1<=page_size<=100: raise OperatorAppStoreError("search query is invalid")
     lower = _timestamp(from_value) if from_value else None
@@ -41,7 +41,7 @@ def search_store(database, query, *, result_type="ALL", from_value=None, to_valu
             fields=[d["incident_id"],d["incident_type"],d["severity"],d["observation_status"],d["source_component"],d["headline"],d["detail_code"],d["blocker_reasons_json"],d["recommended_operator_action"]]
             if any(q in str(x).casefold() for x in fields): out.append(SearchResult("INCIDENT",d["incident_id"],d["latest_observed_at"],d["headline"],d["severity"],d["source_component"],tuple(),"/incidents/"+d["incident_id"]))
     if result_type in {"ALL", "IMPORT_BATCH"}:
-        rows, _ = list_operator_imports(database, page=1, page_size=100)
+        rows, _ = list_operator_imports(database, page=1, page_size=100, expected_content_digest=expected_content_digest)
         for d in rows:
             fields=[d.import_batch_id,d.consistency_status,d.blocker_reasons,d.source_release_commit_sha_short]
             if any(q in str(x).casefold() for x in fields): out.append(SearchResult("IMPORT_BATCH",d.import_batch_id,d.imported_at,d.consistency_status,d.consistency_status,"operator_app",tuple(d.blocker_reasons),"/imports/"+d.import_batch_id))
