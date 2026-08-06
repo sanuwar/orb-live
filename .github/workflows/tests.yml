@@ -49,7 +49,7 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 1
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Assert requested exact SHA is checked out
         if: github.event_name == 'workflow_dispatch'
