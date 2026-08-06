@@ -16,6 +16,7 @@ from src.operator_incident_export import IncidentError, IncidentNotFound, Operat
 from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, get_incident_projection, snapshot_projection, event_projection)
 from src.operator_store_status import read_store_status
 from src.operator_app_diagnostics import read_app_diagnostics
+from src.operator_snapshot_compare import compare_snapshot_items
 from src.operator_incident_index import list_incident_index
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
@@ -148,7 +149,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -294,6 +295,17 @@ class OperatorWebApp:
             return _response(start_response, "200 OK", "application/json; charset=utf-8", b'{"mode":"READ_ONLY_OPERATOR_UI","status":"UP"}\n')
         if path == "/about":
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _about_body().encode("utf-8"))
+        if path in {"/compare", "/api/compare"}:
+            try:
+                q=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"left","right","view"}
+                if set(q)-allowed or any(len(v)!=1 for v in q.values()) or set(q)!={"left","right"} and not {"left","right"}.issubset(q): raise HistoryError("comparison query is invalid")
+                if q.get("view",["SUMMARY"])[0] not in {"SUMMARY","FULL"}: raise HistoryError("comparison view is invalid")
+                history=_SQLiteHistory(self.config.database_path) if self.config.backend_mode=="SQLITE_READ_MODEL" else SnapshotHistory(runtime_root=self.config.runtime_root,repository_root=REPOSITORY_ROOT)
+                left=history.get(snapshot_id=q["left"][0],as_of=self.config.default_as_of); right=history.get(snapshot_id=q["right"][0],as_of=self.config.default_as_of); comparison=compare_snapshot_items(left,right).to_dict()
+            except (HistoryError,HistoryNotFound,OperatorAppStoreError): return _response(start_response,"400 Bad Request","application/json; charset=utf-8",b'{"status":"INVALID_COMPARISON"}\n')
+            if path=="/api/compare": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps({"schema_version":1,"comparison":comparison},sort_keys=True,separators=(",",":"))+"\n").encode())
+            rows="".join(f'<li>{html.escape(k)}: {html.escape(str(v))}</li>' for k,v in comparison.items() if k not in {"permits_automated_action","live_ready","unattended_ready"})
+            return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Compare")+f'<main id="content"><h1>Snapshot comparison</h1><p>READ-ONLY observational comparison; causality cannot be established.</p><ul>{rows}</ul></main>').encode())
         if path in {"/diagnostics", "/api/diagnostics"}:
             projection=read_app_diagnostics(self.config,self.config.default_as_of.isoformat())
             if path=="/api/diagnostics": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(projection.to_dict(),sort_keys=True,separators=(",",":"))+"\n").encode())
