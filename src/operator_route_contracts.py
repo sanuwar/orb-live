@@ -18,7 +18,15 @@ def route_contracts(): return ROUTES
 def route_matches(path:str)->bool:
     if path in _ALL: return True
     parts=path.strip("/").split("/")
-    return len(parts)==3 and parts[0] in {"exports"} and parts[1] in {"snapshot","event","incident","import"} and (parts[2].endswith(".json") or parts[2].endswith(".html"))
+    if len(parts)==2 and parts[0] in {"history","timeline","incidents","imports"}:
+        return bool(parts[1])
+    if len(parts)==3 and parts[0] == "api" and parts[1] in {"history","timeline","incidents","imports"}:
+        return bool(parts[2])
+    if len(parts)==3 and parts[0] == "incidents" and parts[2] in {"export.json","export.html"}:
+        return bool(parts[1])
+    if len(parts)==4 and parts[:2] == ["api","incidents"] and parts[3] in {"export.json","export.html"}:
+        return bool(parts[2])
+    return False
 
 def verify_contracts():
     rows=tuple(x.to_dict() for x in ROUTES)
