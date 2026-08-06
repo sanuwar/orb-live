@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Any
 from src.operator_app_schema import create_schema, SCHEMA_VERSION
 from src.offline_path_safety import is_repository_data_path, REPOSITORY_ROOT
+from src.supervised_operator_console import SupervisedOperatorConsoleResult
+from src.operator_snapshot_history import HistoryItem
+from src.operator_event_timeline import OperatorEvent, EventType, EventSeverity
+from src.operator_incident_export import OperatorIncident
 
 class OperatorAppStoreError(ValueError): pass
 _SNAP_FIELDS=("snapshot_id","generated_as_of","release_commit_sha","implementation_digest","operating_mode","operational_status","supervised_readiness_status","recommended_operator_action","evidence_completeness","evidence_freshness","suspension_status","heartbeat_status","alert_status","acknowledgment_status","recovery_status","blocker_reasons_json","source_component_statuses_json","strategy_enabled","activation_approvals_present","approved_protection_state_count","protection_grounded","activation_approved","permits_automated_action","live_ready","unattended_ready","canonical_digest","import_batch_id")
@@ -89,6 +93,22 @@ def _get(database,table,key,value):
 def get_snapshot(d,i):return _get(d,"operator_snapshots","snapshot_id",i)
 def get_event(d,i):return _get(d,"operator_events","event_id",i)
 def get_incident(d,i):return _get(d,"operator_incidents","incident_id",i)
+def get_incident_projection(d,i):
+    c=_conn(d,readonly=True)
+    try:
+        row=dict(c.execute("SELECT * FROM operator_incidents WHERE incident_id=?",(i,)).fetchone() or {})
+        if not row: raise OperatorAppStoreError("record not found")
+        links=c.execute("SELECT evidence_type,evidence_id,ordinal FROM incident_evidence_links WHERE incident_id=? ORDER BY ordinal",(i,)).fetchall()
+        row["supporting_snapshot_ids"]=[x["evidence_id"] for x in links if x["evidence_type"]=="snapshot"]; row["supporting_event_ids"]=[x["evidence_id"] for x in links if x["evidence_type"]=="event"]; return incident_projection(row)
+    finally:c.close()
+def snapshot_projection(row):
+    d=dict(row); components=json.loads(d["source_component_statuses_json"]); blockers=json.loads(d["blocker_reasons_json"])
+    raw={"schema_version":1,"release_commit_sha":d["release_commit_sha"],"implementation_digest":d["implementation_digest"],"generated_as_of":d["generated_as_of"],"operating_mode":d["operating_mode"],"scheduler_status":components["scheduler"],"runner_status":components["runner"],"suspension_status":d["suspension_status"],"heartbeat_status":d["heartbeat_status"],"alert_status":d["alert_status"],"acknowledgment_status":d["acknowledgment_status"],"recovery_status":d["recovery_status"],"operational_status":d["operational_status"],"supervised_readiness_status":d["supervised_readiness_status"],"blocker_reasons":blockers,"recommended_operator_action":d["recommended_operator_action"],"strategy_enabled":False,"activation_approvals_present":False,"approved_protection_state_count":0,"protection_grounded":False,"activation_approved":False,"permits_automated_action":False,"live_ready":False,"unattended_ready":False,"evidence_completeness":d["evidence_completeness"],"evidence_freshness":d["evidence_freshness"],"source_component_statuses":components}
+    return HistoryItem(snapshot_id=d["snapshot_id"],snapshot=SupervisedOperatorConsoleResult.from_dict(raw))
+def event_projection(row):
+    d=dict(row); return OperatorEvent(1,d["event_id"],EventType(d["event_type"]),EventSeverity(d["severity"]),d["occurred_at"],d["source_snapshot_id"],d["source_component"],d["headline"],d["detail_code"],d["operational_status"],d["supervised_readiness_status"],tuple(json.loads(d["blocker_reasons_json"])),d["operator_action"])
+def incident_projection(row):
+    d=dict(row); return OperatorIncident(1,d["incident_id"],d["source_event_id"],d["incident_type"],d["severity"],d["opened_at"],d["latest_observed_at"],d["observation_status"],d["source_component"],d["headline"],d["detail_code"],tuple(json.loads(d["blocker_reasons_json"])),d["recommended_operator_action"],tuple(d.get("supporting_snapshot_ids",())),tuple(d.get("supporting_event_ids",())),d["operational_status"],d["supervised_readiness_status"],d["evidence_completeness"],d["evidence_freshness"])
 def verify_store_integrity(database):
     c=_conn(database,readonly=True)
     try:return not c.execute("PRAGMA integrity_check").fetchone()[0] != "ok" and c.execute("SELECT count(*) FROM operator_events e LEFT JOIN operator_snapshots s ON s.snapshot_id=e.source_snapshot_id WHERE e.source_snapshot_id IS NOT NULL AND s.snapshot_id IS NULL").fetchone()[0]==0

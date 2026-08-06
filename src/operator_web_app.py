@@ -13,6 +13,7 @@ from src.offline_path_safety import is_repository_data_path
 from src.operator_snapshot_history import HistoryError, HistoryNotFound, SnapshotHistory, compare_snapshots
 from src.operator_event_timeline import EVENT_DETAIL_KEYS, EVENT_LIST_KEYS, OperatorEventTimeline, TimelineError, TimelineNotFound
 from src.operator_incident_export import IncidentError, IncidentNotFound, OperatorIncidentStore, render_incident_html
+from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, get_incident_projection, snapshot_projection, event_projection)
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.supervised_operator_console import (
     ConsoleError,
@@ -44,6 +45,8 @@ class OperatorWebAppConfig:
     host: str = ALLOWED_HOST
     port: int = 8765
     refresh_interval: int = 0
+    backend_mode: str = "FILE_FIXTURE"
+    database_path: Path | None = None
 
     def validate(self) -> "OperatorWebAppConfig":
         if self.host != ALLOWED_HOST:
@@ -62,6 +65,17 @@ class OperatorWebAppConfig:
             raise WebAppConfigError("runtime root is unsafe")
         if any(part.casefold() in {"src", "tests", "test", "examples"} for part in root.parts):
             raise WebAppConfigError("runtime root is unsafe")
+        if self.backend_mode not in {"FILE_FIXTURE", "SQLITE_READ_MODEL"}:
+            raise WebAppConfigError("backend mode is invalid")
+        if self.backend_mode == "SQLITE_READ_MODEL":
+            if self.database_path is None:
+                raise WebAppConfigError("SQLite database is required")
+            try:
+                identity = inspect_store_identity(self.database_path)
+                if identity["schema_version"] != 1 or identity["release_commit_sha"] != resolve_head_sha(REPOSITORY_ROOT) or identity["implementation_digest"] != checkpoint_implementation_digest(REPOSITORY_ROOT) or not verify_store_integrity(self.database_path):
+                    raise WebAppConfigError("SQLite read model identity is invalid")
+            except (OperatorAppStoreError, OSError, KeyError):
+                raise WebAppConfigError("SQLite read model is unavailable") from None
         return self
 
 
@@ -73,6 +87,33 @@ def _parse_as_of(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise WebAppConfigError("as-of timestamp must be timezone-aware")
     return parsed
+
+class _SQLiteHistory:
+    def __init__(self, database): self.database = database
+    def query(self, *, as_of, status=None, blocker=None, from_value=None, to_value=None, page=1, page_size=25):
+        rows, _ = list_snapshots(self.database, page=1, page_size=100); items=[snapshot_projection(x) for x in rows]
+        if status: items=[x for x in items if x.to_dict()["operational_status"]==status or x.to_dict()["supervised_readiness_status"]==status]
+        if blocker: items=[x for x in items if blocker in x.to_dict()["blocker_reasons"]]
+        start=(page-1)*page_size; return tuple(items[start:start+page_size]),len(items)
+    def get(self, *, snapshot_id, as_of):
+        try:return snapshot_projection(get_snapshot(self.database,snapshot_id))
+        except OperatorAppStoreError: raise HistoryNotFound("snapshot is not present") from None
+    def current(self, as_of):
+        rows,_=list_snapshots(self.database,page=1,page_size=1); return snapshot_projection(rows[0]).snapshot if rows else None
+
+class _SQLiteTimeline:
+    def __init__(self, database): self.database=database
+    def query(self, *, as_of, event_type=None, severity=None, from_value=None, to_value=None, page=1, page_size=25):
+        rows,_=list_events(self.database,event_type=event_type,severity=severity,page=1,page_size=100); events=[event_projection(x) for x in rows]; start=(page-1)*page_size; return tuple(events[start:start+page_size]),len(events)
+    def get(self, *, event_id, as_of):
+        try:return event_projection(get_event(self.database,event_id))
+        except OperatorAppStoreError: raise TimelineNotFound("event is not present") from None
+
+class _SQLiteIncidents:
+    def __init__(self, database): self.database=database
+    def get(self, *, incident_id, as_of):
+        try:return get_incident_projection(self.database,incident_id)
+        except OperatorAppStoreError: raise IncidentNotFound("incident is not present") from None
 
 
 def _headers(content_type: str, status: str = "200 OK") -> list[tuple[str, str]]:
@@ -215,7 +256,7 @@ class OperatorWebApp:
                 return default if name not in query else int(query[name][0])
             except ValueError:
                 raise HistoryError("history pagination is invalid") from None
-        history = SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
+        history = _SQLiteHistory(self.config.database_path) if self.config.backend_mode == "SQLITE_READ_MODEL" else SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
         items, total = history.query(as_of=as_of, status=query.get("status", [None])[0], blocker=query.get("blocker", [None])[0], from_value=query.get("from", [None])[0], to_value=query.get("to", [None])[0], page=integer("page", 1), page_size=integer("page_size", 25))
         return as_of, history, items, total, integer("page", 1), integer("page_size", 25)
 
@@ -251,7 +292,7 @@ class OperatorWebApp:
                         return default if name not in query else int(query[name][0])
                     except ValueError:
                         raise TimelineError("timeline pagination is invalid") from None
-                timeline = OperatorEventTimeline(SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT))
+                timeline = _SQLiteTimeline(self.config.database_path) if self.config.backend_mode == "SQLITE_READ_MODEL" else OperatorEventTimeline(SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT))
                 events, total = timeline.query(as_of=as_of, event_type=query.get("event_type", [None])[0], severity=query.get("severity", [None])[0], from_value=query.get("from", [None])[0], to_value=query.get("to", [None])[0], page=integer("page", 1), page_size=integer("page_size", 25))
                 page, page_size = integer("page", 1), integer("page_size", 25)
             except TimelineError:
@@ -271,9 +312,9 @@ class OperatorWebApp:
                 if set(query) - {"as_of"} or len(query.get("as_of", [])) > 1:
                     raise HistoryError("history query is invalid")
                 as_of = self.config.default_as_of if "as_of" not in query else _parse_as_of(query["as_of"][0])
-                history = SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
+                history = _SQLiteHistory(self.config.database_path) if self.config.backend_mode == "SQLITE_READ_MODEL" else SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
                 item = history.get(snapshot_id=snapshot_id, as_of=as_of)
-                current = load_console_snapshot(runtime_root=self.config.runtime_root, as_of=as_of)
+                current = history.current(as_of) if self.config.backend_mode == "SQLITE_READ_MODEL" else load_console_snapshot(runtime_root=self.config.runtime_root, as_of=as_of)
             except HistoryNotFound:
                 return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
             except (HistoryError, ConsoleError, ConsoleIdentityError, ConsoleSafetyError):
@@ -291,7 +332,7 @@ class OperatorWebApp:
                 if set(query) - {"as_of"} or len(query.get("as_of", [])) > 1:
                     raise TimelineError("timeline query is invalid")
                 as_of = self.config.default_as_of if "as_of" not in query else _parse_as_of(query["as_of"][0])
-                timeline = OperatorEventTimeline(SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT))
+                timeline = _SQLiteTimeline(self.config.database_path) if self.config.backend_mode == "SQLITE_READ_MODEL" else OperatorEventTimeline(SnapshotHistory(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT))
                 event = timeline.get(event_id=event_id, as_of=as_of)
             except TimelineNotFound:
                 return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
@@ -312,7 +353,7 @@ class OperatorWebApp:
                 query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
                 if query:
                     raise IncidentError("incident query is invalid")
-                store = OperatorIncidentStore(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
+                store = _SQLiteIncidents(self.config.database_path) if self.config.backend_mode == "SQLITE_READ_MODEL" else OperatorIncidentStore(runtime_root=self.config.runtime_root, repository_root=REPOSITORY_ROOT)
                 incident = store.get(incident_id=incident_id, as_of=self.config.default_as_of)
             except IncidentNotFound:
                 return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
