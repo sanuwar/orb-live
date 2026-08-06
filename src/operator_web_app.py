@@ -16,6 +16,7 @@ from src.operator_incident_export import IncidentError, IncidentNotFound, Operat
 from src.operator_app_store import (OperatorAppStoreError, inspect_store_identity, verify_store_integrity, list_snapshots, get_snapshot, list_events, get_event, get_incident_projection, snapshot_projection, event_projection)
 from src.operator_store_status import read_store_status
 from src.operator_import_history import list_operator_imports, get_operator_import
+from src.operator_global_search import search_store
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.supervised_operator_console import (
     ConsoleError,
@@ -145,7 +146,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Data Status","/data-status"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Imports","/imports"),("Search","/search"),("Data Status","/data-status"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -291,6 +292,20 @@ class OperatorWebApp:
             return _response(start_response, "200 OK", "application/json; charset=utf-8", b'{"mode":"READ_ONLY_OPERATOR_UI","status":"UP"}\n')
         if path == "/about":
             return _response(start_response, "200 OK", "text/html; charset=utf-8", _about_body().encode("utf-8"))
+        if path in {"/search", "/api/search"}:
+            if self.config.backend_mode != "SQLITE_READ_MODEL":
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            try:
+                query=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"q","type","from","to","page","page_size"}
+                if set(query)-allowed or any(len(v)!=1 for v in query.values()) or "q" not in query: raise OperatorAppStoreError("invalid search")
+                page=int(query.get("page",[1])[0]); size=int(query.get("page_size",[25])[0]); kind=query.get("type",["ALL"])[0]
+                items,total=search_store(self.config.database_path,query["q"][0],result_type=kind,from_value=query.get("from",[None])[0],to_value=query.get("to",[None])[0],page=page,page_size=size)
+            except (ValueError, OperatorAppStoreError):
+                return _response(start_response,"400 Bad Request","application/json; charset=utf-8",b'{"status":"INVALID_SEARCH"}\n')
+            payload={"schema_version":1,"page":page,"page_size":size,"total_count":total,"items":[x.to_dict() for x in items]}
+            if path=="/api/search": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\n").encode())
+            rows="".join(f'<li><a href="{html.escape(x.detail_url,quote=True)}">{html.escape(x.result_type)} {html.escape(x.result_id)}</a> — {html.escape(x.headline)} ({html.escape(x.occurred_at)})</li>' for x in items) or "<li>No matches found.</li>"
+            return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Search")+f'<main id="content"><h1>Operator search</h1><p class="readonly">READ-ONLY</p><ul>{rows}</ul></main>').encode())
         if path in {"/data-status", "/api/data-status"}:
             status = read_store_status(self.config.database_path, generated_as_of=self.config.default_as_of.isoformat()) if self.config.backend_mode == "SQLITE_READ_MODEL" else read_store_status(None, generated_as_of=self.config.default_as_of.isoformat())
             if path == "/api/data-status":
