@@ -116,7 +116,7 @@ def build_operator_route_table() -> ApplicationRouteTable:
     table.mount("/api/history", _build_mounted_detail_router("/{snapshot_id}"), name_prefix="api_history", endpoint_prefix="operator_web_app", classification="API")
     table.mount("/timeline", _build_mounted_detail_router("/{event_id}"), name_prefix="timeline", endpoint_prefix="operator_web_app")
     table.mount("/api/timeline", _build_mounted_detail_router("/{event_id}"), name_prefix="api_timeline", endpoint_prefix="operator_web_app", classification="API")
-    table.mount("/incidents", _build_mounted_detail_router("/{incident_id}", "/{incident_id}/export.html"), name_prefix="incidents", endpoint_prefix="operator_web_app")
+    table.mount("/incidents", _build_mounted_detail_router("/{incident_id}", "/{incident_id}/export.json", "/{incident_id}/export.html"), name_prefix="incidents", endpoint_prefix="operator_web_app")
     table.mount("/api/incidents", _build_mounted_detail_router("/{incident_id}", "/{incident_id}/export.json"), name_prefix="api_incidents", endpoint_prefix="operator_web_app", classification="API")
     table.mount("/imports", _build_mounted_detail_router("/{batch_id}"), name_prefix="imports", endpoint_prefix="operator_web_app")
     table.mount("/api/imports", _build_mounted_detail_router("/{batch_id}"), name_prefix="api_imports", endpoint_prefix="operator_web_app", classification="API")
