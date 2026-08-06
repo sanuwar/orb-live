@@ -12,6 +12,7 @@ def test_exact_sha_dispatch_is_declared_and_pinned() -> None:
     assert "^[0-9a-fA-F]{40}$" in WORKFLOW
     assert "ref: ${{ inputs.commit_sha }}" in WORKFLOW
     assert "uses: actions/checkout@v7" in WORKFLOW
+    assert "persist-credentials: true" in WORKFLOW
     assert 'git fetch --no-tags --depth=1 origin "$requested_sha_lower"' in WORKFLOW
     assert 'git checkout --detach "$requested_sha_lower"' in WORKFLOW
     assert 'actual_sha="$(git rev-parse HEAD)"' in WORKFLOW
