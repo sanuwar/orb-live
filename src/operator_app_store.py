@@ -13,6 +13,24 @@ from src.operator_incident_export import OperatorIncident
 
 class OperatorAppStoreError(ValueError): pass
 _SNAP_FIELDS=("snapshot_id","generated_as_of","release_commit_sha","implementation_digest","operating_mode","operational_status","supervised_readiness_status","recommended_operator_action","evidence_completeness","evidence_freshness","suspension_status","heartbeat_status","alert_status","acknowledgment_status","recovery_status","blocker_reasons_json","source_component_statuses_json","strategy_enabled","activation_approvals_present","approved_protection_state_count","protection_grounded","activation_approved","permits_automated_action","live_ready","unattended_ready","canonical_digest","import_batch_id")
+_TABLE_FIELDS={
+    "schema_metadata": ("singleton_id","schema_version","release_commit_sha","implementation_digest"),
+    "import_batches": ("import_batch_id","imported_at","source_release_commit_sha","source_implementation_digest","source_count","accepted_count","rejected_count"),
+    "operator_snapshots": tuple(x for x in _SNAP_FIELDS if x != "canonical_digest"),
+    "operator_events": ("event_id","event_type","severity","occurred_at","source_snapshot_id","source_component","headline","detail_code","operational_status","supervised_readiness_status","blocker_reasons_json","operator_action","permits_automated_action","live_ready","unattended_ready","import_batch_id"),
+    "operator_incidents": ("incident_id","source_event_id","incident_type","severity","opened_at","latest_observed_at","observation_status","source_component","headline","detail_code","blocker_reasons_json","recommended_operator_action","operational_status","supervised_readiness_status","evidence_completeness","evidence_freshness","strategy_enabled","activation_approvals_present","protection_grounded","activation_approved","permits_automated_action","live_ready","unattended_ready","import_batch_id"),
+    "incident_evidence_links": ("incident_id","evidence_type","evidence_id","ordinal"),
+}
+_ROW_DIGEST_COLUMNS={"operator_snapshots":"canonical_digest","operator_events":"canonical_digest","operator_incidents":"canonical_digest","import_batches":"batch_digest"}
+_EXPECTED_TABLES=frozenset(_TABLE_FIELDS)
+_TABLE_COLUMNS={
+    "schema_metadata": ("singleton_id","schema_version","created_at","release_commit_sha","implementation_digest","content_digest"),
+    "import_batches": ("import_batch_id","imported_at","source_release_commit_sha","source_implementation_digest","source_count","accepted_count","rejected_count","batch_digest"),
+    "operator_snapshots": _SNAP_FIELDS,
+    "operator_events": ("event_id","event_type","severity","occurred_at","source_snapshot_id","source_component","headline","detail_code","operational_status","supervised_readiness_status","blocker_reasons_json","operator_action","permits_automated_action","live_ready","unattended_ready","canonical_digest","import_batch_id"),
+    "operator_incidents": ("incident_id","source_event_id","incident_type","severity","opened_at","latest_observed_at","observation_status","source_component","headline","detail_code","blocker_reasons_json","recommended_operator_action","operational_status","supervised_readiness_status","evidence_completeness","evidence_freshness","strategy_enabled","activation_approvals_present","protection_grounded","activation_approved","permits_automated_action","live_ready","unattended_ready","canonical_digest","import_batch_id"),
+    "incident_evidence_links": ("incident_id","evidence_type","evidence_id","ordinal"),
+}
 def _path(path: Path, *, allow_memory=False) -> Path|str:
     if str(path)==":memory:":
         if allow_memory:return ":memory:"
@@ -35,9 +53,10 @@ def initialize_store(database, *, release_commit_sha, implementation_digest):
         c.execute("BEGIN IMMEDIATE")
         if c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_metadata'").fetchone():
             row=c.execute("SELECT * FROM schema_metadata").fetchone()
-            if row["schema_version"] != 1: raise OperatorAppStoreError("unknown schema version")
+            if row["schema_version"] != 1 or "content_digest" not in row.keys(): raise OperatorAppStoreError("unknown schema version")
             if row["release_commit_sha"] != release_commit_sha or row["implementation_digest"] != implementation_digest: raise OperatorAppStoreError("store identity conflicts")
         else: create_schema(c, release_commit_sha=release_commit_sha, implementation_digest=implementation_digest)
+        c.execute("UPDATE schema_metadata SET content_digest=? WHERE singleton_id=1", (_canonical_content_digest(c),))
         c.commit()
     except Exception: c.rollback(); raise
     finally:c.close()
@@ -46,6 +65,85 @@ def inspect_store_identity(database):
     try:return dict(c.execute("SELECT * FROM schema_metadata").fetchone())
     finally:c.close()
 def _digest(kind, data): return hashlib.sha256((kind+"\0"+json.dumps(data,sort_keys=True,separators=(",",":"))).encode()).hexdigest()
+
+def _canonical_value(value):
+    if isinstance(value, bytes): return {"type":"bytes","value":value.hex()}
+    if value is None: return {"type":"null","value":None}
+    if isinstance(value, bool): return {"type":"bool","value":value}
+    if isinstance(value, int): return {"type":"int","value":value}
+    if isinstance(value, float): return {"type":"float","value":value}
+    return {"type":"text","value":str(value)}
+
+def _row_payload(table, row):
+    columns=_TABLE_FIELDS[table]
+    return {"table":table,"identity":_canonical_value(row[columns[0]]),"fields":[[name,_canonical_value(row[name])] for name in columns]}
+
+def _row_digest(table, row): return _digest("operator-row", _row_payload(table,row))
+
+def _canonical_content_digest(connection):
+    content={"schema_version":SCHEMA_VERSION,"tables":[]}
+    for table in sorted(_EXPECTED_TABLES):
+        rows=connection.execute("SELECT * FROM "+table).fetchall()
+        payloads=[]
+        for row in rows:
+            d=dict(row)
+            if table=="schema_metadata": d={k:d[k] for k in _TABLE_FIELDS[table]}
+            else: d={k:d[k] for k in _TABLE_FIELDS[table]}
+            payloads.append(_row_payload(table,d))
+        payloads.sort(key=lambda x: json.dumps(x["identity"],sort_keys=True,separators=(",",":")))
+        content["tables"].append({"table":table,"fields":list(_TABLE_FIELDS[table]),"rows":payloads})
+    return _digest("operator-content",content)
+
+def _validate_timestamp(value):
+    try:
+        parsed=datetime.fromisoformat(str(value).replace("Z","+00:00"))
+    except (TypeError,ValueError): raise OperatorAppStoreError("invalid read-model timestamp") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None: raise OperatorAppStoreError("invalid read-model timestamp")
+
+def _validate_json(value, expected):
+    try: parsed=json.loads(value)
+    except (TypeError,ValueError): raise OperatorAppStoreError("invalid read-model JSON") from None
+    if not isinstance(parsed, expected): raise OperatorAppStoreError("invalid read-model JSON")
+    return parsed
+
+def _validate_operator_content(connection):
+    tables={r["name"] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if tables != _EXPECTED_TABLES: raise OperatorAppStoreError("unsupported read-model schema")
+    for table, fields in _TABLE_FIELDS.items():
+        actual=tuple(r["name"] for r in connection.execute("PRAGMA table_info("+table+")"))
+        expected=_TABLE_COLUMNS[table]
+        if actual != expected: raise OperatorAppStoreError("unsupported read-model table shape")
+    meta=connection.execute("SELECT * FROM schema_metadata").fetchall()
+    if len(meta)!=1 or meta[0]["schema_version"]!=SCHEMA_VERSION or not meta[0]["content_digest"]: raise OperatorAppStoreError("read-model identity unavailable")
+    for table in ("import_batches","operator_snapshots","operator_events","operator_incidents"):
+        rows=connection.execute("SELECT * FROM "+table).fetchall()
+        identities=set()
+        for row in rows:
+            d=dict(row); identity=d[_TABLE_FIELDS[table][0]]
+            if identity in identities: raise OperatorAppStoreError("duplicate read-model identity")
+            identities.add(identity)
+            if table=="import_batches":
+                for key in ("imported_at",): _validate_timestamp(d[key])
+                if any(type(d[k]) is not int or d[k] < 0 for k in ("source_count","accepted_count","rejected_count")): raise OperatorAppStoreError("invalid read-model count")
+            elif table=="operator_snapshots":
+                _validate_timestamp(d["generated_as_of"]); _validate_json(d["blocker_reasons_json"],list); _validate_json(d["source_component_statuses_json"],dict)
+            elif table=="operator_events":
+                _validate_timestamp(d["occurred_at"]); _validate_json(d["blocker_reasons_json"],list)
+            else:
+                _validate_timestamp(d["opened_at"]); _validate_timestamp(d["latest_observed_at"]); _validate_json(d["blocker_reasons_json"],list)
+            if table != "import_batches" and any(d[k] != 0 for k in ("permits_automated_action","live_ready","unattended_ready")): raise OperatorAppStoreError("unsafe read-model invariant")
+            if table=="operator_snapshots" and any(d[k] != 0 for k in ("strategy_enabled","activation_approvals_present","approved_protection_state_count","protection_grounded","activation_approved")): raise OperatorAppStoreError("unsafe read-model invariant")
+            if table=="operator_incidents" and any(d[k] != 0 for k in ("strategy_enabled","activation_approvals_present","protection_grounded","activation_approved")): raise OperatorAppStoreError("unsafe read-model invariant")
+            if d[_ROW_DIGEST_COLUMNS[table]] != _row_digest(table,d): raise OperatorAppStoreError("read-model row digest mismatch")
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None: raise OperatorAppStoreError("read-model relationship mismatch")
+    if _canonical_content_digest(connection) != meta[0]["content_digest"]: raise OperatorAppStoreError("read-model content digest mismatch")
+
+def operator_content_digest(database):
+    c=_conn(database,readonly=True)
+    try:
+        _validate_operator_content(c)
+        return c.execute("SELECT content_digest FROM schema_metadata WHERE singleton_id=1").fetchone()[0]
+    finally:c.close()
 def import_projection_batch(database, *, snapshots, events, incidents, imported_at, source_release_commit_sha, source_implementation_digest):
     c=_conn(database); batch_data={"snapshots":[x.to_dict() for x in snapshots],"events":[x.to_dict() for x in events],"incidents":[x.to_dict() for x in incidents]}; bd=_digest("batch",batch_data); bid="import-"+bd
     try:
@@ -57,12 +155,16 @@ def import_projection_batch(database, *, snapshots, events, incidents, imported_
             d=s.to_dict(); raw={k:d[k] for k in d if k not in {"schema_version","scheduler_status","runner_status"}}; sd=_digest("snapshot",raw)
             vals=(d["snapshot_id"],d["generated_as_of"],d["release_commit_sha"],d["implementation_digest"],d["operating_mode"],d["operational_status"],d["supervised_readiness_status"],d["recommended_operator_action"],d["evidence_completeness"],d["evidence_freshness"],d["suspension_status"],d["heartbeat_status"],d["alert_status"],d["acknowledgment_status"],d["recovery_status"],json.dumps(d["blocker_reasons"],sort_keys=True,separators=(",",":")),json.dumps(d["source_component_statuses"],sort_keys=True,separators=(",",":")),0,0,0,0,0,0,0,0,sd,bid)
             c.execute("INSERT INTO operator_snapshots VALUES ("+",".join("?"*len(vals))+")",vals)
+            row=dict(c.execute("SELECT * FROM operator_snapshots WHERE snapshot_id=?",(d["snapshot_id"],)).fetchone()); c.execute("UPDATE operator_snapshots SET canonical_digest=? WHERE snapshot_id=?",(_row_digest("operator_snapshots",row),d["snapshot_id"]))
         for e in events:
-            d=e.to_dict(); ed=_digest("event",d); vals=(d["event_id"],d["event_type"],d["severity"],d["occurred_at"],d["source_snapshot_id"],d["source_component"],d["headline"],d["detail_code"],d["operational_status"],d["supervised_readiness_status"],json.dumps(d["blocker_reasons"],sort_keys=True,separators=(",",":")),d["operator_action"],0,0,0,ed,bid); c.execute("INSERT INTO operator_events VALUES ("+",".join("?"*len(vals))+")",vals)
+            d=e.to_dict(); ed=_digest("event",d); vals=(d["event_id"],d["event_type"],d["severity"],d["occurred_at"],d["source_snapshot_id"],d["source_component"],d["headline"],d["detail_code"],d["operational_status"],d["supervised_readiness_status"],json.dumps(d["blocker_reasons"],sort_keys=True,separators=(",",":")),d["operator_action"],0,0,0,ed,bid); c.execute("INSERT INTO operator_events VALUES ("+",".join("?"*len(vals))+")",vals); row=dict(c.execute("SELECT * FROM operator_events WHERE event_id=?",(d["event_id"],)).fetchone()); c.execute("UPDATE operator_events SET canonical_digest=? WHERE event_id=?",(_row_digest("operator_events",row),d["event_id"]))
         for i in incidents:
-            d=i.to_dict(); idig=_digest("incident",d); vals=(d["incident_id"],d["source_event_id"],d["incident_type"],d["severity"],d["opened_at"],d["latest_observed_at"],d["active"],d["source_component"],d["headline"],d["detail_code"],json.dumps(d["blocker_reasons"],sort_keys=True,separators=(",",":")),d["recommended_operator_action"],d["operational_status"],d["supervised_readiness_status"],d["evidence_completeness"],d["evidence_freshness"],0,0,0,0,0,0,0,idig,bid); c.execute("INSERT INTO operator_incidents VALUES ("+",".join("?"*len(vals))+")",vals)
+            d=i.to_dict(); idig=_digest("incident",d); vals=(d["incident_id"],d["source_event_id"],d["incident_type"],d["severity"],d["opened_at"],d["latest_observed_at"],d["active"],d["source_component"],d["headline"],d["detail_code"],json.dumps(d["blocker_reasons"],sort_keys=True,separators=(",",":")),d["recommended_operator_action"],d["operational_status"],d["supervised_readiness_status"],d["evidence_completeness"],d["evidence_freshness"],0,0,0,0,0,0,0,idig,bid); c.execute("INSERT INTO operator_incidents VALUES ("+",".join("?"*len(vals))+")",vals); row=dict(c.execute("SELECT * FROM operator_incidents WHERE incident_id=?",(d["incident_id"],)).fetchone()); c.execute("UPDATE operator_incidents SET canonical_digest=? WHERE incident_id=?",(_row_digest("operator_incidents",row),d["incident_id"]))
             for n,eid in enumerate(d["supporting_event_ids"]): c.execute("INSERT INTO incident_evidence_links VALUES (?,?,?,?)",(d["incident_id"],"event",eid,n))
             for n,sid in enumerate(d["supporting_snapshot_ids"],len(d["supporting_event_ids"])): c.execute("INSERT INTO incident_evidence_links VALUES (?,?,?,?)",(d["incident_id"],"snapshot",sid,n))
+        batch_row=dict(c.execute("SELECT * FROM import_batches WHERE import_batch_id=?",(bid,)).fetchone())
+        c.execute("UPDATE import_batches SET batch_digest=? WHERE import_batch_id=?",(_row_digest("import_batches",batch_row),bid))
+        c.execute("UPDATE schema_metadata SET content_digest=? WHERE singleton_id=1", (_canonical_content_digest(c),))
         c.commit(); return bid
     except Exception: c.rollback(); raise
     finally:c.close()
@@ -111,8 +213,11 @@ def incident_projection(row):
     d=dict(row); return OperatorIncident(1,d["incident_id"],d["source_event_id"],d["incident_type"],d["severity"],d["opened_at"],d["latest_observed_at"],d["observation_status"],d["source_component"],d["headline"],d["detail_code"],tuple(json.loads(d["blocker_reasons_json"])),d["recommended_operator_action"],tuple(d.get("supporting_snapshot_ids",())),tuple(d.get("supporting_event_ids",())),d["operational_status"],d["supervised_readiness_status"],d["evidence_completeness"],d["evidence_freshness"])
 def verify_store_integrity(database):
     c=_conn(database,readonly=True)
-    try:return not c.execute("PRAGMA integrity_check").fetchone()[0] != "ok" and c.execute("SELECT count(*) FROM operator_events e LEFT JOIN operator_snapshots s ON s.snapshot_id=e.source_snapshot_id WHERE e.source_snapshot_id IS NOT NULL AND s.snapshot_id IS NULL").fetchone()[0]==0
-    finally:c.close()
+    try:
+        if c.execute("PRAGMA integrity_check").fetchone()[0] != "ok": return False
+        _validate_operator_content(c); return True
+    except (OperatorAppStoreError, sqlite3.DatabaseError, TypeError, ValueError, KeyError): return False
+    finally: c.close()
 def inspect_store_content(database):
     c=_conn(database,readonly=True)
     try:
