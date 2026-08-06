@@ -10,6 +10,10 @@ def test_trends_are_descriptive_and_bounded():
 def test_unknown_metric_rejected():
     with pytest.raises(ValueError): summarize_trends((),"2026-08-05T14:00:00Z",metric="forecast")
 
+def test_active_incident_historical_population_is_explicitly_unsupported():
+    with pytest.raises(ValueError):
+        summarize_trends((("2026-08-05T12:00:00Z", 1),), "2026-08-05T14:00:00Z", metric="active_incidents")
+
 def test_hour_and_day_buckets_aggregate_and_zero_fill():
     values=(("2026-08-05T12:05:00-04:00",1),("2026-08-05T12:55:00-04:00",2),("2026-08-05T14:01:00-04:00",4))
     hourly=summarize_trends(values,"2026-08-05T16:00:00Z",window_start="2026-08-05T16:00:00Z",window_end="2026-08-05T20:00:00Z")

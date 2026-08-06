@@ -2,7 +2,9 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime,timezone,timedelta
-METRICS=frozenset({"blocker_occurrences","active_incidents","event_count","stale_evidence","missing_evidence","import_count"})
+# Historical incident population cannot be reconstructed from observation rows;
+# reject that misleading metric rather than repeating a current count by bucket.
+METRICS=frozenset({"blocker_occurrences","event_count","stale_evidence","missing_evidence","import_count"})
 @dataclass(frozen=True)
 class EvidenceTrends:
     schema_version:int; generated_as_of:str; window_start:str; window_end:str; bucket_size:str; selected_metric:str; buckets:tuple[dict,...]; total_count:int; minimum_count:int; maximum_count:int; latest_count:int
