@@ -13,6 +13,54 @@ from dataclasses import dataclass, replace
 _PARAMETER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
+def _route_segment_parts(segment: str) -> list[tuple[str, str]]:
+    """Return literal/parameter pieces for one registered path segment."""
+    pieces: list[tuple[str, str]] = []
+    cursor = 0
+    for match in _PARAMETER.finditer(segment):
+        literal = segment[cursor:match.start()]
+        if "{" in literal or "}" in literal:
+            raise ValueError("route path syntax is invalid")
+        if literal:
+            pieces.append(("literal", literal))
+        pieces.append(("parameter", match.group(1)))
+        cursor = match.end()
+    literal = segment[cursor:]
+    if "{" in literal or "}" in literal:
+        raise ValueError("route path syntax is invalid")
+    if literal:
+        pieces.append(("literal", literal))
+    if not pieces:
+        raise ValueError("route path syntax is invalid")
+    return pieces
+
+
+def _compile_route_pattern(path: str) -> tuple[re.Pattern[str], tuple[str, ...]]:
+    """Compile a registered route template without accepting arbitrary regex."""
+    normalized = normalize_route_path(path)
+    if normalized == "/":
+        return re.compile(r"^/$"), ()
+
+    parameter_names: list[str] = []
+    compiled_segments: list[str] = []
+    for segment in normalized.strip("/").split("/"):
+        segment_pattern: list[str] = []
+        pieces = _route_segment_parts(segment)
+        for index, (kind, value) in enumerate(pieces):
+            if kind == "literal":
+                segment_pattern.append(re.escape(value))
+                continue
+            if value in parameter_names:
+                raise ValueError("duplicate route parameter name")
+            parameter_names.append(value)
+            has_literal_after = any(piece_kind == "literal" for piece_kind, _ in pieces[index + 1 :])
+            quantifier = "+?" if has_literal_after else "+"
+            segment_pattern.append(f"(?P<{value}>[^/]{quantifier})")
+        compiled_segments.append("".join(segment_pattern))
+
+    return re.compile(r"^/" + "/".join(compiled_segments) + r"/?$"), tuple(parameter_names)
+
+
 def normalize_route_path(path: str) -> str:
     """Return the canonical route-template spelling used by the app table."""
     if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
@@ -21,12 +69,15 @@ def normalize_route_path(path: str) -> str:
         raise ValueError("route path must not have a trailing slash")
     normalized = _PARAMETER.sub(lambda match: "{" + match.group(1) + "}", path)
     if normalized != "/":
+        parameter_names: set[str] = set()
         for segment in normalized.strip("/").split("/"):
-            if not segment or "?" in segment or "{" in segment.replace("{", "", 1) or "}" in segment.replace("}", "", 1):
-                raise ValueError("route path syntax is invalid")
-            remainder = _PARAMETER.sub("", segment)
-            if "{" in remainder or "}" in remainder or (remainder and not remainder.replace(".", "").replace("-", "").replace("_", "").isalnum()):
-                raise ValueError("route path syntax is invalid")
+            for kind, value in _route_segment_parts(segment):
+                if kind == "parameter":
+                    if value in parameter_names:
+                        raise ValueError("duplicate route parameter name")
+                    parameter_names.add(value)
+                elif value == "?" or not value.replace(".", "").replace("-", "").replace("_", "").isalnum():
+                    raise ValueError("route path syntax is invalid")
     return normalized
 
 
@@ -83,15 +134,14 @@ class ApplicationRoute:
         }
 
     def matches(self, path: str) -> bool:
-        actual = path if path == "/" else path.rstrip("/")
-        expected_parts = self.path.strip("/").split("/") if self.path != "/" else []
-        actual_parts = actual.strip("/").split("/") if actual != "/" else []
-        if len(expected_parts) != len(actual_parts):
-            return False
-        return all(
-            expected == actual or (_PARAMETER.fullmatch(expected) is not None and bool(actual))
-            for expected, actual in zip(expected_parts, actual_parts)
-        )
+        return self.match_params(path) is not None
+
+    def match_params(self, path: str) -> dict[str, str] | None:
+        pattern, parameter_names = _compile_route_pattern(self.path)
+        match = pattern.fullmatch(path)
+        if match is None:
+            return None
+        return {name: match.group(name) for name in parameter_names}
 
 
 class ApplicationRouteTable:
@@ -119,6 +169,7 @@ class ApplicationRouteTable:
     def validate(self) -> None:
         names: set[str] = set()
         path_methods: set[tuple[str, str]] = set()
+        route_shapes: set[tuple[str, str]] = set()
         for route in self.routes:
             if route.name in names:
                 raise ValueError("duplicate operator route name")
@@ -128,6 +179,11 @@ class ApplicationRouteTable:
                 if key in path_methods:
                     raise ValueError("duplicate operator route path/method")
                 path_methods.add(key)
+                shape = _PARAMETER.sub("{}", route.path)
+                shape_key = (shape, method)
+                if shape_key in route_shapes:
+                    raise ValueError("ambiguous operator route path/method")
+                route_shapes.add(shape_key)
             if route.route_type not in {"HTML", "API", "HEALTH", "EXPORT", "MOUNTED"}:
                 raise ValueError("unknown operator route type")
             if route.safety_authority != "NONE" or route.permits_database_write or route.permits_runtime_write or route.permits_outbound_network or route.exposes_private_data:

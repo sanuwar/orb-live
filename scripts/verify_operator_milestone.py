@@ -108,7 +108,7 @@ def main():
         database = Path(demo["database"])
         app = OperatorWebApp(OperatorWebAppConfig(runtime_root=Path(demo["root"]), database_path=database, backend_mode="SQLITE_READ_MODEL", expected_content_digest=demo["expected_content_digest"], default_as_of=as_of))
         routes = discover_application_routes(app)
-        if len(routes) != 48:
+        if len(routes) != 49:
             raise RuntimeError("framework-derived route count changed")
         rows = verify_contracts(app)
         _route_negative_controls()

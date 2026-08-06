@@ -51,7 +51,7 @@ class RouteContract:
 # so a permissive application table cannot make itself self-validating.
 _BASE = ("/", "/about", "/healthz", "/history", "/timeline", "/incidents", "/imports", "/data-status", "/search", "/compare", "/exports", "/activity", "/blockers", "/freshness", "/coverage", "/views", "/diagnostics", "/trends", "/release")
 _API = ("/api/snapshot",) + tuple("/api" + path for path in _BASE if path not in {"/", "/about", "/healthz"})
-_VARIANTS = ("/history/{snapshot_id}", "/api/history/{snapshot_id}", "/timeline/{event_id}", "/api/timeline/{event_id}", "/incidents/{incident_id}", "/api/incidents/{incident_id}", "/incidents/{incident_id}/export.html", "/api/incidents/{incident_id}/export.json", "/imports/{batch_id}", "/api/imports/{batch_id}", "/exports/{kind}/{id}.json", "/exports/{kind}/{id}.html")
+_VARIANTS = ("/history/{snapshot_id}", "/api/history/{snapshot_id}", "/timeline/{event_id}", "/api/timeline/{event_id}", "/incidents/{incident_id}", "/incidents/{incident_id}/export.json", "/incidents/{incident_id}/export.html", "/api/incidents/{incident_id}", "/api/incidents/{incident_id}/export.json", "/imports/{batch_id}", "/api/imports/{batch_id}", "/exports/{kind}/{id}.json", "/exports/{kind}/{id}.html")
 _ALL = tuple(dict.fromkeys(_BASE + _API + _VARIANTS))
 
 

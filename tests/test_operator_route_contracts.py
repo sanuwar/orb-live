@@ -37,7 +37,7 @@ def test_unknown_route_is_not_contract_eligible():
 
 def test_application_inventory_is_framework_derived_and_parameterized():
     actual=discover_application_routes(_app())
-    assert len(actual)==48
+    assert len(actual)==49
     assert "/api/history/{snapshot_id}" in {route.path for route in actual}
     assert "/exports/{kind}/{id}.json" in {route.path for route in actual}
     assert all(route.methods == ("GET",) and route.name and route.endpoint and route.route_type for route in actual)
