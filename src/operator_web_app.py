@@ -23,6 +23,7 @@ from src.operator_blocker_analytics import summarize_blockers
 from src.operator_evidence_freshness import summarize_freshness
 from src.operator_evidence_coverage import read_coverage
 from src.operator_view_presets import list_presets
+from src.operator_evidence_trends import summarize_trends
 from src.operator_incident_index import list_incident_index
 from src.operator_import_history import list_operator_imports, get_operator_import
 from src.operator_global_search import search_store
@@ -155,7 +156,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Activity","/activity"),("Blockers","/blockers"),("Freshness","/freshness"),("Coverage","/coverage"),("Views","/views"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Activity","/activity"),("Blockers","/blockers"),("Freshness","/freshness"),("Coverage","/coverage"),("Views","/views"),("Trends","/trends"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -311,6 +312,22 @@ class OperatorWebApp:
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
             rows = "".join(f'<li><a href="{html.escape(p["target_route"], quote=True)}">{html.escape(p["title"])}</a> — {html.escape(p["description"])}</li>' for p in items)
             return _response(start_response, "200 OK", "text/html; charset=utf-8", (_navigation("Views") + f'<main id="content"><h1>Read-only view presets</h1><p>Presets are fixed local links; no preferences are persisted.</p><ul>{rows}</ul></main>').encode())
+        if path in {"/trends", "/api/trends"}:
+            if self.config.backend_mode != "SQLITE_READ_MODEL":
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+            if set(query) - {"metric", "bucket"} or any(len(values) != 1 for values in query.values()):
+                return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_TREND_QUERY"}\n')
+            try:
+                events, _ = list_events(self.config.database_path, page=1, page_size=100)
+                values = tuple((row["occurred_at"], 1) for row in events)
+                payload = summarize_trends(values, self.config.default_as_of.isoformat(), query.get("metric", ["event_count"])[0], query.get("bucket", ["HOUR"])[0]).to_dict()
+            except (ValueError, OperatorAppStoreError, KeyError):
+                return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_TREND_QUERY"}\n')
+            if path == "/api/trends":
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            rows = "".join(f'<li>{html.escape(str(row["bucket_start"]))}: {html.escape(str(row["value"]))}</li>' for row in payload["buckets"]) or "<li>No trend evidence available.</li>"
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", (_navigation("Trends") + f'<main id="content"><h1>Evidence trends</h1><p>READ-ONLY descriptive summary; no forecast or recommendation.</p><ul>{rows}</ul></main>').encode())
         if path in {"/compare", "/api/compare"}:
             try:
                 q=parse_qs(environ.get("QUERY_STRING",""),keep_blank_values=True); allowed={"left","right","view"}
