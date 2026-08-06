@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.create_operator_demo import create_demo
+from scripts.verify_operator_routes import verify_runtime_routes
 from src.operator_app_store import CONTENT_VERIFIED, compute_operator_content_digest, inspect_store_content, read_model_integrity_status
 from src.operator_framework import ApplicationRouteTable
 from src.operator_route_contracts import construct_operator_application, discover_application_routes, verify_contracts
@@ -43,7 +44,7 @@ def _safety_hash(database: Path) -> str:
 
 def _expect_route_failure(application):
     def fail():
-        verify_contracts(application)
+        verify_runtime_routes(application)
     try:
         fail()
     except ValueError:
@@ -99,6 +100,37 @@ def _preset_negative_controls(application):
     expect_failure(lambda: validate_preset_routes(application, (replace(PRESETS[0], target_route="/renamed-verifier-route"),)), "renamed preset route")
     expect_failure(lambda: validate_preset_routes(_AlwaysSuccessParser(application)), "parser drift")
 
+    class _DropRequiredParameterParser:
+        route_table = application.route_table
+        config = application.config
+
+        def __call__(self, environ, start_response):
+            query = environ.get("QUERY_STRING", "")
+            query = "&".join(part for part in query.split("&") if not part.startswith("active_only="))
+            forwarded = dict(environ)
+            forwarded["QUERY_STRING"] = query
+            return application(forwarded, start_response)
+
+    expect_failure(lambda: validate_preset_routes(_DropRequiredParameterParser(), (PRESETS[0],)), "parser silently dropped required parameter")
+
+
+def _runtime_negative_controls(application):
+    class _Export404Application:
+        route_table = application.route_table
+        config = application.config
+
+        def __call__(self, environ, start_response):
+            if environ.get("PATH_INFO", "").startswith("/exports/"):
+                start_response("404 Not Found", [("Content-Type", "text/plain")])
+                return [b"Not found\n"]
+            return application(environ, start_response)
+
+    try:
+        verify_runtime_routes(_Export404Application())
+    except (RuntimeError, ValueError):
+        return
+    raise RuntimeError("generated export URL 404 negative control unexpectedly passed")
+
 
 def main():
     as_of = datetime(2026, 8, 5, 16, tzinfo=timezone.utc)
@@ -113,6 +145,8 @@ def main():
         rows = verify_contracts(app)
         _route_negative_controls()
         _preset_negative_controls(app)
+        _runtime_negative_controls(app)
+        runtime_report = verify_runtime_routes(app)
         before_digest = compute_operator_content_digest(database)
         before_counts = inspect_store_content(database)
         before_safety_hash = _safety_hash(database)
@@ -136,7 +170,7 @@ def main():
         app_source = (repository / "src/operator_web_app.py").read_text(encoding="utf-8")
         if any(token in app_source for token in ("requests", "httpx", "socket", "robin_stocks", "INSERT ", "UPDATE ", "DELETE ")):
             raise RuntimeError("operator app has a forbidden mutation or network surface")
-        report = {"status":"PASS","demo":"deterministic synthetic SQLite read model","route_discovery":"CONSTRUCTED_APPLICATION_ROUTE_TABLE","route_count":len(routes),"contract_route_count":len(rows),"route_statuses":statuses,"preset_count":len(preset_results),"preset_validation":"ALL_CURRENT_PRESETS_ACTUAL_ROUTES_AND_PARSERS","negative_controls":{"undocumented_route":"PASS","prefix_route":"PASS","mounted_route":"PASS","missing_preset_route":"PASS","parser_drift":"PASS"},"trend_metrics":5,"trend_bucket_modes":["HOUR","DAY"],"before_database_content_digest":before_digest,"after_database_content_digest":after_digest,"independent_anchor_status":CONTENT_VERIFIED,"before_row_counts":before_counts,"after_row_counts":after_counts,"before_safety_hash":before_safety_hash,"after_safety_hash":after_safety_hash,"implementation_digest":checkpoint_implementation_digest(repository),"implementation_digest_scope":"SOURCE_CHECKPOINT_CLOSURE","read_model_authority":"NON_AUTHORITATIVE","safety":{"strategy_enabled":False,"activation_approved":False,"permits_automated_action":False,"live_ready":False,"unattended_ready":False},"no_broker":True,"no_outbound_network":True,"no_private_data":True}
+        report = {"status":"PASS","demo":"deterministic synthetic SQLite read model","route_discovery":"CONSTRUCTED_APPLICATION_ROUTE_TABLE","route_count":len(routes),"contract_route_count":len(rows),"route_statuses":statuses,"route_runtime":runtime_report,"preset_count":len(preset_results),"preset_validation":"ALL_CURRENT_PRESETS_ACTUAL_ROUTES_AND_PARSERS","negative_controls":{"undocumented_route":"PASS","prefix_route":"PASS","mounted_route":"PASS","generated_export_404":"PASS","missing_preset_route":"PASS","parser_drift":"PASS","parser_required_parameter_drop":"PASS"},"trend_metrics":5,"trend_bucket_modes":["HOUR","DAY"],"before_database_content_digest":before_digest,"after_database_content_digest":after_digest,"independent_anchor_status":CONTENT_VERIFIED,"before_row_counts":before_counts,"after_row_counts":after_counts,"before_safety_hash":before_safety_hash,"after_safety_hash":after_safety_hash,"implementation_digest":checkpoint_implementation_digest(repository),"implementation_digest_scope":"SOURCE_CHECKPOINT_CLOSURE","read_model_authority":"NON_AUTHORITATIVE","safety":{"strategy_enabled":False,"activation_approved":False,"permits_automated_action":False,"live_ready":False,"unattended_ready":False},"no_broker":True,"no_outbound_network":True,"no_private_data":True}
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
         gc.collect()
     return 0
