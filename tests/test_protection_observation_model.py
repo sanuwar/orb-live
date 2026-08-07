@@ -226,11 +226,11 @@ def test_record_is_frozen_and_cannot_be_mutated():
         obs.read_count = 99  # type: ignore[misc]
 
 
-def test_to_json_round_trips_through_canonical_dict():
+def test_canonical_dict_is_json_serializable_by_the_caller():
     obs = ProtectionObservationRecord(**_valid_kwargs())
     import json
 
-    payload = json.loads(obs.to_json())
+    payload = json.loads(json.dumps(obs.to_canonical_dict()))
     assert payload["observation_id"] == "obs-0001"
     assert payload["write_count"] == 0
     assert payload["qualification_status"] == "STRUCTURALLY_VALID"

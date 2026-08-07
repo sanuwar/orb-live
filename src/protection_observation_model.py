@@ -47,7 +47,6 @@ path that produces an instance with an unverified privacy status, mirroring
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -599,24 +598,50 @@ class ProtectionObservationRecord:
             "reason_codes": [code.value for code in self.reason_codes],
         }
 
-    def to_json(self) -> str:
-        return json.dumps(
-            self.to_canonical_dict(), sort_keys=True, separators=(",", ":")
-        )
+
+def _encode_canonical_value(value: Any) -> str:
+    """Deterministic, dependency-free scalar/sequence encoding.
+
+    Deliberately hand-rolled rather than built on a generic serialization
+    library (matching `src/canonical_source_hash.py`'s own precedent of a
+    fixed, explicit byte representation): the digest must mean the same
+    thing on every Python version and never drift with a library's
+    formatting choices.
+    """
+    if value is None:
+        return "\x00"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "\x1e".join(_encode_canonical_value(item) for item in value)
+    raise ProtectionObservationError(
+        f"unsupported canonical value type: {type(value)!r}"
+    )
+
+
+def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
+    fields = "\x1f".join(
+        f"{key}\x01{_encode_canonical_value(payload[key])}"
+        for key in sorted(payload)
+    )
+    return fields.encode("utf-8")
 
 
 def _compute_evidence_digest(observation: ProtectionObservationRecord) -> str:
-    """SHA-256 over the canonical dict, domain-separated.
+    """SHA-256 over the canonical field encoding, domain-separated.
 
     Excludes `evidence_digest` itself (not yet set when this runs) and
     `qualification_status` (structural, constant, non-evidentiary).
     """
     payload = observation.to_canonical_dict()
     payload.pop("qualification_status", None)
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return hashlib.sha256(_DIGEST_DOMAIN + canonical).hexdigest()
+    return hashlib.sha256(
+        _DIGEST_DOMAIN + _canonical_bytes(payload)
+    ).hexdigest()
 
 
 def verify_evidence_digest(observation: ProtectionObservationRecord) -> bool:
