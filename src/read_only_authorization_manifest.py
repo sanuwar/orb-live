@@ -152,6 +152,12 @@ PINNED_IMPLEMENTATION_CLOSURE: tuple[str, ...] = (
     "src/protection_observation_ledger.py",
     "src/protection_observation_model.py",
     "src/protection_promotion_policy.py",
+    # M13 Issue 7: reached through the launcher's deferred import of
+    # src/protection_assessment_store.py (mirrors the existing deferred
+    # import of src/robinhood_commissioning_session.py above) when the
+    # optional --protection-assessment-store flag is used. Performs no
+    # broker call; persists the already-computed assessment unchanged.
+    "src/protection_assessment_store.py",
 )
 
 #: Domain separation. A digest of this closure must never collide with a digest

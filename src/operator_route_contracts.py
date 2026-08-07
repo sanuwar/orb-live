@@ -49,16 +49,16 @@ class RouteContract:
 
 # This is policy, not discovery.  It intentionally remains separately authored
 # so a permissive application table cannot make itself self-validating.
-_BASE = ("/", "/about", "/healthz", "/history", "/timeline", "/incidents", "/imports", "/data-status", "/search", "/compare", "/exports", "/activity", "/blockers", "/freshness", "/coverage", "/views", "/diagnostics", "/trends", "/release")
+_BASE = ("/", "/about", "/healthz", "/history", "/timeline", "/incidents", "/imports", "/data-status", "/search", "/compare", "/exports", "/activity", "/blockers", "/freshness", "/coverage", "/views", "/diagnostics", "/trends", "/release", "/protection-observations", "/protection-assessments")
 _API = ("/api/snapshot",) + tuple("/api" + path for path in _BASE if path not in {"/", "/about", "/healthz"})
-_VARIANTS = ("/history/{snapshot_id}", "/api/history/{snapshot_id}", "/timeline/{event_id}", "/api/timeline/{event_id}", "/incidents/{incident_id}", "/incidents/{incident_id}/export.json", "/incidents/{incident_id}/export.html", "/api/incidents/{incident_id}", "/api/incidents/{incident_id}/export.json", "/imports/{batch_id}", "/api/imports/{batch_id}", "/exports/{kind}/{id}.json", "/exports/{kind}/{id}.html")
+_VARIANTS = ("/history/{snapshot_id}", "/api/history/{snapshot_id}", "/timeline/{event_id}", "/api/timeline/{event_id}", "/incidents/{incident_id}", "/incidents/{incident_id}/export.json", "/incidents/{incident_id}/export.html", "/api/incidents/{incident_id}", "/api/incidents/{incident_id}/export.json", "/imports/{batch_id}", "/api/imports/{batch_id}", "/exports/{kind}/{id}.json", "/exports/{kind}/{id}.html", "/protection-observations/{observation_id}", "/api/protection-observations/{observation_id}", "/protection-assessments/{assessment_id}", "/api/protection-assessments/{assessment_id}")
 _ALL = tuple(dict.fromkeys(_BASE + _API + _VARIANTS))
 
 
 def _policy_name(path: str) -> str:
     if path == "/":
         return "operator.dashboard"
-    for prefix in ("/api/incidents/", "/incidents/", "/api/history/", "/history/", "/api/timeline/", "/timeline/", "/api/imports/", "/imports/", "/exports/"):
+    for prefix in ("/api/incidents/", "/incidents/", "/api/history/", "/history/", "/api/timeline/", "/timeline/", "/api/imports/", "/imports/", "/exports/", "/api/protection-observations/", "/protection-observations/", "/api/protection-assessments/", "/protection-assessments/"):
         if path.startswith(prefix):
             child = path[len(prefix):]
             child_name = "operator." + child.replace("/", ".").replace("{", "by_").replace("}", "").replace("-", "_").replace(".", "_")

@@ -1143,6 +1143,8 @@ def test_the_old_five_file_contract_is_gone():
     assert "PINNED_IMPLEMENTATION_FILES" not in source
     assert "REVIEWED_UNPINNED_CLOSURE" not in source
     # 20 through M13 Issue 4; +6 in M13 Issue 5 for the protection-grounding
-    # integration reached from the checkpoint launcher (never copy a
+    # integration reached from the checkpoint launcher; +1 in M13 Issue 7 for
+    # the assessment store reached through the launcher's optional
+    # --protection-assessment-store persistence call (never copy a
     # historical count forward -- this is the current, live closure size).
-    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 26
+    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 27

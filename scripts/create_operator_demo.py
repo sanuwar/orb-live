@@ -8,6 +8,24 @@ from src.operator_app_store import compute_operator_content_digest, import_proje
 from src.operator_event_timeline import OperatorEventTimeline
 from src.operator_incident_export import ADVERSE_EVENT_TYPES, OperatorIncident, _INCIDENT_TYPE
 from src.operator_snapshot_history import SnapshotHistory
+from src.protection_assessment_store import ProtectionAssessmentStore
+from src.protection_grounding_assessment import evaluate_protection_grounding
+from src.protection_observation_ledger import ProtectionObservationLedger
+from src.protection_observation_model import (
+    AdapterIdentity,
+    EvidenceSourceClass,
+    ObservationClockSource,
+    ObservationConsistencyStatus,
+    ObservationContaminationStatus,
+    PrivacyRedactionStatus,
+    ProtectionObservationRecord,
+    ProtectiveOrderType,
+    ProtectiveSide,
+    QuantityRelationship,
+)
+from src.live_order_state_model import ProtectiveCoverage
+from src.order_lifecycle_model import MappingProvenance
+from src.read_only_broker_state import SnapshotFreshness
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.supervised_operator_console import load_console_snapshot
 
@@ -65,8 +83,64 @@ def create_demo(output_root: Path, as_of: datetime, *, replace_demo=False) -> di
     db=root/"operator_app.sqlite"; initialize_store(db,release_commit_sha=sha,implementation_digest=digest); batch=import_projection_batch(db,snapshots=tuple(_ImportSnapshot(x) for x in history.load(as_of=as_of)),events=events,incidents=incidents,imported_at=as_of.isoformat(),source_release_commit_sha=sha,source_implementation_digest=digest)
     expected_content_digest=compute_operator_content_digest(db)
     if not verify_store_integrity(db,expected_content_digest): raise ValueError("demo store integrity failed")
+    protection_ledger_path, protection_assessment_store_path, assessment_id = _seed_protection_evidence(root, sha, digest)
     marker={"tool_id":TOOL_ID,"schema_version":1,"created_at":as_of.isoformat(),"release_sha":sha,"implementation_digest":digest,"expected_content_digest":expected_content_digest}; (root/MARKER).write_text(json.dumps(marker,sort_keys=True)+"\n",encoding="utf-8")
-    return {"root":str(root),"database":str(db),"snapshot_count":len(snapshots),"event_count":len(events),"incident_count":len(incidents),"import_batch_id":batch,"expected_content_digest":expected_content_digest}
+    return {"root":str(root),"database":str(db),"snapshot_count":len(snapshots),"event_count":len(events),"incident_count":len(incidents),"import_batch_id":batch,"expected_content_digest":expected_content_digest,"protection_ledger_path":str(protection_ledger_path),"protection_assessment_store_path":str(protection_assessment_store_path),"protection_assessment_id":assessment_id}
+
+
+def _seed_protection_evidence(root: Path, sha: str, digest: str) -> tuple[Path, Path, str]:
+    """Deterministic, disposable M13 evidence for route/link demonstration
+    purposes only -- never a live broker read, never a checkpoint run."""
+    account_ref = hashlib.sha256(b"orb-live:operator-demo:account").hexdigest()
+    session_ref = hashlib.sha256(b"orb-live:operator-demo:session").hexdigest()
+    symbol_ref = hashlib.sha256(b"orb-live:operator-demo:symbol").hexdigest()
+    position_ref = hashlib.sha256(b"orb-live:operator-demo:position").hexdigest()
+    order_ref = hashlib.sha256(b"orb-live:operator-demo:order").hexdigest()
+    observation = ProtectionObservationRecord(
+        observation_id=hashlib.sha256(b"orb-live:operator-demo:observation").hexdigest(),
+        run_id="operator-demo-run",
+        observation_sequence=1,
+        observed_at_monotonic=1.0,
+        observation_clock_source=ObservationClockSource.INJECTED_MONOTONIC,
+        release_identity=sha,
+        implementation_digest=digest,
+        checkpoint_version="operator-demo-v1",
+        account_fingerprint_reference=account_ref,
+        broker_adapter_identity=AdapterIdentity.READ_ONLY_OBSERVATION_RUNTIME,
+        broker_session_identity_reference=session_ref,
+        symbol_reference=symbol_ref,
+        position_reference=position_ref,
+        protective_order_reference=order_ref,
+        protective_order_type=ProtectiveOrderType.STOP_MARKET,
+        protective_side=ProtectiveSide.SELL,
+        quantity_relationship=QuantityRelationship.EXACT_COVERAGE,
+        observed_order_state="confirmed",
+        broker_reported_timestamp=None,
+        normalized_protection_state=ProtectiveCoverage.INDETERMINATE,
+        mapping_provenance=MappingProvenance.OBSERVED_LIVE,
+        evidence_source_class=EvidenceSourceClass.LIVE_READ_ONLY_BROKER_OBSERVATION,
+        read_count=3,
+        write_count=0,
+        privacy_redaction_status=PrivacyRedactionStatus.VERIFIED_REDACTED,
+        data_freshness=SnapshotFreshness.FRESH,
+        consistency_status=ObservationConsistencyStatus.CONSISTENT,
+        contamination_status=ObservationContaminationStatus.NOT_CONTAMINATED,
+    )
+    ledger_path = root / "protection_ledger.sqlite3"
+    with ProtectionObservationLedger(ledger_path, "operator-demo-run") as ledger:
+        ledger.append(observation)
+        observations = ledger.all_observations()
+    assessment = evaluate_protection_grounding(
+        observations,
+        evaluated_at_monotonic=2.0,
+        expected_release_identity=sha,
+        expected_implementation_digest=digest,
+        expected_account_fingerprint_reference=account_ref,
+    )
+    store_path = root / "protection_assessments.sqlite3"
+    with ProtectionAssessmentStore(store_path) as store:
+        store.record_assessment(assessment)
+    return ledger_path, store_path, assessment.assessment_id
 
 def main(argv=None):
     p=argparse.ArgumentParser(); p.add_argument("--output-root",required=True,type=Path); p.add_argument("--as-of",required=True); p.add_argument("--replace-demo",action="store_true"); a=p.parse_args(argv)

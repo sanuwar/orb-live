@@ -12,7 +12,7 @@
   "heartbeat_interval_class": "BOUNDED_BY_EXISTING_LIVENESS_POLICY",
   "heartbeat_required": true,
   "incident_owner_required": true,
-  "implementation_digest": "b09dc6b18e5e85ace9e8a0848760c4fe94a7942f862d23a4ad232786b5e83d46",
+  "implementation_digest": "6b0c54b09dd528c82c8c5e4ea5376d7cba5367543c658acee9995e498259bc51",
   "lifecycle_contract_id": "lifecycle-contract-supervised-read-only-v1",
   "live_ready": false,
   "liveness_monitor_required": true,
