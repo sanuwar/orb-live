@@ -51,6 +51,29 @@ def test_refuses_a_repository_data_path():
         ProtectionObservationLedger(repo_root / "data" / "ledger.sqlite3", "run-1")
 
 
+def test_unsupported_schema_version_refuses_to_open(tmp_path):
+    """A layout change is a version bump, never a silent guess.
+
+    Simulates a database created under an older schema version by writing a
+    stale version marker directly, mirroring
+    `durable_action_ledger.py`'s own precedent.
+    """
+    import sqlite3
+
+    path = tmp_path / "ledger.sqlite3"
+    with ProtectionObservationLedger(path, "run-1"):
+        pass
+    connection = sqlite3.connect(str(path))
+    connection.execute(
+        "UPDATE protection_ledger_meta SET value = '999' "
+        "WHERE key = 'schema_version'"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(ProtectionLedgerError):
+        ProtectionObservationLedger(path, "run-1")
+
+
 # --------------------------------------------------------------------------
 # Append: the scenarios named in Work Item 2.
 # --------------------------------------------------------------------------
@@ -332,12 +355,15 @@ def test_export_summaries_are_allowlisted_and_privacy_safe(tmp_path):
             "run_id",
             "observation_sequence",
             "recorded_sequence",
+            "observed_at_monotonic",
             "release_identity",
             "implementation_digest",
             "account_fingerprint_reference",
             "broker_adapter_identity",
             "evidence_source_class",
             "normalized_protection_state",
+            "quantity_relationship",
+            "write_count",
             "data_freshness",
             "consistency_status",
             "contamination_status",

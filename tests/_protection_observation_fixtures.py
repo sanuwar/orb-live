@@ -113,13 +113,16 @@ def no_protective_order(run_id: str, observation_id: str = "obs-none") -> (
     )
 
 
-def active_protective_order(run_id: str, observation_id: str = "obs-active") -> (
-    ProtectionObservationRecord
-):
+def active_protective_order(
+    run_id: str,
+    observation_id: str = "obs-active",
+    observed_at_monotonic: float = 100.0,
+) -> ProtectionObservationRecord:
     """Scenario: a stop is resting and covers the position exactly."""
     return make_observation(
         observation_id=observation_id,
         run_id=run_id,
+        observed_at_monotonic=observed_at_monotonic,
         normalized_protection_state=ProtectiveCoverage.INDETERMINATE,
         observed_order_state="confirmed",
         protective_order_reference=digest(f"order-{observation_id}"),
