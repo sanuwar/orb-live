@@ -21,7 +21,7 @@
   "network_access_mode": "FUTURE_ALLOWLIST_REQUIRED",
   "operating_mode": "SUPERVISED_READ_ONLY",
   "operator_supervision_required": true,
-  "pinned_file_count": 20,
+  "pinned_file_count": 26,
   "permits_automated_action": false,
   "protection_grounded": false,
   "recovery_point_objective_class": "EXTERNAL_POLICY_REQUIRED",

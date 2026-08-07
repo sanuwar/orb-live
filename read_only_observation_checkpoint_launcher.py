@@ -78,6 +78,20 @@ from src.read_only_observation_runtime import (  # noqa: E402
     run_read_only_observation_checkpoint,
 )
 
+# M13 (Milestone 13): protection-grounding integration, strictly additive.
+# Consumes an already-completed CheckpointResult from the unmodified runtime
+# above; performs no broker call and never re-implements checkpoint safety
+# logic. See src/protection_checkpoint_integration.py.
+from src.protection_checkpoint_integration import (  # noqa: E402
+    IntegratedCheckpointResult,
+    IntegrationStatus,
+    integrate_checkpoint_result,
+)
+from src.protection_observation_model import (  # noqa: E402
+    AdapterIdentity,
+    EvidenceSourceClass,
+)
+
 REAL_READ_RUNTIME_FLAG = "ENABLE_MILESTONE_9_READ_ONLY_OBSERVATION"
 REAL_READ_ACKNOWLEDGMENT = "--i-understand-this-performs-real-broker-reads"
 
@@ -112,7 +126,30 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Manual development mode: two hidden y/N prompts.",
     )
+    parser.add_argument(
+        "--protection-ledger-root",
+        help=(
+            "M13: path to the cross-run protection observation ledger. "
+            "Optional -- omitting it preserves exact prior (pre-M13) "
+            "checkpoint behavior with no M13 involvement at all."
+        ),
+    )
     return parser
+
+
+def _m13_session_reference(run_id: str) -> str:
+    """A deterministic, non-reversible per-run session reference.
+
+    Never the real session's own identity (which this launcher never
+    exposes past the `async with` block) -- this launcher opens at most one
+    session per run by construction, so the run identity already
+    determines it uniquely.
+    """
+    import hashlib
+
+    return hashlib.sha256(
+        f"orb-live:m13-checkpoint-session:v1:{run_id}".encode("utf-8")
+    ).hexdigest()
 
 
 def _read_secret(prompt: str) -> str:
@@ -279,7 +316,10 @@ async def _execute(
     return result
 
 
-def report(result: CheckpointResult) -> None:
+def report(
+    result: CheckpointResult,
+    integrated: IntegratedCheckpointResult | None = None,
+) -> None:
     """Print the outcome and nothing broker-derived."""
     print(f"outcome: {result.outcome.value}")
     print(f"decision: {result.evidence.decision}")
@@ -302,6 +342,39 @@ def report(result: CheckpointResult) -> None:
         "NOTE: an observation is not an approval. "
         "ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES is unchanged."
     )
+    if integrated is not None:
+        print(f"m13_integration_status: {integrated.integration_status.value}")
+        if integrated.integration_error:
+            print(f"m13_integration_error: {integrated.integration_error}")
+        if integrated.assessment is not None:
+            assessment = integrated.assessment
+            print(f"m13_assessment_id: {assessment.assessment_id}")
+            print(f"m13_policy_version: {assessment.policy_version}")
+            print(
+                "m13_included_evidence_count: "
+                f"{len(assessment.included_observation_ids)}"
+            )
+            print(
+                "m13_excluded_evidence_count: "
+                f"{len(assessment.excluded_observation_ids)}"
+            )
+            print(
+                "m13_broker_authoritative_observation_count: "
+                f"{assessment.broker_authoritative_observation_count}"
+            )
+            print(
+                "m13_qualifying_observation_count: "
+                f"{assessment.qualifying_observation_count}"
+            )
+            print(f"m13_recommendation: {assessment.recommendation.value}")
+            print(f"m13_reason_codes: {','.join(assessment.reason_codes)}")
+            print(f"m13_assessment_digest: {assessment.assessment_digest}")
+            print("m13_promotion_permitted: false")
+            print("m13_protection_grounded: false")
+            print(
+                "NOTE: m13_recommendation is advisory only. It is never an "
+                "approval, and it never changes protection_grounded."
+            )
 
 
 def assert_preconditions_before_authorization(
@@ -357,12 +430,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         # itself. If it does, it is still an outcome, never a traceback.
         print(f"failed closed: {type(exc).__name__}")
         return 3
-    report(result)
-    return 0 if result.outcome in {
+
+    integrated: IntegratedCheckpointResult | None = None
+    if namespace.protection_ledger_root:
+        # Strictly additive: a failure here can only report its own status
+        # (IntegrationStatus.FAILED_CLOSED) — it never rewrites `result` or
+        # the evidence file `_execute` already finalized above.
+        try:
+            integrated = integrate_checkpoint_result(
+                result,
+                run_id=request.run_id,
+                account_number=request.account_number,
+                ledger_path=Path(namespace.protection_ledger_root),
+                evaluated_at_monotonic=time.monotonic(),
+                repository_root=REPOSITORY_ROOT,
+                evidence_source_class=(
+                    EvidenceSourceClass.LIVE_READ_ONLY_BROKER_OBSERVATION
+                ),
+                broker_adapter_identity=(
+                    AdapterIdentity.READ_ONLY_OBSERVATION_RUNTIME
+                ),
+                broker_session_identity_reference=_m13_session_reference(
+                    request.run_id
+                ),
+                operator_present=request.operator_present,
+            )
+        except Exception as exc:
+            print(f"m13_integration: failed closed: {type(exc).__name__}")
+
+    report(result, integrated)
+    exit_code = 0 if result.outcome in {
         CheckpointOutcome.OBSERVATION_RECORDED,
         CheckpointOutcome.NO_PROTECTIVE_ORDER_OBSERVED,
         CheckpointOutcome.DECLINED_BY_OPERATOR,
     } else 1
+    if integrated is not None and integrated.integration_status is (
+        IntegrationStatus.FAILED_CLOSED
+    ):
+        exit_code = 4
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -1142,4 +1142,7 @@ def test_the_old_five_file_contract_is_gone():
     source = pathlib.Path(manifests.__file__).read_text(encoding="utf-8")
     assert "PINNED_IMPLEMENTATION_FILES" not in source
     assert "REVIEWED_UNPINNED_CLOSURE" not in source
-    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 20
+    # 20 through M13 Issue 4; +6 in M13 Issue 5 for the protection-grounding
+    # integration reached from the checkpoint launcher (never copy a
+    # historical count forward -- this is the current, live closure size).
+    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 26

@@ -286,7 +286,12 @@ class HostProcessLifecycleContract:
             raise LifecycleIdentityError("release commit does not match repository")
         if self.implementation_digest != checkpoint_implementation_digest(repository_root):
             raise LifecycleIdentityError("implementation digest does not match repository")
-        if len(PINNED_IMPLEMENTATION_CLOSURE) != 20:
+        # 20 through M13 Issue 4; +6 in M13 Issue 5 for the protection-
+        # grounding integration reached from the checkpoint launcher. This
+        # is a deliberate manual re-pin gate, not a live comparison: a
+        # closure-size change must be consciously reviewed and this literal
+        # bumped, exactly as it was here.
+        if len(PINNED_IMPLEMENTATION_CLOSURE) != 26:
             raise LifecycleIdentityError("pinned implementation closure is invalid")
 
     def to_dict(self) -> dict[str, object]:

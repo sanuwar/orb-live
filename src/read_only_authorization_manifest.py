@@ -141,6 +141,17 @@ PINNED_IMPLEMENTATION_CLOSURE: tuple[str, ...] = (
     "src/robinhood_commissioning_adapter.py",
     "src/robinhood_commissioning_session.py",
     "src/trade_state.py",
+    # M13: protection-grounding integration, reached through the launcher's
+    # top-level import of src/protection_checkpoint_integration.py. Added in
+    # Milestone 13 Issue 5. Every one of these performs no broker call; the
+    # integration module consumes an already-completed CheckpointResult from
+    # the runtime already pinned above.
+    "src/offline_path_safety.py",
+    "src/protection_checkpoint_integration.py",
+    "src/protection_grounding_assessment.py",
+    "src/protection_observation_ledger.py",
+    "src/protection_observation_model.py",
+    "src/protection_promotion_policy.py",
 )
 
 #: Domain separation. A digest of this closure must never collide with a digest
