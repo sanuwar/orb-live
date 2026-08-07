@@ -56,6 +56,7 @@ from src.protection_observation_model import (
     ObservationContaminationStatus,
     PrivacyRedactionStatus,
     ProtectionObservationRecord,
+    QuantityRelationship,
 )
 from src.read_only_broker_state import SnapshotFreshness
 
@@ -67,7 +68,18 @@ class ProtectionLedgerError(RuntimeError):
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
-SCHEMA_VERSION = 1
+#: Bumped to 2 in M13 Issue 3 to add `observed_at_monotonic`,
+#: `quantity_relationship`, and `write_count` — the promotion rubric needs
+#: distinct observation times, quantity-coverage classification, and an
+#: independent zero-write check that does not merely trust the model
+#: layer's own guarantee, and a version
+#: bump (not a silent ALTER) is this repository's existing precedent for a
+#: layout change: `durable_action_ledger.py`'s own comment is direct about
+#: why — "guessing at an unknown layout is how a ledger silently forgets."
+#: A database created under version 1 refuses to open under version 2; it is
+#: disposable, non-authoritative, and rebuildable from its authoritative
+#: record stream via `rebuild()`.
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS protection_ledger_meta (
@@ -85,12 +97,15 @@ CREATE TABLE IF NOT EXISTS protection_observations (
         REFERENCES protection_observation_runs(run_id),
     observation_sequence          INTEGER NOT NULL,
     recorded_sequence             INTEGER NOT NULL,
+    observed_at_monotonic         REAL NOT NULL,
     release_identity              TEXT NOT NULL,
     implementation_digest         TEXT NOT NULL,
     account_fingerprint_reference TEXT NOT NULL,
     broker_adapter_identity       TEXT NOT NULL,
     evidence_source_class         TEXT NOT NULL,
     normalized_protection_state   TEXT NOT NULL,
+    quantity_relationship          TEXT NOT NULL,
+    write_count                    INTEGER NOT NULL CHECK (write_count >= 0),
     data_freshness                TEXT NOT NULL,
     consistency_status            TEXT NOT NULL,
     contamination_status          TEXT NOT NULL,
@@ -173,12 +188,15 @@ class LedgerObservationSummary:
     run_id: str
     observation_sequence: int
     recorded_sequence: int
+    observed_at_monotonic: float
     release_identity: str
     implementation_digest: str
     account_fingerprint_reference: str
     broker_adapter_identity: AdapterIdentity
     evidence_source_class: EvidenceSourceClass
     normalized_protection_state: ProtectiveCoverage
+    quantity_relationship: QuantityRelationship
+    write_count: int
     data_freshness: SnapshotFreshness
     consistency_status: ObservationConsistencyStatus
     contamination_status: ObservationContaminationStatus
@@ -211,12 +229,15 @@ _COLUMNS = (
     "run_id",
     "observation_sequence",
     "recorded_sequence",
+    "observed_at_monotonic",
     "release_identity",
     "implementation_digest",
     "account_fingerprint_reference",
     "broker_adapter_identity",
     "evidence_source_class",
     "normalized_protection_state",
+    "quantity_relationship",
+    "write_count",
     "data_freshness",
     "consistency_status",
     "contamination_status",
@@ -233,6 +254,7 @@ def _row_to_summary(row: tuple) -> LedgerObservationSummary:
         run_id=values["run_id"],
         observation_sequence=int(values["observation_sequence"]),
         recorded_sequence=int(values["recorded_sequence"]),
+        observed_at_monotonic=float(values["observed_at_monotonic"]),
         release_identity=values["release_identity"],
         implementation_digest=values["implementation_digest"],
         account_fingerprint_reference=values["account_fingerprint_reference"],
@@ -241,6 +263,10 @@ def _row_to_summary(row: tuple) -> LedgerObservationSummary:
         normalized_protection_state=ProtectiveCoverage(
             values["normalized_protection_state"]
         ),
+        quantity_relationship=QuantityRelationship(
+            values["quantity_relationship"]
+        ),
+        write_count=int(values["write_count"]),
         data_freshness=SnapshotFreshness(values["data_freshness"]),
         consistency_status=ObservationConsistencyStatus(
             values["consistency_status"]
@@ -428,24 +454,29 @@ class ProtectionObservationLedger:
             self._connection.execute(
                 "INSERT INTO protection_observations ("
                 "observation_id, run_id, observation_sequence, "
-                "recorded_sequence, release_identity, implementation_digest, "
-                "account_fingerprint_reference, broker_adapter_identity, "
-                "evidence_source_class, normalized_protection_state, "
-                "data_freshness, consistency_status, contamination_status, "
-                "privacy_redaction_status, evidence_digest, append_state"
+                "recorded_sequence, observed_at_monotonic, release_identity, "
+                "implementation_digest, account_fingerprint_reference, "
+                "broker_adapter_identity, evidence_source_class, "
+                "normalized_protection_state, quantity_relationship, "
+                "write_count, data_freshness, consistency_status, "
+                "contamination_status, privacy_redaction_status, "
+                "evidence_digest, append_state"
                 ") VALUES (?, ?, ?, "
                 "(SELECT COALESCE(MAX(recorded_sequence), 0) + 1 "
-                "FROM protection_observations), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "FROM protection_observations), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.observation_id,
                     record.run_id,
                     record.observation_sequence,
+                    record.observed_at_monotonic,
                     record.release_identity,
                     record.implementation_digest,
                     record.account_fingerprint_reference,
                     record.broker_adapter_identity.value,
                     record.evidence_source_class.value,
                     record.normalized_protection_state.value,
+                    record.quantity_relationship.value,
+                    record.write_count,
                     record.data_freshness.value,
                     record.consistency_status.value,
                     record.contamination_status.value,
@@ -595,6 +626,7 @@ class ProtectionObservationLedger:
                 "run_id": summary.run_id,
                 "observation_sequence": summary.observation_sequence,
                 "recorded_sequence": summary.recorded_sequence,
+                "observed_at_monotonic": summary.observed_at_monotonic,
                 "release_identity": summary.release_identity,
                 "implementation_digest": summary.implementation_digest,
                 "account_fingerprint_reference": (
@@ -605,6 +637,8 @@ class ProtectionObservationLedger:
                 "normalized_protection_state": (
                     summary.normalized_protection_state.value
                 ),
+                "quantity_relationship": summary.quantity_relationship.value,
+                "write_count": summary.write_count,
                 "data_freshness": summary.data_freshness.value,
                 "consistency_status": summary.consistency_status.value,
                 "contamination_status": summary.contamination_status.value,
