@@ -272,12 +272,16 @@ class PromotionAssessment:
         return self.outcome in NON_FAILURE_OUTCOMES
 
 
-def _is_stale(
+def is_observation_stale(
     observation: LedgerObservationSummary,
     *,
     evaluated_at_monotonic: float,
     policy: ProtectionPromotionPolicy,
 ) -> bool:
+    """Public (not module-private): M13 Issue 4's grounding-assessment
+    engine needs the identical per-observation staleness check for its own
+    freshness analysis, and re-deriving it there would risk the two
+    silently disagreeing (never build a second opinion)."""
     if observation.data_freshness is not SnapshotFreshness.FRESH:
         return True
     age = evaluated_at_monotonic - observation.observed_at_monotonic
@@ -424,7 +428,7 @@ def evaluate_promotion_eligibility(
         return result(PromotionOutcome.SOURCE_INELIGIBLE)
 
     if policy.reject_stale_evidence and any(
-        _is_stale(
+        is_observation_stale(
             o, evaluated_at_monotonic=evaluated_at_monotonic, policy=policy
         )
         for o in observations
@@ -491,4 +495,5 @@ __all__ = [
     "DEFAULT_PROTECTION_PROMOTION_POLICY",
     "PromotionAssessment",
     "evaluate_promotion_eligibility",
+    "is_observation_stale",
 ]
