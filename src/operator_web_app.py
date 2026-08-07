@@ -17,7 +17,17 @@ from src.operator_app_store import (OperatorAppStoreError, inspect_store_identit
 from src.operator_store_status import read_store_status
 from src.operator_app_diagnostics import read_app_diagnostics
 from src.operator_snapshot_compare import compare_snapshot_items
-from src.operator_evidence_export import catalog_event,catalog_import,catalog_incident,catalog_snapshot,safe_json
+from src.operator_evidence_export import catalog_event,catalog_import,catalog_incident,catalog_snapshot,catalog_protection_observation,catalog_protection_assessment,safe_json
+from src.protection_observation_model import BROKER_AUTHORITATIVE_SOURCE_CLASSES
+from src.protection_operator_evidence import (
+    ProtectionEvidenceQueryError,
+    get_protection_assessment,
+    get_protection_observation,
+    linked_assessment_ids,
+    list_protection_assessments,
+    list_protection_observations,
+    observation_to_dict,
+)
 from src.operator_activity_summary import summarize_store
 from src.operator_blocker_analytics import summarize_blockers
 from src.operator_evidence_freshness import summarize_freshness
@@ -55,7 +65,10 @@ _OPERATOR_BASE_PATHS = (
     "/", "/about", "/healthz", "/history", "/timeline", "/incidents", "/imports",
     "/data-status", "/search", "/compare", "/exports", "/activity", "/blockers",
     "/freshness", "/coverage", "/views", "/diagnostics", "/trends", "/release",
+    "/protection-observations", "/protection-assessments",
 )
+_PROTECTION_OBSERVATION_FILTERS = {"source_class", "normalized_state", "freshness", "run_id", "page", "page_size"}
+_PROTECTION_ASSESSMENT_FILTERS = {"recommendation", "policy_version", "page", "page_size"}
 _OPERATOR_API_PATHS = ("/api/snapshot",) + tuple(
     "/api" + path for path in _OPERATOR_BASE_PATHS if path not in {"/", "/about", "/healthz"}
 )
@@ -121,6 +134,10 @@ def build_operator_route_table() -> ApplicationRouteTable:
     table.mount("/imports", _build_mounted_detail_router("/{batch_id}"), name_prefix="imports", endpoint_prefix="operator_web_app")
     table.mount("/api/imports", _build_mounted_detail_router("/{batch_id}"), name_prefix="api_imports", endpoint_prefix="operator_web_app", classification="API")
     table.mount("/exports", _build_mounted_detail_router("/{kind}/{id}.json", "/{kind}/{id}.html"), name_prefix="exports", endpoint_prefix="operator_web_app")
+    table.mount("/protection-observations", _build_mounted_detail_router("/{observation_id}"), name_prefix="protection-observations", endpoint_prefix="operator_web_app")
+    table.mount("/api/protection-observations", _build_mounted_detail_router("/{observation_id}"), name_prefix="api_protection-observations", endpoint_prefix="operator_web_app", classification="API")
+    table.mount("/protection-assessments", _build_mounted_detail_router("/{assessment_id}"), name_prefix="protection-assessments", endpoint_prefix="operator_web_app")
+    table.mount("/api/protection-assessments", _build_mounted_detail_router("/{assessment_id}"), name_prefix="api_protection-assessments", endpoint_prefix="operator_web_app", classification="API")
     table.validate()
     return table
 
@@ -139,6 +156,8 @@ class OperatorWebAppConfig:
     backend_mode: str = "FILE_FIXTURE"
     database_path: Path | None = None
     expected_content_digest: str | None = None
+    protection_ledger_path: Path | None = None
+    protection_assessment_store_path: Path | None = None
 
     def validate(self) -> "OperatorWebAppConfig":
         if self.host != ALLOWED_HOST:
@@ -237,7 +256,7 @@ def _about_body() -> str:
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>About ORB-LIVE</title></head><body><main><h1>ORB-LIVE Supervised Operator</h1><p>READ-ONLY local interface.</p><p>This application displays privacy-safe offline evidence only. It does not authorize deployment, broker access, trading, or unattended operation.</p></main></body></html>"""
 
 def _navigation(active: str) -> str:
-    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Activity","/activity"),("Blockers","/blockers"),("Freshness","/freshness"),("Coverage","/coverage"),("Views","/views"),("Trends","/trends"),("Release","/release"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
+    links=(("Home","/"),("Current","/"),("History","/history"),("Timeline","/timeline"),("Incidents","/incidents"),("Imports","/imports"),("Search","/search"),("Compare","/compare"),("Exports","/exports"),("Activity","/activity"),("Blockers","/blockers"),("Freshness","/freshness"),("Coverage","/coverage"),("Views","/views"),("Trends","/trends"),("Release","/release"),("Protection Observations","/protection-observations"),("Protection Assessments","/protection-assessments"),("Data Status","/data-status"),("Diagnostics","/diagnostics"),("About","/about"))
     return '<nav aria-label="Primary"><a href="#content" class="skip">Skip to content</a><ul>'+"".join(f'<li><a href="{href}"'+(' aria-current="page"' if label==active else '')+f'>{html.escape(label)}</a></li>' for label,href in links)+'</ul></nav>'
 
 def _store_status_body(status) -> str:
@@ -255,6 +274,76 @@ def _imports_body(items):
         rows.append("<tr>"+"".join(cells)+"</tr>")
     rows="".join(rows) or '<tr><td colspan="10">No imports found.</td></tr>'
     return template.replace("{{ROWS}}",rows)
+
+
+def _protection_observations_body(items, *, page: int, page_size: int, total: int) -> str:
+    rows = "".join(
+        f'<tr><td><a href="/protection-observations/{html.escape(d["observation_id"], quote=True)}">{html.escape(d["observation_id"][:12])}</a></td>'
+        f'<td>{html.escape(d["run_id"])}</td><td>{html.escape(d["evidence_source_class"])}</td>'
+        f'<td>{html.escape(d["normalized_protection_state"])}</td><td>{html.escape(d["append_state"])}</td>'
+        f'<td>{html.escape(d["data_freshness"])}</td><td>{html.escape(d["consistency_status"])}</td>'
+        f'<td>{html.escape(d["contamination_status"])}</td><td>{html.escape(d["privacy_redaction_status"])}</td>'
+        f'<td>{d["write_count"]}</td></tr>'
+        for d in (observation_to_dict(i) for i in items)
+    ) or '<tr><td colspan="10">No protection observations found.</td></tr>'
+    return (
+        _navigation("Protection Observations")
+        + '<main id="content"><h1>Protection observations</h1>'
+        + '<p>READ-ONLY M13 evidence. An observation is never an approval.</p>'
+        + f'<table><thead><tr><th>ID</th><th>Run</th><th>Source</th><th>State</th>'
+        + '<th>Append state</th><th>Freshness</th><th>Consistency</th><th>Contamination</th>'
+        + f'<th>Privacy</th><th>Writes</th></tr></thead><tbody>{rows}</tbody></table>'
+        + f'<p>Page {page} of size {page_size}, {total} total.</p></main>'
+    )
+
+
+def _protection_observation_detail_body(item, *, linked_assessments) -> str:
+    d = observation_to_dict(item)
+    live = item.evidence_source_class in BROKER_AUTHORITATIVE_SOURCE_CLASSES
+    source_label = "LIVE BROKER-AUTHORITATIVE" if live else f"NON-AUTHORITATIVE ({html.escape(d['evidence_source_class'])})"
+    linked = "".join(f'<li><a href="/protection-assessments/{html.escape(a, quote=True)}">{html.escape(a[:12])}</a></li>' for a in linked_assessments) or "<li>None</li>"
+    rows = "".join(f"<tr><th>{html.escape(k.replace('_', ' ').title())}</th><td>{html.escape(str(v))}</td></tr>" for k, v in d.items())
+    return (
+        _navigation("Protection Observations")
+        + '<main id="content"><h1>Protection observation detail</h1>'
+        + f'<p><strong>Source classification:</strong> {source_label}</p>'
+        + '<p>An observation is evidence for review; it is not approval and does not change runtime authority.</p>'
+        + f'<table>{rows}</table>'
+        + f'<h2>Linked assessments</h2><ul>{linked}</ul></main>'
+    )
+
+
+def _protection_assessments_body(items, *, page: int, page_size: int, total: int) -> str:
+    rows = "".join(
+        f'<tr><td><a href="/protection-assessments/{html.escape(d["assessment_id"], quote=True)}">{html.escape(d["assessment_id"][:12])}</a></td>'
+        f'<td>{html.escape(d["policy_version"])}</td><td>{len(d["included_observation_ids"])}</td>'
+        f'<td>{len(d["excluded_observation_ids"])}</td><td>{d["broker_authoritative_observation_count"]}</td>'
+        f'<td>{d["qualifying_observation_count"]}</td><td>{html.escape(d["recommendation"])}</td></tr>'
+        for d in (i.to_dict() for i in items)
+    ) or '<tr><td colspan="7">No grounding assessments found.</td></tr>'
+    return (
+        _navigation("Protection Assessments")
+        + '<main id="content"><h1>Grounding assessments</h1>'
+        + '<p>Recommendation is evidence for review. It is not approval and does not change runtime authority.</p>'
+        + '<table><thead><tr><th>ID</th><th>Policy</th><th>Included</th><th>Excluded</th>'
+        + f'<th>Broker-authoritative</th><th>Qualifying</th><th>Recommendation</th></tr></thead><tbody>{rows}</tbody></table>'
+        + f'<p>Page {page} of size {page_size}, {total} total.</p></main>'
+    )
+
+
+def _protection_assessment_detail_body(item) -> str:
+    d = item.to_dict()
+    excluded = "".join(f'<li>{html.escape(oid)}: {html.escape(d["exclusion_reasons"].get(oid, "unknown"))}</li>' for oid in d["excluded_observation_ids"]) or "<li>None</li>"
+    included = "".join(f"<li>{html.escape(oid)}</li>" for oid in d["included_observation_ids"]) or "<li>None</li>"
+    scalar_rows = "".join(f"<tr><th>{html.escape(k.replace('_', ' ').title())}</th><td>{html.escape(str(v))}</td></tr>" for k, v in d.items() if not isinstance(v, (list, dict)))
+    return (
+        _navigation("Protection Assessments")
+        + '<main id="content"><h1>Grounding assessment detail</h1>'
+        + '<p><strong>Recommendation is evidence for review. It is not approval and does not change runtime authority.</strong></p>'
+        + f'<table>{scalar_rows}</table>'
+        + f'<h2>Included evidence</h2><ul>{included}</ul>'
+        + f'<h2>Excluded evidence (with reasons)</h2><ul>{excluded}</ul></main>'
+    )
 
 
 def _history_list_body(items, *, page: int, page_size: int, total: int) -> str:
@@ -439,8 +528,14 @@ class OperatorWebApp:
             try:
                 snaps,_=list_snapshots(self.config.database_path,page=1,page_size=100); events,_=list_events(self.config.database_path,page=1,page_size=100); incidents,_=list_incidents(self.config.database_path,page=1,page_size=100); imports,_=list_operator_imports(self.config.database_path,page=1,page_size=100,expected_content_digest=self.config.expected_content_digest)
                 catalog=[catalog_snapshot(snapshot_projection(x)) for x in snaps]+[catalog_event(event_projection(x)) for x in events]+[catalog_incident(get_incident_projection(self.config.database_path,x["incident_id"])) for x in incidents]+[catalog_import(x) for x in imports]
+                if self.config.protection_ledger_path is not None:
+                    obs_items,_=list_protection_observations(self.config.protection_ledger_path,page=1,page_size=100)
+                    catalog+=[catalog_protection_observation(observation_to_dict(x)) for x in obs_items]
+                if self.config.protection_assessment_store_path is not None:
+                    assessment_items,_=list_protection_assessments(self.config.protection_assessment_store_path,page=1,page_size=100)
+                    catalog+=[catalog_protection_assessment(x) for x in assessment_items]
                 payload={"schema_version":1,"items":[x.to_dict() for x in catalog]}
-            except (OperatorAppStoreError,KeyError): return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_EXPORT_CATALOG"}\n')
+            except (OperatorAppStoreError,KeyError,ProtectionEvidenceQueryError): return _response(start_response,"503 Service Unavailable","application/json; charset=utf-8",b'{"status":"FAIL_CLOSED_EXPORT_CATALOG"}\n')
             if path=="/api/exports": return _response(start_response,"200 OK","application/json; charset=utf-8",(json.dumps(payload,sort_keys=True,separators=(",",":"))+"\n").encode())
             rows="".join(f'<li>{html.escape(x.export_type)} <a href="{html.escape(x.download_url,quote=True)}">{html.escape(x.source_id)}</a> {html.escape(x.title)}</li>' for x in catalog) or "<li>No exports available.</li>"
             return _response(start_response,"200 OK","text/html; charset=utf-8",(_navigation("Exports")+f'<main id="content"><h1>Evidence exports</h1><p>READ-ONLY; OPERATOR_SAFE</p><ul>{rows}</ul></main>').encode())
@@ -488,6 +583,62 @@ class OperatorWebApp:
                 return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
             rows = "".join(f'<li>{html.escape(str(row["category_code"]))}: {"PRESENT" if row["represented"] else "MISSING"}</li>' for row in payload["category_rows"]) or "<li>No categories available.</li>"
             return _response(start_response, "200 OK", "text/html; charset=utf-8", (_navigation("Coverage") + f'<main id="content"><h1>Evidence coverage</h1><p>READ-ONLY; coverage does not imply readiness.</p><ul>{rows}</ul></main>').encode())
+        if path in {"/protection-observations", "/api/protection-observations"}:
+            if self.config.backend_mode != "SQLITE_READ_MODEL" or self.config.protection_ledger_path is None:
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            try:
+                q = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+                if set(q) - _PROTECTION_OBSERVATION_FILTERS or any(len(v) != 1 for v in q.values()):
+                    raise ProtectionEvidenceQueryError("invalid filter")
+                page = int(q.get("page", [1])[0]); size = int(q.get("page_size", [25])[0])
+                items, total = list_protection_observations(self.config.protection_ledger_path, source_class=q.get("source_class", [None])[0], normalized_state=q.get("normalized_state", [None])[0], freshness=q.get("freshness", [None])[0], run_id=q.get("run_id", [None])[0], page=page, page_size=size)
+            except (ValueError, ProtectionEvidenceQueryError):
+                return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_PROTECTION_OBSERVATION_FILTER"}\n')
+            if path == "/api/protection-observations":
+                payload = {"schema_version": 1, "page": page, "page_size": size, "total_count": total, "items": [observation_to_dict(i) for i in items]}
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _protection_observations_body(items, page=page, page_size=size, total=total).encode())
+        if path.startswith("/protection-observations/") or path.startswith("/api/protection-observations/"):
+            if self.config.backend_mode != "SQLITE_READ_MODEL" or self.config.protection_ledger_path is None:
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            api_detail = path.startswith("/api/")
+            observation_id = path.split("/", 3)[-1] if api_detail else path.split("/", 2)[-1]
+            try:
+                item = get_protection_observation(self.config.protection_ledger_path, observation_id)
+            except ProtectionEvidenceQueryError:
+                return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
+            linked = linked_assessment_ids(self.config.protection_assessment_store_path, observation_id) if self.config.protection_assessment_store_path is not None else ()
+            if api_detail:
+                payload = {"schema_version": 1, "observation": observation_to_dict(item), "linked_assessment_ids": list(linked)}
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _protection_observation_detail_body(item, linked_assessments=linked).encode())
+        if path in {"/protection-assessments", "/api/protection-assessments"}:
+            if self.config.backend_mode != "SQLITE_READ_MODEL" or self.config.protection_assessment_store_path is None:
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            try:
+                q = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+                if set(q) - _PROTECTION_ASSESSMENT_FILTERS or any(len(v) != 1 for v in q.values()):
+                    raise ProtectionEvidenceQueryError("invalid filter")
+                page = int(q.get("page", [1])[0]); size = int(q.get("page_size", [25])[0])
+                items, total = list_protection_assessments(self.config.protection_assessment_store_path, recommendation=q.get("recommendation", [None])[0], policy_version=q.get("policy_version", [None])[0], page=page, page_size=size)
+            except (ValueError, ProtectionEvidenceQueryError):
+                return _response(start_response, "400 Bad Request", "application/json; charset=utf-8", b'{"status":"INVALID_PROTECTION_ASSESSMENT_FILTER"}\n')
+            if path == "/api/protection-assessments":
+                payload = {"schema_version": 1, "page": page, "page_size": size, "total_count": total, "items": [i.to_dict() for i in items]}
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _protection_assessments_body(items, page=page, page_size=size, total=total).encode())
+        if path.startswith("/protection-assessments/") or path.startswith("/api/protection-assessments/"):
+            if self.config.backend_mode != "SQLITE_READ_MODEL" or self.config.protection_assessment_store_path is None:
+                return _response(start_response, "503 Service Unavailable", "application/json; charset=utf-8", b'{"status":"FAIL_CLOSED_READ_MODEL_REQUIRED"}\n')
+            api_detail = path.startswith("/api/")
+            assessment_id = path.split("/", 3)[-1] if api_detail else path.split("/", 2)[-1]
+            try:
+                item = get_protection_assessment(self.config.protection_assessment_store_path, assessment_id)
+            except ProtectionEvidenceQueryError:
+                return _response(start_response, "404 Not Found", "text/plain; charset=utf-8", b"Not found\n")
+            if api_detail:
+                return _response(start_response, "200 OK", "application/json; charset=utf-8", (json.dumps({"schema_version": 1, "assessment": item.to_dict()}, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            return _response(start_response, "200 OK", "text/html; charset=utf-8", _protection_assessment_detail_body(item).encode())
         if path.startswith("/exports/"):
             try:
                 parts=path.split("/"); kind=parts[2]; ident=parts[3].removesuffix(".json").removesuffix(".html")
@@ -498,8 +649,16 @@ class OperatorWebApp:
                     if path.endswith(".html"): body=render_incident_html(incident,template_path=TEMPLATE_ROOT/"operator_incident.html").encode(); content="text/html; charset=utf-8"
                     else: body=incident.serialize().encode(); content="application/json; charset=utf-8"
                 elif kind=="import": body=safe_json(get_operator_import(self.config.database_path,ident).to_dict()).encode(); content="application/json; charset=utf-8"
+                elif kind=="protection_observation":
+                    if self.config.protection_ledger_path is None: raise OperatorAppStoreError("protection ledger unavailable")
+                    obs=get_protection_observation(self.config.protection_ledger_path,ident)
+                    body=safe_json({"schema_version":1,"export_type":"PROTECTION_OBSERVATION","observation":observation_to_dict(obs)}).encode(); content="application/json; charset=utf-8"
+                elif kind=="protection_assessment":
+                    if self.config.protection_assessment_store_path is None: raise OperatorAppStoreError("protection assessment store unavailable")
+                    assessment=get_protection_assessment(self.config.protection_assessment_store_path,ident)
+                    body=safe_json({"schema_version":1,"export_type":"PROTECTION_ASSESSMENT","assessment":assessment.to_dict()}).encode(); content="application/json; charset=utf-8"
                 else: raise OperatorAppStoreError("export type invalid")
-            except (OperatorAppStoreError,KeyError,ValueError): return _response(start_response,"404 Not Found","text/plain; charset=utf-8",b"Not found\n")
+            except (OperatorAppStoreError,KeyError,ValueError,ProtectionEvidenceQueryError): return _response(start_response,"404 Not Found","text/plain; charset=utf-8",b"Not found\n")
             return _response(start_response,"200 OK",content,body)
         if path in {"/diagnostics", "/api/diagnostics"}:
             projection=read_app_diagnostics(self.config,self.config.default_as_of.isoformat())

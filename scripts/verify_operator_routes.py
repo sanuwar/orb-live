@@ -74,6 +74,10 @@ def collect_generated_links(application) -> tuple[str, ...]:
         "/api/freshness",
         "/api/coverage",
         "/api/search?q=event",
+        "/protection-observations",
+        "/api/protection-observations",
+        "/protection-assessments",
+        "/api/protection-assessments",
     )
     links: set[str] = set()
     for page in pages:
@@ -100,9 +104,9 @@ def _route_probe_links(routes, generated_links: tuple[str, ...]) -> dict[str, st
     for link in tuple(candidates):
         parsed = urlsplit(link)
         path, query = parsed.path, parsed.query
-        if path.startswith(("/history/", "/timeline/", "/incidents/", "/imports/")):
+        if path.startswith(("/history/", "/timeline/", "/incidents/", "/imports/", "/protection-observations/", "/protection-assessments/")):
             candidates.add("/api" + path + (("?" + query) if query else ""))
-        if path.startswith(("/api/history/", "/api/timeline/", "/api/incidents/", "/api/imports/")):
+        if path.startswith(("/api/history/", "/api/timeline/", "/api/incidents/", "/api/imports/", "/api/protection-observations/", "/api/protection-assessments/")):
             candidates.add(path.removeprefix("/api") + (("?" + query) if query else ""))
         if path.startswith("/api/incidents/") and "/export." not in path:
             candidates.add(path + "/export.json" + (("?" + query) if query else ""))
@@ -163,7 +167,7 @@ def build_demo_application(as_of):
 
     temporary = TemporaryDirectory(prefix="orb-live-route-verification-")
     demo = create_demo(Path(temporary.name) / "demo", as_of)
-    app = OperatorWebApp(OperatorWebAppConfig(runtime_root=Path(demo["root"]), database_path=Path(demo["database"]), backend_mode="SQLITE_READ_MODEL", expected_content_digest=demo["expected_content_digest"], default_as_of=as_of))
+    app = OperatorWebApp(OperatorWebAppConfig(runtime_root=Path(demo["root"]), database_path=Path(demo["database"]), backend_mode="SQLITE_READ_MODEL", expected_content_digest=demo["expected_content_digest"], default_as_of=as_of, protection_ledger_path=Path(demo["protection_ledger_path"]), protection_assessment_store_path=Path(demo["protection_assessment_store_path"])))
     app._route_verification_temporary = temporary
     return app, demo
 

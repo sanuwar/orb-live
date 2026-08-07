@@ -138,9 +138,14 @@ def main():
     with TemporaryDirectory(prefix="orb-live-m12-") as temporary:
         demo = create_demo(Path(temporary) / "demo", as_of)
         database = Path(demo["database"])
-        app = OperatorWebApp(OperatorWebAppConfig(runtime_root=Path(demo["root"]), database_path=database, backend_mode="SQLITE_READ_MODEL", expected_content_digest=demo["expected_content_digest"], default_as_of=as_of))
+        app = OperatorWebApp(OperatorWebAppConfig(runtime_root=Path(demo["root"]), database_path=database, backend_mode="SQLITE_READ_MODEL", expected_content_digest=demo["expected_content_digest"], default_as_of=as_of, protection_ledger_path=Path(demo["protection_ledger_path"]), protection_assessment_store_path=Path(demo["protection_assessment_store_path"])))
         routes = discover_application_routes(app)
-        if len(routes) != 49:
+        # 49 through M12; +8 in M13 Issue 7 for the protection-observation
+        # and protection-assessment list/detail routes (base + /api/ for
+        # each). Never copy a historical count forward -- a route-count
+        # change must be consciously reviewed and this literal bumped,
+        # exactly as it was here.
+        if len(routes) != 57:
             raise RuntimeError("framework-derived route count changed")
         rows = verify_contracts(app)
         _route_negative_controls()

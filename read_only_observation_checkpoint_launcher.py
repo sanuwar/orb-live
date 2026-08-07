@@ -134,6 +134,17 @@ def build_parser() -> argparse.ArgumentParser:
             "checkpoint behavior with no M13 involvement at all."
         ),
     )
+    parser.add_argument(
+        "--protection-assessment-store",
+        help=(
+            "M13 Issue 7: path to the grounding-assessment store. Optional, "
+            "and only meaningful alongside --protection-ledger-root -- when "
+            "supplied, the assessment M13 already computes is additionally "
+            "persisted so the read-only operator application has real "
+            "evidence to display. Persistence failure never alters the "
+            "reported m13_integration_status."
+        ),
+    )
     return parser
 
 
@@ -457,6 +468,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except Exception as exc:
             print(f"m13_integration: failed closed: {type(exc).__name__}")
+
+        if (
+            integrated is not None
+            and integrated.integration_status is IntegrationStatus.INTEGRATED
+            and integrated.assessment is not None
+            and namespace.protection_assessment_store
+        ):
+            # Strictly additive, same guarantee as the integration call
+            # above: a failure here can only be printed -- it never rewrites
+            # `result` or `integrated`.
+            try:
+                from src.protection_assessment_store import (  # noqa: PLC0415
+                    ProtectionAssessmentStore,
+                )
+
+                with ProtectionAssessmentStore(
+                    Path(namespace.protection_assessment_store)
+                ) as store:
+                    store.record_assessment(integrated.assessment)
+            except Exception as exc:
+                print(f"m13_assessment_persistence: failed closed: {type(exc).__name__}")
 
     report(result, integrated)
     exit_code = 0 if result.outcome in {

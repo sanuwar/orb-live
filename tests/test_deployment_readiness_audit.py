@@ -130,10 +130,11 @@ def test_no_runtime_module_is_modified_and_checklist_cannot_change_state() -> No
 
 def test_audit_uses_existing_contracts_and_expected_digest() -> None:
     report = audit.audit_deployment_readiness()
-    # M13 Issue 5 added six files to PINNED_IMPLEMENTATION_CLOSURE (the
-    # protection-grounding integration reached from the checkpoint
-    # launcher), which moved the digest. Never copy a historical value
-    # forward -- this asserts the current, live-recomputed values.
-    assert report["implementation_digest"] == "8c7c3ea1650658c869bd05428e67484c9a1082e6f852e54ebec37bca1cd43ad9"
-    assert report["pinned_file_count"] == 26
+    # M13 Issue 7 added src/protection_assessment_store.py to
+    # PINNED_IMPLEMENTATION_CLOSURE (reached through the launcher's
+    # optional --protection-assessment-store persistence call), which moved
+    # the digest. Never copy a historical value forward -- this asserts the
+    # current, live-recomputed values.
+    assert report["implementation_digest"] == "6b0c54b09dd528c82c8c5e4ea5376d7cba5367543c658acee9995e498259bc51"
+    assert report["pinned_file_count"] == 27
     assert report["architecture_audit_reference"] == "scripts/architecture_audit.py:audit_repository"
