@@ -83,12 +83,12 @@ def create_demo(output_root: Path, as_of: datetime, *, replace_demo=False) -> di
     db=root/"operator_app.sqlite"; initialize_store(db,release_commit_sha=sha,implementation_digest=digest); batch=import_projection_batch(db,snapshots=tuple(_ImportSnapshot(x) for x in history.load(as_of=as_of)),events=events,incidents=incidents,imported_at=as_of.isoformat(),source_release_commit_sha=sha,source_implementation_digest=digest)
     expected_content_digest=compute_operator_content_digest(db)
     if not verify_store_integrity(db,expected_content_digest): raise ValueError("demo store integrity failed")
-    protection_ledger_path, protection_assessment_store_path, assessment_id = _seed_protection_evidence(root, sha, digest)
+    protection_ledger_path, protection_assessment_store_path, observation_id, assessment_id = _seed_protection_evidence(root, sha, digest)
     marker={"tool_id":TOOL_ID,"schema_version":1,"created_at":as_of.isoformat(),"release_sha":sha,"implementation_digest":digest,"expected_content_digest":expected_content_digest}; (root/MARKER).write_text(json.dumps(marker,sort_keys=True)+"\n",encoding="utf-8")
-    return {"root":str(root),"database":str(db),"snapshot_count":len(snapshots),"event_count":len(events),"incident_count":len(incidents),"import_batch_id":batch,"expected_content_digest":expected_content_digest,"protection_ledger_path":str(protection_ledger_path),"protection_assessment_store_path":str(protection_assessment_store_path),"protection_assessment_id":assessment_id}
+    return {"root":str(root),"database":str(db),"snapshot_count":len(snapshots),"event_count":len(events),"incident_count":len(incidents),"import_batch_id":batch,"expected_content_digest":expected_content_digest,"protection_ledger_path":str(protection_ledger_path),"protection_assessment_store_path":str(protection_assessment_store_path),"protection_observation_id":observation_id,"protection_assessment_id":assessment_id}
 
 
-def _seed_protection_evidence(root: Path, sha: str, digest: str) -> tuple[Path, Path, str]:
+def _seed_protection_evidence(root: Path, sha: str, digest: str) -> tuple[Path, Path, str, str]:
     """Deterministic, disposable M13 evidence for route/link demonstration
     purposes only -- never a live broker read, never a checkpoint run."""
     account_ref = hashlib.sha256(b"orb-live:operator-demo:account").hexdigest()
@@ -140,7 +140,7 @@ def _seed_protection_evidence(root: Path, sha: str, digest: str) -> tuple[Path, 
     store_path = root / "protection_assessments.sqlite3"
     with ProtectionAssessmentStore(store_path) as store:
         store.record_assessment(assessment)
-    return ledger_path, store_path, assessment.assessment_id
+    return ledger_path, store_path, observation.observation_id, assessment.assessment_id
 
 def main(argv=None):
     p=argparse.ArgumentParser(); p.add_argument("--output-root",required=True,type=Path); p.add_argument("--as-of",required=True); p.add_argument("--replace-demo",action="store_true"); a=p.parse_args(argv)
