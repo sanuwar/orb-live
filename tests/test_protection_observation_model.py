@@ -214,6 +214,25 @@ def test_evidence_digest_is_stable_across_equal_reconstruction():
     assert verify_evidence_digest(second)
 
 
+def test_canonical_bytes_and_encode_canonical_value_are_public_and_reusable():
+    """M13 Issue 4's grounding-assessment engine needs the same canonical
+    encoding for its own digest (never build a second opinion). Promoted
+    from module-private in this issue; this regression test pins the
+    public names and confirms determinism directly, independent of the
+    observation record's own digest tests above."""
+    from src.protection_observation_model import canonical_bytes, encode_canonical_value
+
+    assert encode_canonical_value(None) == "\x00"
+    assert encode_canonical_value(True) == "1"
+    assert encode_canonical_value(False) == "0"
+    assert encode_canonical_value("x") == "x"
+    assert encode_canonical_value([1, "a"]) == "1\x1ea"
+
+    payload = {"b": 2, "a": 1}
+    assert canonical_bytes(payload) == canonical_bytes({"a": 1, "b": 2})
+    assert canonical_bytes(payload) != canonical_bytes({"a": 1, "b": 3})
+
+
 def test_evidence_digest_changes_when_a_field_changes():
     baseline = ProtectionObservationRecord(**_valid_kwargs())
     changed = ProtectionObservationRecord(**_valid_kwargs(read_count=4))

@@ -599,7 +599,7 @@ class ProtectionObservationRecord:
         }
 
 
-def _encode_canonical_value(value: Any) -> str:
+def encode_canonical_value(value: Any) -> str:
     """Deterministic, dependency-free scalar/sequence encoding.
 
     Deliberately hand-rolled rather than built on a generic serialization
@@ -607,6 +607,13 @@ def _encode_canonical_value(value: Any) -> str:
     fixed, explicit byte representation): the digest must mean the same
     thing on every Python version and never drift with a library's
     formatting choices.
+
+    Public (not module-private) because M13 Issue 4's grounding-assessment
+    engine needs the identical canonical encoding for its own digest, and
+    the repository's own principle is "never build a second opinion" — a
+    second hand-rolled encoder would risk two digests silently drifting
+    apart. Each caller still supplies its own domain-separation tag when
+    hashing, so digests from different modules never collide.
     """
     if value is None:
         return "\x00"
@@ -617,15 +624,17 @@ def _encode_canonical_value(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, (list, tuple)):
-        return "\x1e".join(_encode_canonical_value(item) for item in value)
+        return "\x1e".join(encode_canonical_value(item) for item in value)
     raise ProtectionObservationError(
         f"unsupported canonical value type: {type(value)!r}"
     )
 
 
-def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
+def canonical_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Deterministic byte encoding of a flat-ish mapping. See
+    `encode_canonical_value` for why this is public and hand-rolled."""
     fields = "\x1f".join(
-        f"{key}\x01{_encode_canonical_value(payload[key])}"
+        f"{key}\x01{encode_canonical_value(payload[key])}"
         for key in sorted(payload)
     )
     return fields.encode("utf-8")
@@ -640,7 +649,7 @@ def _compute_evidence_digest(observation: ProtectionObservationRecord) -> str:
     payload = observation.to_canonical_dict()
     payload.pop("qualification_status", None)
     return hashlib.sha256(
-        _DIGEST_DOMAIN + _canonical_bytes(payload)
+        _DIGEST_DOMAIN + canonical_bytes(payload)
     ).hexdigest()
 
 
@@ -672,4 +681,6 @@ __all__ = [
     "ObservationReasonCode",
     "ProtectionObservationRecord",
     "verify_evidence_digest",
+    "encode_canonical_value",
+    "canonical_bytes",
 ]

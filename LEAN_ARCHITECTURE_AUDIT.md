@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 58677
-- Test LOC: 51441
+- Production LOC: 59253
+- Test LOC: 52093
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -33,7 +33,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 5. **NEEDS_RUNTIME_EVIDENCE / LOW -- Enum members without qualified references**
-   Evidence: 76 enum members have no qualified construction/reference site.
+   Evidence: 75 enum members have no qualified construction/reference site.
    Interpretation: Persisted values, iteration, and indirect deserialization can make these reachable; require runtime evidence before deletion.
    Estimated removable LOC: production 0, tests 0
 
@@ -58,7 +58,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 10. **NO_ACTION / HIGH -- Test-heavy modules are visible, not automatically excessive**
-   Evidence: largest tests: tests/test_broker_action_saga.py (2061), tests/test_broker_saga_executor.py (1809), tests/test_broker_saga_orchestrator.py (1729), tests/test_entry_recovery.py (1509), tests/test_read_only_observation_runtime.py (1504); 27 modules have more test LOC than production LOC.
+   Evidence: largest tests: tests/test_broker_action_saga.py (2061), tests/test_broker_saga_executor.py (1809), tests/test_broker_saga_orchestrator.py (1729), tests/test_entry_recovery.py (1509), tests/test_read_only_observation_runtime.py (1504); 28 modules have more test LOC than production LOC.
    Interpretation: Higher test LOC is expected for state, boundary, restart, and adversarial matrices; remove only behaviorally duplicate cases.
    Estimated removable LOC: production 0, tests 0
 
