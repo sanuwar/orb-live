@@ -78,9 +78,23 @@ confirmed registered (`scripts/verify_m13_protection_grounding.py`).
 
 ## 9. Generated-link counts
 
-**92** generated internal links collected from real catalogue pages and
-executed through the real WSGI application; **0** failures, **0**
-generated-link-registered-but-not-executable results.
+`scripts/verify_operator_milestone.py` collects generated internal links
+from real catalogue pages and executes every one through the real WSGI
+application: **0** failures, **0** generated-link-registered-but-not-
+executable results, on every environment tested. That pass/fail invariant
+is what this item certifies.
+
+**The exact link count is not asserted here.** An earlier draft of this
+document recorded a specific count; independent final-acceptance review
+(see `C:\dev\orb-live-m13-final-review-report.md`, Finding 1) found the
+count differs by environment even at an identical, byte-diffed-empty
+commit tree and an identical hardcoded `as_of` fixture constant (observed:
+90 on one local Windows run set, 106 in this repository's own Linux CI
+run). The mechanism was not isolated; see the follow-up issue tracking
+that investigation. Do not copy a specific count from this document as a
+verification target -- re-run the verifier and check `status: PASS` and
+`generated_link_count` against your own environment's own output, not
+against a number recorded here.
 
 ## 10. Export-link counts
 
@@ -255,6 +269,15 @@ scheduler/suspension controller, and this M13). `ROADMAP.md` should be
 reconciled with actual repository history in a documentation-focused
 follow-up; this issue does not attempt that reconciliation, and does not
 redesign the roadmap.
+
+**Addendum (final-acceptance follow-up):** independent final-acceptance
+review confirmed this divergence and traced the completed protection-
+grounding work to `ROADMAP.md`'s own Milestone 9 ("steps 4-5 pending"),
+not its Milestone 13. Disambiguating cross-reference notes were added to
+`ROADMAP.md` accordingly, without renumbering, deleting, or moving the
+legitimate planned capital-tiering work. See
+`C:\dev\orb-live-m13-final-review-report.md` and the tracked issue for
+this follow-up.
 
 Given that limitation, the recommendation below is grounded in the
 architectural gap this milestone's own review history has already
