@@ -213,7 +213,7 @@ def test_strategy_enabled_is_false_in_tracked_config():
 # --------------------------------------------------------------------------
 
 
-def test_documented_merge_shas_are_real_ancestors_of_head():
+def test_documented_merge_shas_are_present_in_the_document():
     merge_shas = [
         "e237fea168c635572ac915b134c67081bacd6f07",
         "cac8b8b53d74b61f1811ba0785b3002ac1ae98f0",
@@ -228,6 +228,36 @@ def test_documented_merge_shas_are_real_ancestors_of_head():
     text = _text()
     for sha in merge_shas:
         assert sha in text
+
+
+def test_documented_merge_shas_are_real_ancestors_of_head_when_history_available():
+    """A shallow checkout (CI's default, fetch-depth 1) has no historical
+    commit objects available at all -- only HEAD itself. In that
+    environment there is nothing to verify ancestry against, so this
+    test only runs its real assertions against a full, unshallowed
+    checkout (this developer's local clone); it is not skipped outright
+    so a genuinely broken local clone still fails it."""
+    is_shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=REPOSITORY_ROOT, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if is_shallow == "true":
+        import pytest
+
+        pytest.skip("shallow checkout: no historical commit objects available to verify ancestry against")
+
+    merge_shas = [
+        "e237fea168c635572ac915b134c67081bacd6f07",
+        "cac8b8b53d74b61f1811ba0785b3002ac1ae98f0",
+        "389062d3d8f332cc2fab801100e3de48b58fba8f",
+        "2b493e9cdbdc2babee3c0fc4e69abedcb5499701",
+        "ac4f3111448f396c40e858562d07306f6decab79",
+        "5a13281564a8fff095607dfb97b18d19597e0f0d",
+        "911ea101ccf1ef89b89fbe980c824071b379c882",
+        "345297e03db785045515f8e61a06f8b86f0c262e",
+        "d5b0358535fa0d638bb1a70ead5c41fb57eb3957",
+    ]
+    for sha in merge_shas:
         result = subprocess.run(
             ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
             cwd=REPOSITORY_ROOT,
