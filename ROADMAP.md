@@ -197,6 +197,19 @@ Remaining: a future checkpoint must observe naturally occurring protective
 state, and an operator must review what it records. That is not software work,
 and **approving zero states is a legitimate result** — it is the result so far.
 
+> **Infrastructure for the above landed under a separately numbered
+> tracking label.** The evidence-collection, ledger, promotion-rubric, and
+> grounding-assessment pipeline that a future step 4–5 checkpoint will feed
+> into was built and independently accepted as
+> `M13_INFRASTRUCTURE_ACCEPTED_AWAITING_ELIGIBLE_LIVE_EVIDENCE` — see
+> [`MILESTONE_13_PROTECTION_GROUNDING.md`](MILESTONE_13_PROTECTION_GROUNDING.md)
+> and [`MILESTONE_13_ACCEPTANCE.md`](MILESTONE_13_ACCEPTANCE.md). That "M13"
+> is an issue/PR-branch tracking label, **unrelated to this roadmap's own
+> numbering** — it extends *this* Milestone 9, not the "Milestone 13 —
+> Capital Tiering and Scaling" section below. No live protective-state
+> evidence has been collected; steps 4–5 remain open exactly as described
+> above.
+
 ### Work that proceeds while protection grounding is incomplete
 
 Every item below is buildable offline against fixtures and touches **no**
@@ -288,6 +301,13 @@ the grounding gap above — and no operator will be watching to compensate.
 - Scale only after evidence-based review.
 
 ### Milestone 13 — Capital Tiering and Scaling
+
+> **Numbering note:** this is the only "Milestone 13" in this roadmap's
+> ordered sequence, and it has not been started. It is unrelated to the
+> tracked `MILESTONE_13_PROTECTION_GROUNDING.md` / `MILESTONE_13_ACCEPTANCE.md`
+> documents, whose "M13" is a separate issue/PR-branch tracking label for
+> work that extends this roadmap's own Milestone 9 (see the note there). Do
+> not treat that work as satisfying, starting, or reordering this milestone.
 
 - Implement the **operator-configurable, validated, versioned, auditable**
   capital-tier model described above. No hard-coded permanent amount.
