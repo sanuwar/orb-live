@@ -104,9 +104,11 @@ class FailingPlacementAdapter(FakeAdapter):
         self.failing_role = role
         self.error_factory = error_factory
 
-    async def place_equity_order(self, arguments, *, role):
+    async def place_equity_order(self, arguments, *, role, safety_decision=None):
         if role != self.failing_role:
-            return await super().place_equity_order(arguments, role=role)
+            return await super().place_equity_order(
+                arguments, role=role, safety_decision=safety_decision
+            )
         self._record("place_equity_order")
         self.write_roles.append(role)
         self.phase = role

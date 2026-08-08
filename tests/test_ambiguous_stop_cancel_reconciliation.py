@@ -23,10 +23,12 @@ from src.robinhood_commissioning_adapter import (
     CommissioningPositionRecord,
     RobinhoodCommissioningAdapter,
 )
+from tests.execution_safety_test_support import allow_decision
 from tests.test_ambiguous_stop_reconciliation import (
     AmbiguousStopAdapter,
     Clock,
     EXPECTED_STOP,
+    GOVERNANCE_EVIDENCE,
     NOW,
     POLICY,
     authorization,
@@ -120,7 +122,7 @@ class CancelIncidentAdapter(AmbiguousStopAdapter):
             return ()
         return (CommissioningPositionRecord("AAPL", Decimal("1")),)
 
-    async def cancel_equity_order(self, arguments):
+    async def cancel_equity_order(self, arguments, *, safety_decision=None):
         self._record("cancel_equity_order")
         self.write_roles.append("cancel")
         self.phase = "cancel"
@@ -155,6 +157,7 @@ def make_orchestrator(
         strategy_enabled=False,
         regular_market_hours=True,
         time_policy=POLICY,
+        governance_evidence=GOVERNANCE_EVIDENCE,
     )
     return instance, adapter, clock, handoffs
 
@@ -226,19 +229,23 @@ def test_cancel_adapter_response_categories_and_one_shot(
 ):
     session = Session(response, error)
     adapter = RobinhoodCommissioningAdapter(session, "transient")
+    cancel_args = {"order_id": "transient"}
+    decision = allow_decision(role="cancel", arguments=cancel_args)
     if category is None:
         parsed = asyncio.run(
-            adapter.cancel_equity_order({"order_id": "transient"})
+            adapter.cancel_equity_order(cancel_args, safety_decision=decision)
         )
         assert parsed.request_was_accepted is True
     else:
         with pytest.raises(AmbiguousWriteError) as captured:
             asyncio.run(
-                adapter.cancel_equity_order({"order_id": "transient"})
+                adapter.cancel_equity_order(cancel_args, safety_decision=decision)
             )
         assert captured.value.category == category
     with pytest.raises(Exception):
-        asyncio.run(adapter.cancel_equity_order({"order_id": "transient"}))
+        asyncio.run(
+            adapter.cancel_equity_order(cancel_args, safety_decision=decision)
+        )
     assert session.calls == 1
 
 

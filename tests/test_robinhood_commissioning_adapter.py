@@ -8,6 +8,7 @@ from src.robinhood_commissioning_adapter import (
     ALLOWED_COMMISSIONING_TOOLS, AmbiguousWriteError, BrokerRejectedError,
     RobinhoodCommissioningAdapter, assert_tool_allowed,
 )
+from tests.execution_safety_test_support import allow_decision
 
 
 class Session:
@@ -101,19 +102,31 @@ def test_each_place_role_is_one_shot(monkeypatch, role):
                         lambda value: place_result(role))
     session = Session([{"accepted": True}, {"accepted": True}])
     instance = adapter(session)
-    asyncio.run(instance.place_equity_order(payload(role), role=role))
+    place_args = payload(role)
+    decision = allow_decision(role=role, arguments=place_args)
+    asyncio.run(instance.place_equity_order(
+        place_args, role=role, safety_decision=decision
+    ))
     with pytest.raises(CommissioningError):
-        asyncio.run(instance.place_equity_order(payload(role), role=role))
+        asyncio.run(instance.place_equity_order(
+            place_args, role=role, safety_decision=decision
+        ))
     assert len(session.calls) == 1
 
 
 def test_ambiguous_place_is_not_retried():
     session = Session(error=TimeoutError())
     instance = adapter(session)
+    entry_args = payload("entry")
+    decision = allow_decision(role="entry", arguments=entry_args)
     with pytest.raises(AmbiguousWriteError):
-        asyncio.run(instance.place_equity_order(payload("entry"), role="entry"))
+        asyncio.run(instance.place_equity_order(
+            entry_args, role="entry", safety_decision=decision
+        ))
     with pytest.raises(CommissioningError):
-        asyncio.run(instance.place_equity_order(payload("entry"), role="entry"))
+        asyncio.run(instance.place_equity_order(
+            entry_args, role="entry", safety_decision=decision
+        ))
     assert len(session.calls) == 1
 
 
@@ -122,10 +135,16 @@ def test_ambiguous_cancel_is_not_retried(monkeypatch):
                         lambda value: (_ for _ in ()).throw(ValueError()))
     session = Session([{"accepted": True}, {"accepted": True}])
     instance = adapter(session)
+    cancel_args = {"order_id": "transient"}
+    decision = allow_decision(role="cancel", arguments=cancel_args)
     with pytest.raises(AmbiguousWriteError):
-        asyncio.run(instance.cancel_equity_order({"order_id": "transient"}))
+        asyncio.run(instance.cancel_equity_order(
+            cancel_args, safety_decision=decision
+        ))
     with pytest.raises(CommissioningError):
-        asyncio.run(instance.cancel_equity_order({"order_id": "transient"}))
+        asyncio.run(instance.cancel_equity_order(
+            cancel_args, safety_decision=decision
+        ))
     assert len(session.calls) == 1
 
 
@@ -201,8 +220,12 @@ def test_explicit_write_rejection_is_not_ambiguous():
     class Rejected:
         is_error = True
     instance = adapter(Session([Rejected()]))
+    entry_args = payload("entry")
     with pytest.raises(BrokerRejectedError):
-        asyncio.run(instance.place_equity_order(payload("entry"), role="entry"))
+        asyncio.run(instance.place_equity_order(
+            entry_args, role="entry",
+            safety_decision=allow_decision(role="entry", arguments=entry_args),
+        ))
 
 
 def test_distinct_writes_are_serialized(monkeypatch):
@@ -224,9 +247,17 @@ def test_distinct_writes_are_serialized(monkeypatch):
             return {"accepted": True}
 
     async def invoke_both(adapter):
+        entry_args = payload("entry")
+        stop_args = payload("stop")
         await asyncio.gather(
-            adapter.place_equity_order(payload("entry"), role="entry"),
-            adapter.place_equity_order(payload("stop"), role="stop"),
+            adapter.place_equity_order(
+                entry_args, role="entry",
+                safety_decision=allow_decision(role="entry", arguments=entry_args),
+            ),
+            adapter.place_equity_order(
+                stop_args, role="stop",
+                safety_decision=allow_decision(role="stop", arguments=stop_args),
+            ),
         )
 
     session = ConcurrentSession()

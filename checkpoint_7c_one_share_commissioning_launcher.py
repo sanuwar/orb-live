@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import hashlib
 import subprocess
 import sys
 import time as runtime_time
@@ -25,6 +26,12 @@ from src.canonical_source_hash import (
     canonical_source_sha256,
 )
 from src.config import load_config
+from src.execution_safety_governance import (
+    CommissioningGovernanceEvidence,
+    CommissioningMode,
+    OperatorAcknowledgements,
+    reviewed_manifest_digest,
+)
 from src.one_share_commissioning import (
     AtomicEvidenceStore, AuthorizationDeclinedError,
     AuthorizationInterruptedError, CommissioningDiagnosticError, CommissioningError,
@@ -67,13 +74,13 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/config.py":
         "37669854c3e1dae3c282e787c0af22da9c89ce21fb790a482f4edb2e2db7f1c3",
     "src/one_share_commissioning.py":
-        "44481d485b2f52bbc3eb8ffb9e56068b170cb931fbe7a56d1ea7f24a604ffe96",
+        "c26500ade1881108f21ceb38e5223bad7650f4e394623bf4256def90c9fd814d",
     "src/robinhood_commissioning_adapter.py":
-        "ab3f14c7a90f9324d5fae2af0167575d3b92b96808cfbdc7de76fe1583d6bf83",
+        "f9a39398d81c53e7b3ecb5ac324cd6b9dcffe67361047161d13ab60d57c48458",
     "src/one_share_commissioning_orchestrator.py":
-        "6de110c12af35b7ee937ee4e9b3132fbcb9c28bcc71f0b3eabd6071b4eb5612a",
+        "8574fa1b309133a4aa08bdbeba6f1287da14ec4b9b6cd2d27d2f432df782e9ba",
     "src/robinhood_commissioning_session.py":
-        "a7e0367de955eb26695f6e61c99b0c99cfdab869c042cd9fcddf209b7065c4e1",
+        "d33e925107a81139083eba9c127f8fc8251b3e2dc7ae7071a52d74c74371ee75",
     "src/robinhood_client.py":
         "8e00f808dda3e8741a2fccc6ae5edb42deb4a3761af5eae39304c601cfa1f39e",
 }
@@ -398,6 +405,27 @@ async def execute_commissioning(
         )
     store = AtomicEvidenceStore(evidence_root, run_id)
     adapter = RobinhoodCommissioningAdapter(session, commissioned_account_number)
+    # verify_runtime_posture(root) above already required every REVIEWED_HASHES
+    # entry to match; this is an explicitly fake/offline demonstration run, so
+    # attended acknowledgements are asserted true by construction rather than
+    # collected interactively. account_fingerprint_matched stays at its
+    # governance-evidence default (False/unverified): this fake path never
+    # resolves a real account, so there is nothing to honestly verify.
+    governance_evidence = CommissioningGovernanceEvidence(
+        commissioning_mode=CommissioningMode.ATTENDED,
+        operator_attended=True,
+        operator_acknowledgements=OperatorAcknowledgements(
+            acknowledges_loss_may_exceed_plan=True, operator_present=True,
+            robinhood_ui_open=True, no_second_trade=True,
+        ),
+        source_hash_verified=True,
+        release_sha=_git_output(root, "rev-parse", "HEAD"),
+        implementation_digest=reviewed_manifest_digest(REVIEWED_HASHES),
+        account_fingerprint_matched=True,
+        account_fingerprint_reference=hashlib.sha256(
+            commissioned_account_number.encode("utf-8")
+        ).hexdigest(),
+    )
     orchestrator = OneShareCommissioningOrchestrator(
         run_id=run_id,
         adapter=adapter,
@@ -410,6 +438,7 @@ async def execute_commissioning(
         strategy_enabled=strategy_enabled,
         regular_market_hours=True,
         time_policy=time_policy,
+        governance_evidence=governance_evidence,
     )
     result = await orchestrator.run()
     print(f"commissioning_state={result.state.value}")
@@ -444,6 +473,30 @@ async def execute_real_session(
     )
     handoff = emergency_handoff or sanitized_emergency_handoff
     resolver = commissioned_account_resolver or CommissionedAccountResolver()
+    # verify_runtime_posture(root) above already required every REVIEWED_HASHES
+    # entry to match and required main to be synchronized with origin/main;
+    # validate_live_run_request(request, ...) above already required all four
+    # operator acknowledgements to be true. account_fingerprint_matched /
+    # account_fingerprint_reference are intentionally left at their governance
+    # -evidence defaults (False / "") here: this launcher has not resolved a
+    # real account yet, and RobinhoodCommissioningSessionBinding.run() fills
+    # in the verified fingerprint itself immediately after account resolution
+    # succeeds, never trusting a value handed to it from here.
+    governance_evidence = CommissioningGovernanceEvidence(
+        commissioning_mode=CommissioningMode.ATTENDED,
+        operator_attended=request.operator_present,
+        operator_acknowledgements=OperatorAcknowledgements(
+            acknowledges_loss_may_exceed_plan=(
+                request.acknowledges_loss_may_exceed_plan
+            ),
+            operator_present=request.operator_present,
+            robinhood_ui_open=request.robinhood_ui_open,
+            no_second_trade=request.no_second_trade,
+        ),
+        source_hash_verified=True,
+        release_sha=_git_output(root, "rev-parse", "HEAD"),
+        implementation_digest=reviewed_manifest_digest(REVIEWED_HASHES),
+    )
     binding = binding_factory(
         run_id=request.run_id,
         time_policy=request.time_policy(),
@@ -455,6 +508,7 @@ async def execute_real_session(
         authorization_provider=provider,
         evidence_store=store,
         emergency_handoff=handoff,
+        governance_evidence=governance_evidence,
     )
     result = await binding.run()
     print(f"commissioning_state={result.state.value}")

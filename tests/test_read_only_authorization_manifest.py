@@ -1145,6 +1145,9 @@ def test_the_old_five_file_contract_is_gone():
     # 20 through M13 Issue 4; +6 in M13 Issue 5 for the protection-grounding
     # integration reached from the checkpoint launcher; +1 in M13 Issue 7 for
     # the assessment store reached through the launcher's optional
-    # --protection-assessment-store persistence call (never copy a
-    # historical count forward -- this is the current, live closure size).
-    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 27
+    # --protection-assessment-store persistence call; +1 in M14 Issue 1 for
+    # the execution-safety-governance boundary reached from
+    # robinhood_commissioning_adapter.py and
+    # one_share_commissioning_orchestrator.py (never copy a historical count
+    # forward -- this is the current, live closure size).
+    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 28

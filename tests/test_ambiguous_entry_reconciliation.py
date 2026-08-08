@@ -10,6 +10,7 @@ from src.robinhood_commissioning_adapter import (
     AmbiguousWriteError,
     RobinhoodCommissioningAdapter,
 )
+from tests.execution_safety_test_support import allow_decision
 from tests.test_live_order_contract import make_order
 from tests.test_one_share_commissioning_orchestrator import (
     FakeAdapter,
@@ -67,7 +68,8 @@ def test_data_order_place_response_parses_pending_and_filled(state, cumulative):
     ))
     adapter = RobinhoodCommissioningAdapter(session, "transient")
     result = asyncio.run(adapter.place_equity_order(
-        entry_payload(), role="entry"
+        entry_payload(), role="entry",
+        safety_decision=allow_decision(role="entry", arguments=entry_payload()),
     ))
     assert result.state == state
     assert result.server_order_id
@@ -80,7 +82,8 @@ def test_transport_and_malformed_responses_have_distinct_safe_categories():
     )
     with pytest.raises(AmbiguousWriteError) as transport_error:
         asyncio.run(transport.place_equity_order(
-            entry_payload(), role="entry"
+            entry_payload(), role="entry",
+            safety_decision=allow_decision(role="entry", arguments=entry_payload()),
         ))
     assert transport_error.value.category == (
         "ENTRY_PLACE_TRANSPORT_AMBIGUOUS"
@@ -91,7 +94,8 @@ def test_transport_and_malformed_responses_have_distinct_safe_categories():
     )
     with pytest.raises(AmbiguousWriteError) as malformed_error:
         asyncio.run(malformed.place_equity_order(
-            entry_payload(), role="entry"
+            entry_payload(), role="entry",
+            safety_decision=allow_decision(role="entry", arguments=entry_payload()),
         ))
     assert malformed_error.value.category == "ENTRY_PLACE_RESPONSE_MALFORMED"
 
@@ -107,9 +111,11 @@ class AmbiguousEntryAdapter(FakeAdapter):
         self.category = category
         self.ambiguous_reads = 0
 
-    async def place_equity_order(self, arguments, *, role):
+    async def place_equity_order(self, arguments, *, role, safety_decision=None):
         if role != "entry":
-            return await super().place_equity_order(arguments, role=role)
+            return await super().place_equity_order(
+                arguments, role=role, safety_decision=safety_decision
+            )
         self._record("place_equity_order")
         self.write_roles.append("entry")
         self.phase = "ambiguous_entry"

@@ -9,6 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 import checkpoint_7c_one_share_commissioning_launcher as launcher
+from src.execution_safety_governance import (
+    CommissioningGovernanceEvidence, CommissioningMode, OperatorAcknowledgements,
+)
 from src.one_share_commissioning import (
     AtomicEvidenceStore,
     AuthorizationInputError,
@@ -36,6 +39,19 @@ from tests.test_one_share_commissioning_orchestrator import (
 
 NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
 FIXTURE_ACCOUNT = "OFFLINE-COMMISSIONED-ACCOUNT"
+GOVERNANCE_EVIDENCE = CommissioningGovernanceEvidence(
+    commissioning_mode=CommissioningMode.ATTENDED,
+    operator_attended=True,
+    operator_acknowledgements=OperatorAcknowledgements(
+        acknowledges_loss_may_exceed_plan=True, operator_present=True,
+        robinhood_ui_open=True, no_second_trade=True,
+    ),
+    source_hash_verified=True,
+    release_sha="a" * 40,
+    implementation_digest="b" * 64,
+    account_fingerprint_matched=True,
+    account_fingerprint_reference="c" * 64,
+)
 
 
 def live_request(tmp_path, *, run_id="offline-incident-reproduction"):
@@ -126,6 +142,7 @@ def actual_binding(
         authorization_provider=provider,
         evidence_store=store,
         emergency_handoff=lambda payload: None,
+        governance_evidence=GOVERNANCE_EVIDENCE,
         adapter_factory=adapter_factory,
         orchestrator_factory=orchestrator_factory,
     )
@@ -238,6 +255,7 @@ def test_failure_before_entry_review_is_classified_without_write(tmp_path):
         emergency_handoff=lambda payload: None,
         strategy_enabled=False,
         regular_market_hours=True,
+        governance_evidence=GOVERNANCE_EVIDENCE,
     )
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")
@@ -262,6 +280,7 @@ def test_failure_during_entry_review_is_classified_without_write(tmp_path):
         emergency_handoff=lambda payload: None,
         strategy_enabled=False,
         regular_market_hours=True,
+        governance_evidence=GOVERNANCE_EVIDENCE,
     )
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")
@@ -292,6 +311,7 @@ def test_ambiguous_entry_is_one_write_and_operator_required(tmp_path):
         emergency_handoff=lambda payload: None,
         strategy_enabled=False,
         regular_market_hours=True,
+        governance_evidence=GOVERNANCE_EVIDENCE,
     )
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")
@@ -364,6 +384,7 @@ def test_pre_orchestrator_failures_are_typed_and_close_sessions(
         authorization_provider=lambda value: None,
         evidence_store=store,
         emergency_handoff=lambda payload: None,
+        governance_evidence=GOVERNANCE_EVIDENCE,
         adapter_factory=adapter_factory,
         orchestrator_factory=orchestrator_factory,
     )
@@ -399,6 +420,7 @@ def test_session_close_failure_is_sanitized(tmp_path):
         authorization_provider=lambda value: None,
         evidence_store=store,
         emergency_handoff=lambda payload: None,
+        governance_evidence=GOVERNANCE_EVIDENCE,
         adapter_factory=lambda session, account: SimpleNamespace(),
         orchestrator_factory=lambda **kwargs: Orchestrator(),
     )
@@ -456,6 +478,7 @@ def test_failed_before_write_marker_does_not_claim_a_write(tmp_path):
         now_eastern=lambda: NOW, authorization_provider=provider,
         evidence_store=store, emergency_handoff=lambda payload: None,
         strategy_enabled=False, regular_market_hours=True,
+        governance_evidence=GOVERNANCE_EVIDENCE,
     )
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")

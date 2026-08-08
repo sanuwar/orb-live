@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.execution_safety_governance import (
+    CommissioningGovernanceEvidence, CommissioningMode, OperatorAcknowledgements,
+)
 from src.one_share_commissioning import (
     AtomicEvidenceStore, CommissioningError, EASTERN, ENTRY_AUTHORIZATION_STAGE,
     FLATTEN_AUTHORIZATION_STAGE, RuntimeAuthorization, State,
@@ -20,6 +23,19 @@ from src.robinhood_commissioning_adapter import (
 
 
 NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
+DEFAULT_GOVERNANCE_EVIDENCE = CommissioningGovernanceEvidence(
+    commissioning_mode=CommissioningMode.ATTENDED,
+    operator_attended=True,
+    operator_acknowledgements=OperatorAcknowledgements(
+        acknowledges_loss_may_exceed_plan=True, operator_present=True,
+        robinhood_ui_open=True, no_second_trade=True,
+    ),
+    source_hash_verified=True,
+    release_sha="a" * 40,
+    implementation_digest="b" * 64,
+    account_fingerprint_matched=True,
+    account_fingerprint_reference="c" * 64,
+)
 TIME_POLICY = CommissioningTimePolicy(
     execution_date=date(2026, 7, 29),
     entry_start=datetime(2026, 7, 29, 10, 35, tzinfo=EASTERN),
@@ -82,6 +98,7 @@ class FakeAdapter:
         self.write_roles = []
         self.cancel_reads = 0
         self.interrupted = False
+        self.last_safety_decision = None
 
     def _record(self, name):
         self.calls.append(name)
@@ -158,9 +175,10 @@ class FakeAdapter:
         return {"symbol": "AAPL", "quantity": "1", "side": arguments["side"],
                 "type": arguments["type"]}
 
-    async def place_equity_order(self, arguments, *, role):
+    async def place_equity_order(self, arguments, *, role, safety_decision=None):
         self._record("place_equity_order")
         self.write_roles.append(role)
+        self.last_safety_decision = safety_decision
         if self.ambiguous_role == role:
             raise AmbiguousWriteError("ambiguous")
         self.phase = role
@@ -171,9 +189,10 @@ class FakeAdapter:
         )
         return SimpleNamespace(server_order_id=f"{role}-1", state=state)
 
-    async def cancel_equity_order(self, arguments):
+    async def cancel_equity_order(self, arguments, *, safety_decision=None):
         self._record("cancel_equity_order")
         self.write_roles.append("cancel")
+        self.last_safety_decision = safety_decision
         if self.ambiguous_role == "cancel":
             raise AmbiguousWriteError("ambiguous")
         self.phase = "cancel"
@@ -186,6 +205,7 @@ def make_orchestrator(
     run_id="run-1",
     now_eastern=lambda: NOW,
     authorization_provider=None,
+    governance_evidence=None,
 ):
     clock = Clock()
     handoffs = []
@@ -199,6 +219,7 @@ def make_orchestrator(
         emergency_handoff=handoffs.append, strategy_enabled=False,
         regular_market_hours=True,
         time_policy=TIME_POLICY,
+        governance_evidence=governance_evidence or DEFAULT_GOVERNANCE_EVIDENCE,
     )
     return instance, adapter, clock, handoffs
 
@@ -275,8 +296,10 @@ def test_at_1110_protection_cancellation_and_flattening_continue(tmp_path):
     }
 
     class AdvanceAfterEntryAdapter(FakeAdapter):
-        async def place_equity_order(self, arguments, *, role):
-            result = await super().place_equity_order(arguments, role=role)
+        async def place_equity_order(self, arguments, *, role, safety_decision=None):
+            result = await super().place_equity_order(
+                arguments, role=role, safety_decision=safety_decision
+            )
             if role == "entry":
                 current["value"] = datetime(
                     2026, 7, 29, 11, 10, 0, tzinfo=EASTERN
@@ -504,8 +527,10 @@ def test_unresolved_entry_at_mandatory_risk_off_requires_operator(tmp_path):
     current = {"value": datetime(2026, 7, 29, 10, 49, 59, tzinfo=EASTERN)}
 
     class AdvanceAtEntryAdapter(FakeAdapter):
-        async def place_equity_order(self, arguments, *, role):
-            result = await super().place_equity_order(arguments, role=role)
+        async def place_equity_order(self, arguments, *, role, safety_decision=None):
+            result = await super().place_equity_order(
+                arguments, role=role, safety_decision=safety_decision
+            )
             if role == "entry":
                 current["value"] = datetime(
                     2026, 7, 29, 11, 10, 0, tzinfo=EASTERN
@@ -525,8 +550,10 @@ def test_unresolved_cancel_at_flat_deadline_adds_no_exit_write(tmp_path):
     current = {"value": datetime(2026, 7, 29, 10, 49, 59, tzinfo=EASTERN)}
 
     class AdvanceAtCancelAdapter(FakeAdapter):
-        async def cancel_equity_order(self, arguments):
-            result = await super().cancel_equity_order(arguments)
+        async def cancel_equity_order(self, arguments, *, safety_decision=None):
+            result = await super().cancel_equity_order(
+                arguments, safety_decision=safety_decision
+            )
             current["value"] = datetime(
                 2026, 7, 29, 11, 15, 0, tzinfo=EASTERN
             )

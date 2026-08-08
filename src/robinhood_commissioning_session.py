@@ -7,6 +7,7 @@ path; tests inject offline context managers and resolvers.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from typing import Any, Callable, Mapping
 from src.broker_identity import CommissionedAccount, load_local_override
 from src.broker_snapshot import account_fingerprint
 from src.config import load_config
+from src.execution_safety_governance import CommissioningGovernanceEvidence
 from src.one_share_commissioning import (
     CommissioningDiagnosticError, CommissioningError,
     persist_standalone_failure, sanitized_exception_type,
@@ -235,6 +237,7 @@ class RobinhoodCommissioningSessionBinding:
     authorization_provider: Callable[[str], Any]
     evidence_store: Any
     emergency_handoff: Callable[[Any], Any]
+    governance_evidence: CommissioningGovernanceEvidence
     adapter_factory: Callable[..., Any] = RobinhoodCommissioningAdapter
     orchestrator_factory: Callable[..., Any] = OneShareCommissioningOrchestrator
     _used: bool = field(default=False, init=False)
@@ -263,6 +266,19 @@ class RobinhoodCommissioningSessionBinding:
                 adapter = self.adapter_factory(
                     replay_session, resolution.account_number
                 )
+                # Fingerprint verification already happened, fail-closed,
+                # inside the resolver above (CommissionedAccount.verify());
+                # reaching this line is itself the proof. Recomputed here
+                # (not trusted from the caller) so the evidence threaded into
+                # governance can never claim a match the resolver did not
+                # independently establish for THIS resolved account number.
+                governance_evidence = dataclasses.replace(
+                    self.governance_evidence,
+                    account_fingerprint_matched=True,
+                    account_fingerprint_reference=account_fingerprint(
+                        resolution.account_number
+                    ),
+                )
                 stage = "ORCHESTRATOR_INITIALIZATION"
                 orchestrator = self.orchestrator_factory(
                     run_id=self.run_id,
@@ -276,6 +292,7 @@ class RobinhoodCommissioningSessionBinding:
                     strategy_enabled=False,
                     regular_market_hours=True,
                     time_policy=self.time_policy,
+                    governance_evidence=governance_evidence,
                 )
                 stage = "INTERNAL_INVARIANT"
                 result = await orchestrator.run()

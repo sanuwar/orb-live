@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from src.host_process_lifecycle import LIFECYCLE_KEYS
-from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
+from src.read_only_authorization_manifest import (
+    PINNED_IMPLEMENTATION_CLOSURE, checkpoint_implementation_digest, resolve_head_sha,
+)
 from src.read_only_deployment_profile import PROFILE_KEYS
 from src.supervised_operator_console import (
     EVIDENCE_KEYS,
@@ -31,6 +33,7 @@ def _fixture(tmp_path: Path) -> Path:
     profile = json.loads((ROOT / "examples/read-only-deployment/valid-supervised-read-only-profile.json").read_text())
     profile["release_commit_sha"] = resolve_head_sha(ROOT)
     profile["implementation_digest"] = checkpoint_implementation_digest(ROOT)
+    profile["pinned_file_count"] = len(PINNED_IMPLEMENTATION_CLOSURE)
     (root / "config/deployment-profile.json").write_text(json.dumps(profile), encoding="utf-8")
     lifecycle = json.loads((ROOT / "examples/read-only-deployment/host-process-lifecycle.json").read_text())
     lifecycle["release_commit_sha"] = resolve_head_sha(ROOT)

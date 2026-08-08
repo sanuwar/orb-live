@@ -29,6 +29,7 @@ from src.robinhood_commissioning_adapter import (
     BrokerRejectedError,
     RobinhoodCommissioningAdapter,
 )
+from tests.execution_safety_test_support import allow_decision
 from tests.test_ambiguous_stop_reconciliation import (
     Clock,
     NOW,
@@ -73,8 +74,12 @@ def cancel_envelope(accepted=True):
 
 
 def cancel(session):
+    cancel_args = {"order_id": STOP_ID}
     return asyncio.run(
-        adapter(session).cancel_equity_order({"order_id": STOP_ID})
+        adapter(session).cancel_equity_order(
+            cancel_args,
+            safety_decision=allow_decision(role="cancel", arguments=cancel_args),
+        )
     )
 
 
@@ -95,7 +100,11 @@ def test_cancel_transmits_every_advertised_required_input_field():
 def test_cancel_account_comes_from_the_resolved_identity_not_the_caller():
     session = RecordingSession([cancel_envelope(True)])
     instance = RobinhoodCommissioningAdapter(session, "resolved-identity")
-    asyncio.run(instance.cancel_equity_order({"order_id": STOP_ID}))
+    resolved_cancel_args = {"order_id": STOP_ID}
+    asyncio.run(instance.cancel_equity_order(
+        resolved_cancel_args,
+        safety_decision=allow_decision(role="cancel", arguments=resolved_cancel_args),
+    ))
 
     assert session.calls[0][1]["account_number"] == "resolved-identity"
     for supplied in ({"order_id": STOP_ID, "account_number": "attacker"},
@@ -202,10 +211,16 @@ def test_a_missing_guide_never_manufactures_an_accepted_value():
 def test_transport_failure_still_consumes_the_single_write_reservation():
     session = RecordingSession(error=RuntimeError("boom"))
     instance = adapter(session)
+    reservation_args = {"order_id": STOP_ID}
+    decision = allow_decision(role="cancel", arguments=reservation_args)
     with pytest.raises(AmbiguousWriteError):
-        asyncio.run(instance.cancel_equity_order({"order_id": STOP_ID}))
+        asyncio.run(instance.cancel_equity_order(
+            reservation_args, safety_decision=decision
+        ))
     with pytest.raises(CommissioningError, match="only once"):
-        asyncio.run(instance.cancel_equity_order({"order_id": STOP_ID}))
+        asyncio.run(instance.cancel_equity_order(
+            reservation_args, safety_decision=decision
+        ))
     assert len(session.calls) == 1
 
 
@@ -251,7 +266,7 @@ class SubmittedButAmbiguousCancelAdapter(FakeAdapter):
     progress to cancelled, so bounded reads reach a terminal conclusion.
     """
 
-    async def cancel_equity_order(self, arguments):
+    async def cancel_equity_order(self, arguments, *, safety_decision=None):
         self._record("cancel_equity_order")
         self.write_roles.append("cancel")
         self.phase = "cancel"
@@ -267,7 +282,7 @@ class NeverSubmittedCancelAdapter(FakeAdapter):
     """The live incident shape: the request never reached the broker, so the
     protective stop stays working through every bounded read."""
 
-    async def cancel_equity_order(self, arguments):
+    async def cancel_equity_order(self, arguments, *, safety_decision=None):
         self._record("cancel_equity_order")
         self.write_roles.append("cancel")
         raise AmbiguousWriteError(
