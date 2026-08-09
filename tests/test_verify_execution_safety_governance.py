@@ -32,7 +32,7 @@ import scripts.verify_execution_safety_governance as verifier
 #: regression -- it should come with an explanation, not a silent test edit.
 _EXPECTED_PASSING_CHECK_IDS = {
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
-    "14", "15", "16", "17", "18", "19", "20_21_22", "23", "24", "25",
+    "14", "15", "16", "17", "18", "19", "20_21_22", "23", "24", "25", "26",
     "write_capable_second_site_is_downstream_forwarding_only",
     "decision_construction_single_point",
     "safety_decision_single_supplier",
@@ -94,11 +94,14 @@ def test_report_is_deterministic_and_offline():
     assert first == second
 
 
-def test_pinned_implementation_closure_count_unchanged():
+def test_pinned_implementation_closure_count_matches_live_manifest():
     from src.read_only_authorization_manifest import PINNED_IMPLEMENTATION_CLOSURE
 
     report = verifier.build_report(REPOSITORY_ROOT)
-    assert report["pinned_file_count"] == len(PINNED_IMPLEMENTATION_CLOSURE) == 28
+    # 36 as of M14 Issue 7 (commissioning suspension gate reaches the
+    # deferred-gates ecosystem transitively -- see src/read_only_
+    # authorization_manifest.py). Never copy a historical count forward.
+    assert report["pinned_file_count"] == len(PINNED_IMPLEMENTATION_CLOSURE) == 36
     assert "scripts/verify_execution_safety_governance.py" not in PINNED_IMPLEMENTATION_CLOSURE
 
 

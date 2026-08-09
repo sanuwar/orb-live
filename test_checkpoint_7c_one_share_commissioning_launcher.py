@@ -152,6 +152,7 @@ def launcher_kwargs(tmp_path):
         commissioned_account_number="transient",
         run_id="fake-run",
         evidence_root=tmp_path,
+        suspension_database_path=tmp_path / "commissioning_suspension.sqlite3",
         monotonic=lambda: 0.0,
         sleep=lambda seconds: None,
         now_eastern=lambda: NOW,

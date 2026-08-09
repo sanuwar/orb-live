@@ -158,6 +158,7 @@ def make_orchestrator(
         regular_market_hours=True,
         time_policy=POLICY,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        assess_commissioning_suspension=lambda: "CLEAR",
     )
     return instance, adapter, clock, handoffs
 

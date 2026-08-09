@@ -9,6 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 import checkpoint_7c_one_share_commissioning_launcher as launcher
+from src.broker_snapshot import account_fingerprint
+from src.commissioning_suspension_identity import (
+    CommissioningSuspensionIdentity,
+    CommissioningSuspensionStateProvider,
+)
 from src.execution_safety_governance import (
     CommissioningGovernanceEvidence, CommissioningMode, OperatorAcknowledgements,
 )
@@ -119,7 +124,7 @@ def actual_binding(
         counts["resolver"] += 1
         return CommissionedAccountResolution(FIXTURE_ACCOUNT, {})
 
-    def adapter_factory(_session, _account):
+    def adapter_factory(_session, _account, **_kwargs):
         counts["adapter"] += 1
         return adapter if adapter is not None else FakeAdapter()
 
@@ -128,6 +133,23 @@ def actual_binding(
         return OneShareCommissioningOrchestrator(**kwargs)
 
     store = AtomicEvidenceStore(tmp_path, run_id)
+    suspension_database_path = tmp_path / "commissioning_suspension.sqlite3"
+    # M14 Issue 7: absence of durable suspension evidence must not silently
+    # become permission -- the live path only ever calls .assess(), never
+    # .ensure_registered()/.register(). This test double simulates the
+    # separate, deliberate, out-of-band operator action that establishes
+    # CLEAR for a fresh identity before commissioning is attempted, using
+    # the exact same identity derivation the real binding will use
+    # (release_sha from GOVERNANCE_EVIDENCE, account_fingerprint_reference
+    # from the account this resolver always resolves to).
+    with CommissioningSuspensionStateProvider(
+        database_path=suspension_database_path,
+        identity=CommissioningSuspensionIdentity.derive(
+            release_sha=GOVERNANCE_EVIDENCE.release_sha,
+            account_fingerprint_reference=account_fingerprint(FIXTURE_ACCOUNT),
+        ),
+    ) as setup_provider:
+        setup_provider.ensure_registered(now=NOW)
     # One clock: monotonic and sleep must share state, otherwise a fake sleep
     # never advances a deadline and any bounded wait loops forever.
     clock = Clock()
@@ -143,6 +165,7 @@ def actual_binding(
         evidence_store=store,
         emergency_handoff=lambda payload: None,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        suspension_database_path=suspension_database_path,
         adapter_factory=adapter_factory,
         orchestrator_factory=orchestrator_factory,
     )
@@ -256,6 +279,7 @@ def test_failure_before_entry_review_is_classified_without_write(tmp_path):
         strategy_enabled=False,
         regular_market_hours=True,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        assess_commissioning_suspension=lambda: "CLEAR",
     )
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")
@@ -281,6 +305,7 @@ def test_failure_during_entry_review_is_classified_without_write(tmp_path):
         strategy_enabled=False,
         regular_market_hours=True,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        assess_commissioning_suspension=lambda: "CLEAR",
     )
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")
@@ -312,6 +337,7 @@ def test_ambiguous_entry_is_one_write_and_operator_required(tmp_path):
         strategy_enabled=False,
         regular_market_hours=True,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        assess_commissioning_suspension=lambda: "CLEAR",
     )
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")
@@ -359,7 +385,7 @@ def test_pre_orchestrator_failures_are_typed_and_close_sessions(
             raise AccountIdentityMismatchError("private")
         return CommissionedAccountResolution(FIXTURE_ACCOUNT, {})
 
-    def adapter_factory(_session, _account):
+    def adapter_factory(_session, _account, **_kwargs):
         if stage == "adapter":
             raise RuntimeError("private")
         return SimpleNamespace()
@@ -385,6 +411,7 @@ def test_pre_orchestrator_failures_are_typed_and_close_sessions(
         evidence_store=store,
         emergency_handoff=lambda payload: None,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        suspension_database_path=tmp_path / "commissioning_suspension.sqlite3",
         adapter_factory=adapter_factory,
         orchestrator_factory=orchestrator_factory,
     )
@@ -421,7 +448,8 @@ def test_session_close_failure_is_sanitized(tmp_path):
         evidence_store=store,
         emergency_handoff=lambda payload: None,
         governance_evidence=GOVERNANCE_EVIDENCE,
-        adapter_factory=lambda session, account: SimpleNamespace(),
+        suspension_database_path=tmp_path / "commissioning_suspension.sqlite3",
+        adapter_factory=lambda session, account, **kwargs: SimpleNamespace(),
         orchestrator_factory=lambda **kwargs: Orchestrator(),
     )
     with pytest.raises(CommissioningDiagnosticError) as caught:
@@ -479,6 +507,7 @@ def test_failed_before_write_marker_does_not_claim_a_write(tmp_path):
         evidence_store=store, emergency_handoff=lambda payload: None,
         strategy_enabled=False, regular_market_hours=True,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        assess_commissioning_suspension=lambda: "CLEAR",
     )
     result = asyncio.run(orchestrator.run())
     evidence = read_sanitized(store.partial / "commissioning_evidence.json")

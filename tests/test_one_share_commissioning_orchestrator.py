@@ -206,6 +206,7 @@ def make_orchestrator(
     now_eastern=lambda: NOW,
     authorization_provider=None,
     governance_evidence=None,
+    assess_commissioning_suspension=lambda: "CLEAR",
 ):
     clock = Clock()
     handoffs = []
@@ -220,6 +221,7 @@ def make_orchestrator(
         regular_market_hours=True,
         time_policy=TIME_POLICY,
         governance_evidence=governance_evidence or DEFAULT_GOVERNANCE_EVIDENCE,
+        assess_commissioning_suspension=assess_commissioning_suspension,
     )
     return instance, adapter, clock, handoffs
 

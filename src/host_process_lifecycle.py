@@ -292,11 +292,20 @@ class HostProcessLifecycleContract:
         # launcher's optional --protection-assessment-store persistence
         # call; +1 in M14 Issue 1 for the execution-safety-governance
         # boundary reached from robinhood_commissioning_adapter.py and
-        # one_share_commissioning_orchestrator.py. This is a deliberate
-        # manual re-pin gate, not a live comparison: a closure-size change
-        # must be consciously reviewed and this literal bumped, exactly as
-        # it was here.
-        if len(PINNED_IMPLEMENTATION_CLOSURE) != 28:
+        # one_share_commissioning_orchestrator.py; +8 in M14 Issue 7 for
+        # the commissioning suspension gate: robinhood_commissioning_
+        # session.py now imports commissioning_suspension_identity.py,
+        # whose make_gate() deferred-imports execution_safety_governance_
+        # deferred_gates.py, whose three gate-factory functions each
+        # deferred-import a different module (durable_suspension_
+        # controller.py -> attestation_authority.py, durable_scheduler.py,
+        # execution_gates.py; plus operational_monitor.py; plus
+        # risk_limits.py) -- reachability, not activation: only the
+        # suspension gate is in DEFAULT_COMMISSIONING_GATES. This is a
+        # deliberate manual re-pin gate, not a live comparison: a
+        # closure-size change must be consciously reviewed and this
+        # literal bumped, exactly as it was here.
+        if len(PINNED_IMPLEMENTATION_CLOSURE) != 36:
             raise LifecycleIdentityError("pinned implementation closure is invalid")
 
     def to_dict(self) -> dict[str, object]:

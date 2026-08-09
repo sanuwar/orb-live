@@ -1227,11 +1227,20 @@ def test_probe_the_scheduler_never_approves_activation_or_protection():
     assert "ACTIVATION_APPROVALS" not in _code_identifiers(MODULE_PATH)
 
 
-def test_probe_the_scheduler_is_not_in_the_milestone_9_pinned_closure():
-    """Adding it would move the checkpoint digest, which this PR must not."""
+def test_probe_the_scheduler_is_in_the_pinned_closure_only_since_m14_issue_7():
+    """Originally asserted the opposite: this Milestone 9/10 PR must not move
+    the checkpoint digest by accident, and it did not. M14 Issue 7
+    deliberately does move it -- src/robinhood_commissioning_session.py
+    (already pinned) now imports src/commissioning_suspension_identity.py,
+    whose make_gate() deferred-imports src/execution_safety_governance_
+    deferred_gates.py, whose make_suspension_gate deferred-imports THIS
+    module. Reachability, not activation: DEFAULT_COMMISSIONING_GATES gained
+    only the suspension gate; nothing here schedules or executes anything on
+    the live commissioning write path. See src/read_only_authorization_
+    manifest.py for the full pinned-closure reasoning."""
     from src.read_only_authorization_manifest import PINNED_IMPLEMENTATION_CLOSURE
 
-    assert "src/durable_scheduler.py" not in PINNED_IMPLEMENTATION_CLOSURE
+    assert "src/durable_scheduler.py" in PINNED_IMPLEMENTATION_CLOSURE
 
 
 # --------------------------------------------------------------------------
