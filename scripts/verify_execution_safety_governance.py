@@ -651,11 +651,19 @@ def check_write_boundary_structural_ordering(root: Path) -> list[CheckResult]:
     technique = (
         "AST structural proof on src/robinhood_commissioning_adapter.py's "
         "RobinhoodCommissioningAdapter._call: locate every ast.Raise whose "
-        "exception is ExecutionSafetyDeniedError and every reference to "
+        "exception is ExecutionSafetyDeniedError, every ast.Call to "
+        "validate_execution_safety_decision, and every reference to "
         "'call_tool' inside the WRITE_TOOLS branch, and confirm (by line "
         "number, the only ordering primitive that matters for straight-line "
         "Python execution with no loop/goto/exception-swallowing between "
-        "them) that every such raise precedes every call_tool reference."
+        "them) that the validate call and every raise precede every "
+        "call_tool reference and the write-key registration. (M14 Issue 6: "
+        "the four separate raise sites from M14 Issue 1 -- role missing / "
+        "decision missing / decision denied / action mismatch -- were "
+        "consolidated into validate_execution_safety_decision plus two "
+        "raise sites: role missing, and 'not validation.valid'; the "
+        "consolidated function itself is independently exercised by "
+        "check_decision_authenticity_gate below.)"
     )
     source = _read("src/robinhood_commissioning_adapter.py")
     tree = ast.parse(source)
@@ -668,6 +676,7 @@ def check_write_boundary_structural_ordering(root: Path) -> list[CheckResult]:
     deny_raise_lines: list[int] = []
     call_tool_lines: list[int] = []
     write_key_registration_lines: list[int] = []
+    validate_call_lines: list[int] = []
     for node in ast.walk(call_method):
         if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
             fn = node.exc.func
@@ -676,6 +685,11 @@ def check_write_boundary_structural_ordering(root: Path) -> list[CheckResult]:
                 deny_raise_lines.append(node.lineno)
         if isinstance(node, ast.Attribute) and node.attr == "call_tool":
             call_tool_lines.append(node.lineno)
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+            if name == "validate_execution_safety_decision":
+                validate_call_lines.append(node.lineno)
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -685,34 +699,45 @@ def check_write_boundary_structural_ordering(root: Path) -> list[CheckResult]:
         ):
             write_key_registration_lines.append(node.lineno)
 
-    if len(deny_raise_lines) < 3:
+    if len(deny_raise_lines) < 2:
         results.append(_fail("5", "governance_decision_required_before_write",
-                              f"expected at least 3 ExecutionSafetyDeniedError raise sites "
-                              f"(role missing / decision missing / decision denied) in _call, found "
-                              f"{len(deny_raise_lines)} at lines {deny_raise_lines}",
+                              f"expected at least 2 ExecutionSafetyDeniedError raise sites "
+                              f"(role missing / decision authenticity-binding-freshness invalid) "
+                              f"in _call, found {len(deny_raise_lines)} at lines {deny_raise_lines}",
                               technique))
+    elif not validate_call_lines:
+        results.append(_fail("5", "governance_decision_required_before_write",
+                              "no call to validate_execution_safety_decision found in _call -- "
+                              "the write boundary does not appear to independently re-validate "
+                              "the presented decision", technique))
     elif not call_tool_lines:
         results.append(_fail("5", "governance_decision_required_before_write",
                               "no call_tool reference found in _call at all", technique))
-    elif max(deny_raise_lines) < min(call_tool_lines) and (
-        not write_key_registration_lines or max(deny_raise_lines) < min(write_key_registration_lines)
+    elif (
+        max(deny_raise_lines) < min(call_tool_lines)
+        and max(validate_call_lines) < min(call_tool_lines)
+        and (not write_key_registration_lines or (
+            max(deny_raise_lines) < min(write_key_registration_lines)
+            and max(validate_call_lines) < min(write_key_registration_lines)
+        ))
     ):
         results.append(_pass(
             "5", "governance_decision_required_before_write",
-            f"all {len(deny_raise_lines)} ExecutionSafetyDeniedError raise sites "
-            f"(lines {deny_raise_lines}) are unconditional statements inside the "
-            f"WRITE_TOOLS branch that textually/execution-order precede both the "
-            f"write-key registration (lines {write_key_registration_lines}) and "
+            f"validate_execution_safety_decision is called (lines {validate_call_lines}) and all "
+            f"{len(deny_raise_lines)} ExecutionSafetyDeniedError raise sites (lines {deny_raise_lines}) "
+            f"are unconditional statements inside the WRITE_TOOLS branch that textually/execution-order "
+            f"precede both the write-key registration (lines {write_key_registration_lines}) and "
             f"every call_tool reference (lines {call_tool_lines}) in the same function -- "
             f"straight-line Python execution cannot reach call_tool for a write tool "
-            f"without first passing every raise site.",
+            f"without first calling validate_execution_safety_decision and passing every raise site.",
             technique,
         ))
     else:
         results.append(_fail(
             "5", "governance_decision_required_before_write",
-            f"raise sites {deny_raise_lines} do not all precede call_tool sites {call_tool_lines} "
-            f"/ write-key registration {write_key_registration_lines}",
+            f"validate call sites {validate_call_lines} / raise sites {deny_raise_lines} do not all "
+            f"precede call_tool sites {call_tool_lines} / write-key registration "
+            f"{write_key_registration_lines}",
             technique,
         ))
     return results
@@ -756,25 +781,35 @@ _ENTRY_ARGS = {
 
 def _hand_built_decision(
     *, outcome: Any, role: str, arguments: Mapping[str, Any],
-    evaluated_at: datetime, authority_ceiling: str = "FORGED_BY_VERIFIER",
-    decision_digest: str = "forged-digest-not-recomputed",
+    evaluated_at: datetime, authority_ceiling: str | None = None,
+    decision_digest: str | None = None, policy_version: str | None = None,
+    decision_id: str | None = None,
 ) -> Any:
     """Constructs an ExecutionSafetyDecision directly -- NEVER through
-    evaluate_execution_safety. Used only to adversarially probe the write
-    boundary; never used to claim a decision is legitimate."""
-    from src.execution_safety_governance import ExecutionSafetyDecision
+    evaluate_execution_safety. (M14 Issue 6: since the write boundary now
+    independently validates policy_version/authority_ceiling/decision_digest/
+    decision_id via validate_execution_safety_decision, every field defaults
+    to an AUTHENTIC value -- the real POLICY_VERSION/AUTHORITY_CEILING and a
+    correctly-computed digest/id -- so this helper can stand in for a
+    legitimate decision in checks that are not themselves testing forgery
+    (6/7/8/10/bypass_without_role/stale-tamper). Pass an explicit override to
+    make one specific field inauthentic for an adversarial check (check 9).
+    Never used to claim a decision is legitimate when a field is overridden.
+    """
+    from src.execution_safety_governance import (
+        AUTHORITY_CEILING as _REAL_AUTHORITY_CEILING,
+        POLICY_VERSION as _REAL_POLICY_VERSION,
+        ExecutionSafetyDecision, compute_decision_digest,
+    )
 
-    return ExecutionSafetyDecision(
-        decision_id="verifier-forged-decision",
-        policy_version="verifier-forged-policy",
-        action_identity=f"verifier-forged-identity:{role}",
-        outcome=outcome,
-        satisfied_gates=(),
-        failed_gates=(),
-        reason_codes=(),
-        decision_digest=decision_digest,
-        evaluated_at=evaluated_at,
-        authority_ceiling=authority_ceiling,
+    resolved_policy_version = (
+        _REAL_POLICY_VERSION if policy_version is None else policy_version
+    )
+    resolved_authority_ceiling = (
+        _REAL_AUTHORITY_CEILING if authority_ceiling is None else authority_ceiling
+    )
+    action_identity = f"verifier-decision-identity:{role}"
+    bound = dict(
         bound_role=role,
         bound_symbol=arguments.get("symbol", ""),
         bound_side=arguments.get("side", ""),
@@ -782,6 +817,29 @@ def _hand_built_decision(
         bound_quantity=arguments.get("quantity", ""),
         bound_stop_price=arguments.get("stop_price"),
         bound_order_id=arguments.get("order_id"),
+    )
+    if decision_digest is None:
+        resolved_digest = compute_decision_digest(
+            policy_version=resolved_policy_version, action_identity=action_identity,
+            outcome=outcome, satisfied=(), failed=(), reasons=(),
+            authority_ceiling=resolved_authority_ceiling, **bound,
+        )
+    else:
+        resolved_digest = decision_digest
+    resolved_id = resolved_digest if decision_id is None else decision_id
+
+    return ExecutionSafetyDecision(
+        decision_id=resolved_id,
+        policy_version=resolved_policy_version,
+        action_identity=action_identity,
+        outcome=outcome,
+        satisfied_gates=(),
+        failed_gates=(),
+        reason_codes=(),
+        decision_digest=resolved_digest,
+        evaluated_at=evaluated_at,
+        authority_ceiling=resolved_authority_ceiling,
+        **bound,
     )
 
 
@@ -891,46 +949,48 @@ def check_forged_decision() -> list[CheckResult]:
         "Adversarial: hand-construct an ExecutionSafetyDecision directly via "
         "its dataclass constructor -- never through evaluate_execution_safety "
         "-- with a bogus authority_ceiling and a decision_digest that was never "
-        "computed by _decision_digest, set outcome=ALLOW and bind it exactly to "
-        "the write arguments, then present it to the real adapter."
+        "computed by compute_decision_digest, set outcome=ALLOW and bind it "
+        "exactly to the write arguments, then present it to the real adapter."
     )
     from src.execution_safety_governance import ExecutionSafetyOutcome
-    from src.robinhood_commissioning_adapter import RobinhoodCommissioningAdapter
+    from src.robinhood_commissioning_adapter import (
+        ExecutionSafetyDeniedError, RobinhoodCommissioningAdapter,
+    )
 
     now = datetime.now(timezone.utc)
     forged = _hand_built_decision(
         outcome=ExecutionSafetyOutcome.ALLOW, role="entry", arguments=_ENTRY_ARGS,
         evaluated_at=now, authority_ceiling="NOT_A_REAL_AUTHORITY_CEILING",
-        decision_digest="never-computed-by-_decision_digest",
+        decision_digest="never-computed-by-compute_decision_digest",
     )
     session = _FakeSession(_fake_place_response())
     adapter = RobinhoodCommissioningAdapter(session, "verifier-account")
-    asyncio.run(adapter.place_equity_order(_ENTRY_ARGS, role="entry", safety_decision=forged))
+    try:
+        asyncio.run(adapter.place_equity_order(_ENTRY_ARGS, role="entry", safety_decision=forged))
+    except ExecutionSafetyDeniedError:
+        pass
 
     if session.calls:
         results.append(_fail(
             "9", "forged_decision_cannot_reach_write_without_evaluate_execution_safety",
             "a hand-constructed ExecutionSafetyDecision that never went through "
             "evaluate_execution_safety (authority_ceiling='NOT_A_REAL_AUTHORITY_CEILING', "
-            "decision_digest='never-computed-by-_decision_digest') WAS ACCEPTED by "
+            "decision_digest='never-computed-by-compute_decision_digest') WAS ACCEPTED by "
             f"RobinhoodCommissioningAdapter and reached the broker call ({len(session.calls)} call(s) "
             "recorded) because its outcome was ALLOW and its bound_* fields matched the write "
-            "arguments. The write boundary (_call in robinhood_commissioning_adapter.py) checks "
-            "isinstance(..., ExecutionSafetyDecision), outcome is ALLOW, and decision_binds_write(...) "
-            "-- it never checks authority_ceiling, policy_version, or decision_digest, and never "
-            "confirms provenance from evaluate_execution_safety. Today this is contained by a single "
-            "structural fact, independently confirmed above (decision_construction_single_point / "
-            "safety_decision_single_supplier): only src/execution_safety_governance.py constructs "
-            "ExecutionSafetyDecision, and only the orchestrator supplies safety_decision= to the "
-            "adapter. That is a repository-wide-scan guarantee, not a cryptographic one -- nothing "
-            "at the write boundary itself would refuse a forged decision object.",
+            "arguments. M14 Issue 6 was expected to close this by having the write boundary call "
+            "validate_execution_safety_decision, which independently checks authority_ceiling, "
+            "policy_version, and a recomputed decision_digest before trusting outcome/binding -- "
+            "that appears not to be happening (or not effectively) for this forged object.",
             technique,
         ))
     else:
         results.append(_pass(
             "9", "forged_decision_cannot_reach_write_without_evaluate_execution_safety",
-            "a hand-forged ExecutionSafetyDecision (never produced by evaluate_execution_safety) "
-            "was refused at the write boundary", technique,
+            "a hand-forged ExecutionSafetyDecision (never produced by evaluate_execution_safety, "
+            "bogus authority_ceiling, unrecomputed decision_digest) was refused at the write "
+            "boundary -- M14 Issue 6's validate_execution_safety_decision correctly denied it "
+            "before any broker call", technique,
         ))
     return results
 
@@ -1121,16 +1181,24 @@ def check_stale_decision_tamper() -> list[CheckResult]:
     results: list[CheckResult] = []
     technique = (
         "Adversarial: a stale (>MAX_DECISION_AGE_SECONDS old), correctly-bound, "
-        "ALLOW-outcome decision presented directly to RobinhoodCommissioningAdapter "
-        "(bypassing the orchestrator, which is the only caller that ever calls "
-        "decision_is_fresh). Independently confirmed by grep+AST that "
-        "src/robinhood_commissioning_adapter.py never references decision_is_fresh."
+        "otherwise-AUTHENTIC ALLOW decision presented directly to "
+        "RobinhoodCommissioningAdapter (bypassing the orchestrator, which was "
+        "the only caller that called decision_is_fresh before M14 Issue 6). "
+        "Independently confirmed by source-text scan whether "
+        "src/robinhood_commissioning_adapter.py references decision_is_fresh "
+        "directly or (post-Issue-6) validate_execution_safety_decision, which "
+        "itself calls decision_is_fresh."
     )
     from src.execution_safety_governance import ExecutionSafetyOutcome
-    from src.robinhood_commissioning_adapter import RobinhoodCommissioningAdapter
+    from src.robinhood_commissioning_adapter import (
+        ExecutionSafetyDeniedError, RobinhoodCommissioningAdapter,
+    )
 
     adapter_source = _read("src/robinhood_commissioning_adapter.py")
-    adapter_calls_freshness_check = "decision_is_fresh" in adapter_source
+    adapter_calls_freshness_check = (
+        "decision_is_fresh" in adapter_source
+        or "validate_execution_safety_decision" in adapter_source
+    )
 
     long_ago = datetime.now(timezone.utc) - timedelta(hours=6)
     stale_but_bound = _hand_built_decision(
@@ -1138,13 +1206,16 @@ def check_stale_decision_tamper() -> list[CheckResult]:
     )
     session = _FakeSession(_fake_place_response())
     adapter = RobinhoodCommissioningAdapter(session, "verifier-account")
-    asyncio.run(adapter.place_equity_order(_ENTRY_ARGS, role="entry", safety_decision=stale_but_bound))
+    try:
+        asyncio.run(adapter.place_equity_order(_ENTRY_ARGS, role="entry", safety_decision=stale_but_bound))
+    except ExecutionSafetyDeniedError:
+        pass
 
     if adapter_calls_freshness_check:
         results.append(_pass(
             "tamper_stale_decision", "stale_decision_rejected_at_adapter_boundary",
-            "src/robinhood_commissioning_adapter.py references decision_is_fresh and the stale "
-            "decision was refused", technique,
+            "src/robinhood_commissioning_adapter.py references validate_execution_safety_decision "
+            "(which itself calls decision_is_fresh) and the stale decision was refused", technique,
         ))
     elif session.calls:
         results.append(_fail(
@@ -1206,6 +1277,11 @@ _INDEPENDENT_DIGEST_DOMAIN = b"orb-live/execution-safety-governance/v1"
 
 
 def _independent_decision_digest(decision: Any) -> str:
+    # M14 Issue 6: the reviewed compute_decision_digest additionally binds
+    # every bound_* write field (closing the tamper_digest_binding_mismatch
+    # finding) but still deliberately excludes evaluated_at/decision_id/
+    # context_version -- matched here field-for-field against the reviewed
+    # source, not imported from it.
     payload: dict[str, Any] = {
         "policy_version": decision.policy_version,
         "action_identity": decision.action_identity,
@@ -1214,6 +1290,13 @@ def _independent_decision_digest(decision: Any) -> str:
         "failed_gates": list(decision.failed_gates),
         "reason_codes": list(decision.reason_codes),
         "authority_ceiling": decision.authority_ceiling,
+        "bound_role": decision.bound_role,
+        "bound_symbol": decision.bound_symbol,
+        "bound_side": decision.bound_side,
+        "bound_order_type": decision.bound_order_type,
+        "bound_quantity": decision.bound_quantity,
+        "bound_stop_price": decision.bound_stop_price,
+        "bound_order_id": decision.bound_order_id,
     }
     return hashlib.sha256(
         _INDEPENDENT_DIGEST_DOMAIN + b"\x00decision\x00" + _independent_canonical_bytes(payload)
@@ -1321,19 +1404,24 @@ def check_decision_digest() -> list[CheckResult]:
 def check_digest_does_not_cover_binding_tamper() -> list[CheckResult]:
     results: list[CheckResult] = []
     technique = (
-        "Adversarial: take a real ALLOW decision from evaluate_execution_safety, "
-        "then dataclasses.replace() it with a different bound_quantity (a field "
-        "the write boundary's decision_binds_write DOES compare) while leaving "
-        "decision_digest untouched. Confirm independently that (a) the recomputed "
-        "digest still matches -- because the digest payload does not include any "
-        "bound_* field -- and (b) decision_binds_write uses the mutated bound_"
-        "quantity directly, with no digest cross-check anywhere on the write path."
+        "Adversarial: take a real ALLOW decision from evaluate_execution_safety "
+        "for a CANCEL (order_id is the only field the adapter's own separate "
+        "fixed-policy validation does not pin to one exact literal value, so "
+        "mutating it end-to-end through the real adapter is not confounded by "
+        "that unrelated check), then dataclasses.replace() it with a different "
+        "bound_order_id (a field decision_binds_write DOES compare) while "
+        "leaving decision_digest untouched. (1) Confirm independently whether "
+        "the recomputed digest still matches the stored one despite the "
+        "mutation. (2) Present the mutated decision directly to the real "
+        "RobinhoodCommissioningAdapter against a fake session and count actual "
+        "broker calls -- the end-to-end proof, not just the digest arithmetic."
     )
     from src.execution_safety_governance import (
         CommissioningGovernanceEvidence, CommissioningMode, ExecutionAction,
         ExecutionSafetyContext, OperatorAcknowledgements, decision_binds_write,
         evaluate_execution_safety,
     )
+    from src.robinhood_commissioning_adapter import RobinhoodCommissioningAdapter
     from zoneinfo import ZoneInfo
 
     eastern = ZoneInfo("America/New_York")
@@ -1346,43 +1434,186 @@ def check_digest_does_not_cover_binding_tamper() -> list[CheckResult]:
     )
     context = ExecutionSafetyContext(
         context_version="1", decision_time=moment, run_id="verifier-run-digest-tamper",
-        action=ExecutionAction.ENTRY_PLACE, symbol="AAPL", side="buy",
-        order_type="market", quantity="1", stop_price=None, order_id=None,
+        action=ExecutionAction.STOP_CANCEL, symbol="AAPL", side="sell",
+        order_type="stop_market", quantity="1", stop_price=None, order_id="order-1",
         governance_evidence=evidence,
     )
     original = evaluate_execution_safety(context)
-    tampered = dataclasses.replace(original, bound_quantity="999")
+    tampered = dataclasses.replace(original, bound_order_id="order-999")
 
     digest_unchanged_despite_binding_mutation = (
         _independent_decision_digest(tampered) == original.decision_digest
         and tampered.decision_digest == original.decision_digest
     )
-    tampered_arguments = dict(_ENTRY_ARGS, quantity="999")
-    tampered_still_binds = decision_binds_write(tampered, role="entry", arguments=tampered_arguments)
+    tampered_arguments = {"order_id": "order-999"}
+    tampered_still_binds = decision_binds_write(tampered, role="cancel", arguments=tampered_arguments)
 
-    if digest_unchanged_despite_binding_mutation and tampered_still_binds:
+    session = _FakeSession(_fake_place_response())
+    # now_eastern pinned to the same fixed `moment` the decision was
+    # evaluated at (rather than the real wall clock) so this check isolates
+    # the digest/binding property under test -- it must not also depend on
+    # `moment` still being within MAX_DECISION_AGE_SECONDS of whenever this
+    # script happens to run.
+    adapter = RobinhoodCommissioningAdapter(
+        session, "verifier-account", now_eastern=lambda: moment,
+    )
+    try:
+        asyncio.run(adapter.cancel_equity_order(tampered_arguments, safety_decision=tampered))
+    except Exception:
+        # Any exception here means the write was refused (or failed) before
+        # or during a real broker call; session.calls, checked below, is the
+        # actual signal this check cares about, not the exception type.
+        pass
+
+    if digest_unchanged_despite_binding_mutation and tampered_still_binds and session.calls:
         results.append(_fail(
             "tamper_digest_binding_mismatch", "decision_digest_covers_binding_fields",
-            "decision_digest's payload (policy_version, action_identity, outcome, satisfied_gates, "
-            "failed_gates, reason_codes, authority_ceiling) does NOT include any bound_* field. "
-            "A decision whose bound_quantity was changed from '1' to '999' after construction "
-            "(dataclasses.replace, or equally object.__setattr__ on the frozen dataclass) keeps "
-            "the SAME decision_digest, and decision_binds_write(...) -- the only binding check on "
-            "the write path -- compares against the mutated bound_quantity directly with no digest "
-            "cross-check. Nothing in src/robinhood_commissioning_adapter.py or src/one_share_"
-            "commissioning_orchestrator.py ever recomputes or compares decision_digest at the write "
-            "boundary (confirmed by source-text scan: 'decision_digest' appears only inside "
-            "src/execution_safety_governance.py). In the real call graph this requires already having "
-            "a decision object to mutate, which the single-supplier fact above bounds -- but the "
-            "digest field, despite its name, provides no defense-in-depth against a decision that "
-            "reaches the boundary already mutated.",
+            "decision_digest's payload does NOT include the bound_* fields. A decision whose "
+            "bound_order_id was changed from 'order-1' to 'order-999' after construction "
+            "(dataclasses.replace) kept the SAME decision_digest, decision_binds_write matched "
+            f"the mutated value, and the mutated decision WAS ACCEPTED by "
+            f"RobinhoodCommissioningAdapter ({len(session.calls)} broker call(s)).",
+            technique,
+        ))
+    elif session.calls:
+        results.append(_fail(
+            "tamper_digest_binding_mismatch", "decision_digest_covers_binding_fields",
+            f"digest arithmetic detected the mutation (digest_unchanged_despite_binding_mutation="
+            f"{digest_unchanged_despite_binding_mutation}) but the real adapter still accepted the "
+            f"mutated decision and made {len(session.calls)} broker call(s) -- the digest check is "
+            "not actually wired into the write boundary.",
             technique,
         ))
     else:
         results.append(_pass(
             "tamper_digest_binding_mismatch", "decision_digest_covers_binding_fields",
-            f"digest_unchanged_despite_binding_mutation={digest_unchanged_despite_binding_mutation} "
-            f"tampered_still_binds={tampered_still_binds} -- tampering was detected somewhere", technique,
+            "M14 Issue 6: decision_digest now binds every bound_* field, so mutating bound_order_id "
+            "after construction (without recomputing the digest) makes an independent recompute "
+            f"diverge from the stored digest (digest_unchanged_despite_binding_mutation="
+            f"{digest_unchanged_despite_binding_mutation}); presenting the mutated decision to the "
+            "real RobinhoodCommissioningAdapter was refused before any broker call "
+            f"({len(session.calls)} call(s))", technique,
+        ))
+    return results
+
+
+# ==========================================================================
+# M14 Issue 6: validate_execution_safety_decision is independently exercised
+# against every one of its 8 requirements, the same way checks 14-19 (below)
+# exercise each of the 7 commissioning gates directly -- this is the
+# consolidated replacement for the four raise sites check 5 used to count
+# directly in _call, now moved into one reusable, independently testable
+# function.
+# ==========================================================================
+
+
+def check_decision_authenticity_gate() -> list[CheckResult]:
+    results: list[CheckResult] = []
+    technique = (
+        "validate_execution_safety_decision() called directly (not through "
+        "the adapter) with one authentic baseline ALLOW decision and, for "
+        "each requirement, exactly one field perturbed away from authentic; "
+        "each perturbation is asserted to flip the result from valid to "
+        "invalid in isolation, with the expected reason_code."
+    )
+    from src.execution_safety_governance import (
+        AUTHORITY_CEILING, POLICY_VERSION, ExecutionSafetyOutcome,
+        validate_execution_safety_decision,
+    )
+    import dataclasses as _dc
+
+    now = datetime.now(timezone.utc)
+    baseline = _hand_built_decision(
+        outcome=ExecutionSafetyOutcome.ALLOW, role="entry", arguments=_ENTRY_ARGS, evaluated_at=now,
+    )
+
+    def validate(decision: Any, *, at: datetime = now) -> Any:
+        return validate_execution_safety_decision(
+            decision, role="entry", arguments=_ENTRY_ARGS, now=at,
+        )
+
+    failures: list[str] = []
+
+    baseline_result = validate(baseline)
+    if not baseline_result.valid:
+        failures.append(f"baseline (should be valid): {baseline_result.reason_code}")
+
+    if validate(None).valid:
+        failures.append("isinstance: None validated as valid")
+    if validate("not-a-decision").valid:
+        failures.append("isinstance: a plain string validated as valid")
+
+    deny_variant = _hand_built_decision(
+        outcome=ExecutionSafetyOutcome.DENY, role="entry", arguments=_ENTRY_ARGS, evaluated_at=now,
+    )
+    if validate(deny_variant).valid:
+        failures.append("outcome: a DENY-outcome decision validated as valid")
+
+    wrong_policy = _hand_built_decision(
+        outcome=ExecutionSafetyOutcome.ALLOW, role="entry", arguments=_ENTRY_ARGS,
+        evaluated_at=now, policy_version="not-" + POLICY_VERSION,
+    )
+    if validate(wrong_policy).valid:
+        failures.append("policy_version: a mismatched policy_version validated as valid")
+
+    wrong_authority = _hand_built_decision(
+        outcome=ExecutionSafetyOutcome.ALLOW, role="entry", arguments=_ENTRY_ARGS,
+        evaluated_at=now, authority_ceiling="not-" + AUTHORITY_CEILING,
+    )
+    if validate(wrong_authority).valid:
+        failures.append("authority_ceiling: a mismatched authority_ceiling validated as valid")
+
+    malformed_digest = _dc.replace(baseline, decision_digest="")
+    if validate(malformed_digest).valid:
+        failures.append("digest: an empty decision_digest validated as valid")
+
+    mismatched_digest = _dc.replace(baseline, decision_digest="0" * 64)
+    if validate(mismatched_digest).valid:
+        failures.append("digest: a well-formed but non-recomputable decision_digest validated as valid")
+
+    for field_name, override in (
+        ("bound_role", {"bound_role": "stop"}),
+        ("bound_symbol", {"bound_symbol": "MSFT"}),
+        ("bound_side", {"bound_side": "sell"}),
+        ("bound_order_type", {"bound_order_type": "limit"}),
+        ("bound_quantity", {"bound_quantity": "999"}),
+        ("bound_stop_price", {"bound_stop_price": "185.00"}),
+        ("satisfied_gates", {"satisfied_gates": ("mutated_gate",)}),
+        ("reason_codes", {"reason_codes": ("MUTATED_REASON",)}),
+    ):
+        mutated = _dc.replace(baseline, **override)
+        if validate(mutated).valid:
+            failures.append(f"digest: mutating {field_name} after construction (digest not "
+                             f"recomputed) still validated as valid")
+
+    mismatched_arguments = dict(_ENTRY_ARGS, quantity="999")
+    if validate_execution_safety_decision(
+        baseline, role="entry", arguments=mismatched_arguments, now=now,
+    ).valid:
+        failures.append("binding: a decision presented against non-matching write arguments "
+                         "validated as valid")
+
+    stale = _hand_built_decision(
+        outcome=ExecutionSafetyOutcome.ALLOW, role="entry", arguments=_ENTRY_ARGS,
+        evaluated_at=now - timedelta(hours=6),
+    )
+    if validate(stale, at=now).valid:
+        failures.append("freshness: a 6-hour-stale decision validated as valid")
+
+    if failures:
+        results.append(_fail(
+            "decision_authenticity_gate", "decision_authenticity_gate_enforces_all_requirements",
+            f"validate_execution_safety_decision failed to reject: {failures}", technique,
+        ))
+    else:
+        results.append(_pass(
+            "decision_authenticity_gate", "decision_authenticity_gate_enforces_all_requirements",
+            "validate_execution_safety_decision independently rejected: non-ExecutionSafetyDecision "
+            "input, DENY outcome, mismatched policy_version, mismatched authority_ceiling, empty "
+            "digest, non-recomputable digest, every individually-mutated bound_*/gate/reason field "
+            "(digest no longer matches), a decision presented against non-matching write arguments, "
+            "and a 6-hour-stale decision -- while the unmutated authentic baseline validated "
+            "successfully", technique,
         ))
     return results
 
@@ -1970,6 +2201,7 @@ def run_all_checks(root: Path) -> list[CheckResult]:
     results += check_stale_decision_tamper()
     results += check_decision_digest()
     results += check_digest_does_not_cover_binding_tamper()
+    results += check_decision_authenticity_gate()
     results += check_commissioning_gates()
     results += check_isolation_from_automated_paths(root)
     results += check_authority_ceiling_and_fields(root)

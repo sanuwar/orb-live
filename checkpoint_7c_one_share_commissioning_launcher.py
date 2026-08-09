@@ -76,7 +76,7 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/one_share_commissioning.py":
         "c26500ade1881108f21ceb38e5223bad7650f4e394623bf4256def90c9fd814d",
     "src/robinhood_commissioning_adapter.py":
-        "f9a39398d81c53e7b3ecb5ac324cd6b9dcffe67361047161d13ab60d57c48458",
+        "c416084ff942f574c8eb2797bcd2dc0d40413e450f29ef51ed935918e4a8df90",
     "src/one_share_commissioning_orchestrator.py":
         "8574fa1b309133a4aa08bdbeba6f1287da14ec4b9b6cd2d27d2f432df782e9ba",
     "src/robinhood_commissioning_session.py":
@@ -404,7 +404,13 @@ async def execute_commissioning(
             "current Eastern time is outside regular market hours"
         )
     store = AtomicEvidenceStore(evidence_root, run_id)
-    adapter = RobinhoodCommissioningAdapter(session, commissioned_account_number)
+    # M14 Issue 6: the adapter independently re-checks decision freshness at
+    # the actual write boundary. Threading the SAME now_eastern the
+    # orchestrator uses (rather than each defaulting to its own real-clock
+    # read) keeps both freshness checks evaluated against one clock source.
+    adapter = RobinhoodCommissioningAdapter(
+        session, commissioned_account_number, now_eastern=now_eastern,
+    )
     # verify_runtime_posture(root) above already required every REVIEWED_HASHES
     # entry to match; this is an explicitly fake/offline demonstration run, so
     # attended acknowledgements are asserted true by construction rather than
