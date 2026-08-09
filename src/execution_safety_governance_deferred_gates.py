@@ -10,10 +10,18 @@ oversight: each gate below is real and independently tested against the
 actual `src/risk_limits.py`, `src/durable_suspension_controller.py`, and
 `src/operational_monitor.py` APIs, but each also requires evidence that does
 not exist yet for a synchronous, attended, single-run commissioning flow --
-a realized-daily-loss/kill-switch source, a commissioning-specific
-suspension-controller identity and durable store, or a live heartbeat
-process. Synthesizing that evidence to activate these gates today would be
-exactly the "fake integration" the M14 Issue 1 handoff prohibits.
+a realized-daily-loss/kill-switch source, or a live heartbeat process.
+Synthesizing that evidence to activate these gates today would be exactly
+the "fake integration" the M14 Issue 1 handoff prohibits.
+
+The suspension gate's evidence gap is narrower than the other two: M14
+Issue 3 (`src/commissioning_suspension_identity.py`) established the
+commissioning-specific suspension-controller identity and durable-store
+convention `make_suspension_gate` previously lacked. That module's
+`CommissioningSuspensionStateProvider.make_gate()` builds a real,
+fully-evidenced suspension gate today. It remains unwired here because
+activating it in `DEFAULT_COMMISSIONING_GATES` is still a separate,
+explicit milestone decision -- not because the evidence is still missing.
 
 Kept out of `src/execution_safety_governance.py`'s import graph specifically
 so these deferrals never silently expand `PINNED_IMPLEMENTATION_CLOSURE`
@@ -82,8 +90,17 @@ def make_suspension_gate(
     *, controller: "DurableSuspensionController", controller_id: str  # noqa: F821
 ) -> GateEvaluator:
     """Wrap `DurableSuspensionController.assess`. Not part of
-    `DEFAULT_COMMISSIONING_GATES`: commissioning has no registered
-    controller identity or durable store convention today."""
+    `DEFAULT_COMMISSIONING_GATES`.
+
+    M14 Issue 3 resolved the identity/durable-store gap this docstring used
+    to describe: `src/commissioning_suspension_identity.py` now defines the
+    canonical, deterministic, reference-only commissioning `controller_id`
+    convention and a `CommissioningSuspensionStateProvider` binding it to an
+    explicit durable store (see that module's `make_gate()`, which builds
+    exactly this evaluator against a real identity and store). What remains
+    deferred is wiring -- adding this gate to `DEFAULT_COMMISSIONING_GATES`
+    is still a future milestone's explicit decision, made deliberately, not
+    a side effect of either module existing."""
 
     from src.durable_suspension_controller import ControllerState
 

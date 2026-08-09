@@ -1978,14 +1978,61 @@ def check_m13_isolation(root: Path) -> list[CheckResult]:
     return results
 
 
+#: The reviewed live commissioning write-path closure (same set check
+#: 20_21_22 treats as authoritative): every file the actual broker-write
+#: call graph runs through, starting from the governance decision itself.
+_LIVE_GOVERNANCE_CLOSURE = (
+    "src/execution_safety_governance.py",
+    "src/robinhood_commissioning_adapter.py",
+    "src/one_share_commissioning_orchestrator.py",
+    "src/robinhood_commissioning_session.py",
+)
+
+
+def _src_import_graph(root: Path) -> dict[str, set[str]]:
+    """Maps each tracked src/ file (relative posix path) to the set of
+    other tracked src/ files it imports (`from src.X import ...` / `import
+    src.X`, resolved to `src/X.py`) -- used to compute transitive
+    reachability, not merely direct imports."""
+    graph: dict[str, set[str]] = {}
+    known = {
+        p.relative_to(root).as_posix() for p in _tracked_py_files(root, ("src",))
+    }
+    for path in _tracked_py_files(root, ("src",)):
+        relative = path.relative_to(root).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            graph[relative] = set()
+            continue
+        modules, _names = _imported_names(tree)
+        edges: set[str] = set()
+        for module in modules:
+            if not module.startswith("src."):
+                continue
+            candidate = module.replace(".", "/") + ".py"
+            if candidate in known:
+                edges.add(candidate)
+        graph[relative] = edges
+    return graph
+
+
 def check_deferred_gates_not_imported(root: Path) -> list[CheckResult]:
     results: list[CheckResult] = []
     technique = (
         "AST import-name scan of every tracked src/ and scripts/ file (not "
         "tests/) for any reference to the module name "
         "'execution_safety_governance_deferred_gates' or the three deferred "
-        "gate factory names, plus an AST inspection of "
-        "DEFAULT_COMMISSIONING_GATES' own literal tuple contents."
+        "gate factory names. Each reference is then classified by whether "
+        "it is TRANSITIVELY REACHABLE from the live governance closure "
+        f"({list(_LIVE_GOVERNANCE_CLOSURE)}) via an independently-built "
+        "src/-internal import graph (BFS over 'from src.X import ...' / "
+        "'import src.X' edges) -- a leaf provider module that references a "
+        "deferred-gate factory for a future, not-yet-wired caller is a "
+        "structurally different fact than the live write path being able "
+        "to reach one, and only the latter is a finding. Plus an AST "
+        "inspection of DEFAULT_COMMISSIONING_GATES' own literal tuple "
+        "contents."
     )
     offenders: list[str] = []
     deferred_names = {"execution_safety_governance_deferred_gates", "make_risk_limit_gate", "make_suspension_gate", "make_operational_health_gate"}
@@ -2000,6 +2047,19 @@ def check_deferred_gates_not_imported(root: Path) -> list[CheckResult]:
         modules, names = _imported_names(tree)
         if any("execution_safety_governance_deferred_gates" in m for m in modules) or (names & deferred_names):
             offenders.append(relative)
+
+    graph = _src_import_graph(root)
+    live_reachable: set[str] = set()
+    frontier = [p for p in _LIVE_GOVERNANCE_CLOSURE if p in graph]
+    while frontier:
+        current = frontier.pop()
+        if current in live_reachable:
+            continue
+        live_reachable.add(current)
+        frontier.extend(graph.get(current, ()))
+
+    reachable_offenders = [o for o in offenders if o in live_reachable]
+    inert_offenders = [o for o in offenders if o not in live_reachable]
 
     tree = ast.parse(_read("src/execution_safety_governance.py"))
     default_gates_names: list[str] | None = None
@@ -2024,9 +2084,11 @@ def check_deferred_gates_not_imported(root: Path) -> list[CheckResult]:
         "gate_commissioning_bounds", "gate_action_identity_valid", "gate_exchange_calendar",
     }
 
-    if offenders:
+    if reachable_offenders:
         results.append(_fail("25", "deferred_gates_truthfully_unimported",
-                              f"the deferred-gates module/names are referenced outside their own file in: {offenders}", technique))
+                              f"the deferred-gates module/names are referenced by files TRANSITIVELY REACHABLE "
+                              f"from the live governance closure: {reachable_offenders} (also referenced by "
+                              f"inert, unreachable leaf modules: {inert_offenders or 'none'})", technique))
     elif default_gates_names is None:
         results.append(_fail("25", "deferred_gates_truthfully_unimported",
                               "could not locate the DEFAULT_COMMISSIONING_GATES tuple literal via AST", technique))
@@ -2035,9 +2097,13 @@ def check_deferred_gates_not_imported(root: Path) -> list[CheckResult]:
                               f"DEFAULT_COMMISSIONING_GATES contains unexpected names: {sorted(default_gates_names)}", technique))
     else:
         results.append(_pass("25", "deferred_gates_truthfully_unimported",
-                              f"0 files outside src/execution_safety_governance_deferred_gates.py itself reference "
+                              f"0 files reachable from the live governance closure "
+                              f"({list(_LIVE_GOVERNANCE_CLOSURE)}) reference "
                               f"'execution_safety_governance_deferred_gates' or any of the three deferred gate "
-                              f"factory names; DEFAULT_COMMISSIONING_GATES' own literal tuple contains exactly the "
+                              f"factory names ({len(live_reachable)} files reachable and checked); "
+                              f"{len(inert_offenders)} inert, unreachable leaf module(s) reference it for a "
+                              f"future not-yet-wired caller: {inert_offenders or 'none'}; "
+                              f"DEFAULT_COMMISSIONING_GATES' own literal tuple contains exactly the "
                               f"{len(expected_gate_names)} active, non-deferred gate names: {sorted(default_gates_names)}", technique))
     return results
 
