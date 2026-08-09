@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 64401
-- Test LOC: 56244
+- Production LOC: 64549
+- Test LOC: 56576
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -53,7 +53,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 9. **NO_ACTION / HIGH -- Large modules concentrate durable invariants**
-   Evidence: largest production modules: src/trade_state.py (6006), src/broker_action_saga.py (3051), src/simulation_runner.py (2274), src/broker_saga_orchestrator.py (2058), src/one_share_commissioning_orchestrator.py (1704)
+   Evidence: largest production modules: src/trade_state.py (6006), src/broker_action_saga.py (3051), src/simulation_runner.py (2274), src/broker_saga_orchestrator.py (2058), src/one_share_commissioning_orchestrator.py (1728)
    Interpretation: Size alone is not deletion evidence; transaction and restart invariants require cohesive review.
    Estimated removable LOC: production 0, tests 0
 

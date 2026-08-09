@@ -90,10 +90,10 @@ def resolver_for(expected=ACCOUNT):
     )
 
 
-def binding(factory, resolver, *, orchestrator_failure=False):
+def binding(factory, resolver, tmp_path, *, orchestrator_failure=False):
     counts = {"adapter": 0, "orchestrator": 0}
 
-    def adapter_factory(session, commissioned_account):
+    def adapter_factory(session, commissioned_account, **_kwargs):
         counts["adapter"] += 1
         return SimpleNamespace(
             session=session,
@@ -124,6 +124,7 @@ def binding(factory, resolver, *, orchestrator_failure=False):
         evidence_store=SimpleNamespace(),
         emergency_handoff=lambda payload: None,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        suspension_database_path=tmp_path / "commissioning_suspension.sqlite3",
         adapter_factory=adapter_factory,
         orchestrator_factory=Orchestrator,
     )
@@ -131,11 +132,11 @@ def binding(factory, resolver, *, orchestrator_failure=False):
 
 
 @pytest.mark.anyio
-async def test_exactly_one_session_adapter_orchestrator_and_resolution():
+async def test_exactly_one_session_adapter_orchestrator_and_resolution(tmp_path):
     session = Session()
     factory = SessionFactory(session)
     resolver = resolver_for()
-    instance, counts = binding(factory, resolver)
+    instance, counts = binding(factory, resolver, tmp_path)
     result = await instance.run()
     assert result.state is State.COMPLETE
     assert factory.enters == 1 and factory.exits == 1
@@ -146,9 +147,9 @@ async def test_exactly_one_session_adapter_orchestrator_and_resolution():
 
 
 @pytest.mark.anyio
-async def test_session_closes_after_orchestrator_failure():
+async def test_session_closes_after_orchestrator_failure(tmp_path):
     factory = SessionFactory()
-    instance, _ = binding(factory, resolver_for(), orchestrator_failure=True)
+    instance, _ = binding(factory, resolver_for(), tmp_path, orchestrator_failure=True)
     with pytest.raises(CommissioningDiagnosticError) as caught:
         await instance.run()
     assert caught.value.category == "INTERNAL_INVARIANT_FAILURE"
@@ -157,11 +158,11 @@ async def test_session_closes_after_orchestrator_failure():
 
 
 @pytest.mark.anyio
-async def test_browser_authentication_requirement_fails_closed():
+async def test_browser_authentication_requirement_fails_closed(tmp_path):
     factory = SessionFactory(
         enter_error=BrowserAuthenticationRequestError("private detail")
     )
-    instance, counts = binding(factory, resolver_for())
+    instance, counts = binding(factory, resolver_for(), tmp_path)
     with pytest.raises(CommissioningDiagnosticError) as caught:
         await instance.run()
     assert caught.value.category == "SILENT_AUTH_FAILED"
@@ -233,7 +234,7 @@ async def test_identity_unavailable_fails_closed():
 
 
 @pytest.mark.anyio
-async def test_account_identifier_never_reaches_console_or_result(capsys):
+async def test_account_identifier_never_reaches_console_or_result(capsys, tmp_path):
     session = Session()
     resolution = await resolver_for()(session)
     assert ACCOUNT not in repr(resolution)
@@ -243,6 +244,7 @@ async def test_account_identifier_never_reaches_console_or_result(capsys):
         lambda ignored: CommissionedAccountResolution(
             resolution.account_number, resolution.initial_accounts_result
         ),
+        tmp_path,
     )
     result = await instance.run()
     rendered = capsys.readouterr().out + capsys.readouterr().err + repr(result)

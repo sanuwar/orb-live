@@ -324,10 +324,34 @@ def _independent_dispatch_scan(root: Path) -> list[_Dispatch]:
 
 
 def _imported_names(tree: ast.Module) -> tuple[set[str], set[str]]:
-    """Return (imported dotted module names, imported bare names)."""
+    """Return (imported dotted module names, imported bare names) found
+    ANYWHERE in the tree, including inside function/method bodies."""
     modules: set[str] = set()
     names: set[str] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                modules.add(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+            for alias in node.names:
+                names.add(alias.name)
+    return modules, names
+
+
+def _module_level_imported_names(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """Return (imported dotted module names, imported bare names) found ONLY
+    at module scope (direct children of the module body) -- NOT inside a
+    function, method, or class body. A function-local/deferred import only
+    ever executes if that specific function runs; unlike a module-level
+    import (which always runs at import time), it is not "wired in" merely
+    by the containing module being importable. This repository already uses
+    that exact distinction deliberately (see src/execution_safety_
+    governance_deferred_gates.py's own docstring on why its factories are
+    real, tested, and reachable on demand, but not activated)."""
+    modules: set[str] = set()
+    names: set[str] = set()
+    for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 modules.add(alias.name)
@@ -1084,6 +1108,7 @@ def check_action_identity_binding() -> list[CheckResult]:
             operator_acknowledgements=OperatorAcknowledgements(True, True, True, True),
             source_hash_verified=True, release_sha="a" * 40, implementation_digest="b" * 64,
             account_fingerprint_matched=True, account_fingerprint_reference="c" * 64,
+            suspension_state="CLEAR",
         )
         base.update(overrides)
         return CommissioningGovernanceEvidence(**base)
@@ -1332,6 +1357,7 @@ def check_decision_digest() -> list[CheckResult]:
             operator_acknowledgements=OperatorAcknowledgements(**ack),
             source_hash_verified=True, release_sha="a" * 40, implementation_digest="b" * 64,
             account_fingerprint_matched=True, account_fingerprint_reference="c" * 64,
+            suspension_state="CLEAR",
         )
         base.update(overrides)
         return CommissioningGovernanceEvidence(**base)
@@ -1431,6 +1457,7 @@ def check_digest_does_not_cover_binding_tamper() -> list[CheckResult]:
         operator_acknowledgements=OperatorAcknowledgements(True, True, True, True),
         source_hash_verified=True, release_sha="a" * 40, implementation_digest="b" * 64,
         account_fingerprint_matched=True, account_fingerprint_reference="c" * 64,
+        suspension_state="CLEAR",
     )
     context = ExecutionSafetyContext(
         context_version="1", decision_time=moment, run_id="verifier-run-digest-tamper",
@@ -1633,11 +1660,11 @@ def check_commissioning_gates() -> list[CheckResult]:
         "Each gate function called directly (gate_commissioning_mode_attended, "
         "gate_operator_acknowledgements, gate_source_hash_verified, "
         "gate_account_fingerprint_matched, gate_commissioning_bounds, "
-        "gate_exchange_calendar) against a hand-built context with exactly one "
-        "adversarial evidence field changed at a time, asserting GateOutcome.FAILED "
-        "with the expected reason_code -- not evaluate_execution_safety's folded "
-        "decision, so a gate that failed for the wrong reason cannot hide behind "
-        "an overall DENY."
+        "gate_exchange_calendar, gate_commissioning_suspension_clear) against a "
+        "hand-built context with exactly one adversarial evidence field changed "
+        "at a time, asserting GateOutcome.FAILED with the expected reason_code "
+        "-- not evaluate_execution_safety's folded decision, so a gate that "
+        "failed for the wrong reason cannot hide behind an overall DENY."
     )
     import src.execution_safety_governance as gov
     from src.execution_safety_governance import (
@@ -1659,6 +1686,7 @@ def check_commissioning_gates() -> list[CheckResult]:
             operator_acknowledgements=OperatorAcknowledgements(**ack),
             source_hash_verified=True, release_sha="a" * 40, implementation_digest="b" * 64,
             account_fingerprint_matched=True, account_fingerprint_reference="c" * 64,
+            suspension_state="CLEAR",
         )
         base.update(overrides)
         return CommissioningGovernanceEvidence(**base)
@@ -1767,6 +1795,41 @@ def check_commissioning_gates() -> list[CheckResult]:
         results.append(_fail("19", "calendar_gate_enforced_including_evaluation_exception",
                               f"exception_result={exception_result.outcome}/{exception_result.reason_code} "
                               f"after_hours_result={after_hours_result.outcome}/{after_hours_result.reason_code}", technique))
+
+    # 26 (M14 Issue 7): commissioning suspension gate. CLEAR is the only
+    # value that satisfies it; every other value (including the
+    # NOT_EVALUATED default and a caller's own READ_FAILED sentinel) FAILs
+    # with a distinct DENY_SUSPENSION_{state} reason_code.
+    clear_ok = expect_pass(
+        gov.gate_commissioning_suspension_clear,
+        context(governance_evidence=evidence(suspension_state="CLEAR")),
+    )
+    suspension_failures: list[str] = []
+    for state, expected_reason in (
+        ("SUSPENDED", "DENY_SUSPENSION_SUSPENDED"),
+        ("CLEARANCE_PENDING_REVIEW", "DENY_SUSPENSION_CLEARANCE_PENDING_REVIEW"),
+        ("PERMANENT_HALT", "DENY_SUSPENSION_PERMANENT_HALT"),
+        ("MALFORMED_STATE", "DENY_SUSPENSION_MALFORMED_STATE"),
+        ("READ_FAILED", "DENY_SUSPENSION_READ_FAILED"),
+        ("NOT_EVALUATED", "DENY_SUSPENSION_NOT_EVALUATED"),
+    ):
+        result = gov.gate_commissioning_suspension_clear(
+            context(governance_evidence=evidence(suspension_state=state))
+        )
+        if result.outcome is not GateOutcome.FAILED or result.reason_code != expected_reason:
+            suspension_failures.append(
+                f"{state}: got {result.outcome}/{result.reason_code}, expected FAILED/{expected_reason}"
+            )
+    if clear_ok and not suspension_failures:
+        results.append(_pass("26", "commissioning_suspension_gate_enforced",
+                              "gate_commissioning_suspension_clear passes only for suspension_state=CLEAR; "
+                              "SUSPENDED, CLEARANCE_PENDING_REVIEW, PERMANENT_HALT, MALFORMED_STATE, "
+                              "READ_FAILED, and NOT_EVALUATED (the CommissioningGovernanceEvidence default, "
+                              "so a caller that forgets to supply this fact fails closed) each independently "
+                              "FAIL with a distinct DENY_SUSPENSION_{state} reason_code", technique))
+    else:
+        results.append(_fail("26", "commissioning_suspension_gate_enforced",
+                              f"clear_ok={clear_ok}; failures={suspension_failures}", technique))
 
     return results
 
@@ -2021,18 +2084,22 @@ def check_deferred_gates_not_imported(root: Path) -> list[CheckResult]:
     results: list[CheckResult] = []
     technique = (
         "AST import-name scan of every tracked src/ and scripts/ file (not "
-        "tests/) for any reference to the module name "
+        "tests/) for any MODULE-LEVEL (unconditional, always-executes-at-"
+        "import-time) reference to the module name "
         "'execution_safety_governance_deferred_gates' or the three deferred "
-        "gate factory names. Each reference is then classified by whether "
-        "it is TRANSITIVELY REACHABLE from the live governance closure "
-        f"({list(_LIVE_GOVERNANCE_CLOSURE)}) via an independently-built "
-        "src/-internal import graph (BFS over 'from src.X import ...' / "
-        "'import src.X' edges) -- a leaf provider module that references a "
-        "deferred-gate factory for a future, not-yet-wired caller is a "
-        "structurally different fact than the live write path being able "
-        "to reach one, and only the latter is a finding. Plus an AST "
-        "inspection of DEFAULT_COMMISSIONING_GATES' own literal tuple "
-        "contents."
+        "gate factory names -- a function-local/deferred import is "
+        "deliberately excluded (see _module_level_imported_names) since it "
+        "only ever executes if that specific function runs, matching this "
+        "repository's own established convention of using such an import "
+        "to mean 'available on demand, not wired in'. Each module-level "
+        "reference is then classified by whether it is TRANSITIVELY "
+        f"REACHABLE from the live governance closure ({list(_LIVE_GOVERNANCE_CLOSURE)}) "
+        "via an independently-built src/-internal import graph (BFS over "
+        "'from src.X import ...' / 'import src.X' edges, found anywhere in "
+        "each file, not only at module level -- the graph itself is "
+        "deliberately more permissive than the offender scan, so it never "
+        "UNDER-reports reachability). Plus an AST inspection of "
+        "DEFAULT_COMMISSIONING_GATES' own literal tuple contents."
     )
     offenders: list[str] = []
     deferred_names = {"execution_safety_governance_deferred_gates", "make_risk_limit_gate", "make_suspension_gate", "make_operational_health_gate"}
@@ -2044,7 +2111,7 @@ def check_deferred_gates_not_imported(root: Path) -> list[CheckResult]:
             tree = ast.parse(path.read_text(encoding="utf-8-sig"))
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
-        modules, names = _imported_names(tree)
+        modules, names = _module_level_imported_names(tree)
         if any("execution_safety_governance_deferred_gates" in m for m in modules) or (names & deferred_names):
             offenders.append(relative)
 
@@ -2082,6 +2149,7 @@ def check_deferred_gates_not_imported(root: Path) -> list[CheckResult]:
         "gate_commissioning_mode_attended", "gate_operator_acknowledgements",
         "gate_source_hash_verified", "gate_account_fingerprint_matched",
         "gate_commissioning_bounds", "gate_action_identity_valid", "gate_exchange_calendar",
+        "gate_commissioning_suspension_clear",
     }
 
     if reachable_offenders:

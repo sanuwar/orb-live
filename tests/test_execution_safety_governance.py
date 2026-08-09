@@ -69,6 +69,7 @@ def valid_evidence(**overrides) -> CommissioningGovernanceEvidence:
         implementation_digest="b" * 64,
         account_fingerprint_matched=True,
         account_fingerprint_reference="c" * 64,
+        suspension_state="CLEAR",
     )
     base.update(overrides)
     return CommissioningGovernanceEvidence(**base)
@@ -120,7 +121,7 @@ def test_all_required_gates_pass_allows():
     assert decision.allow is True
     assert decision.failed_gates == ()
     assert decision.reason_codes == ()
-    assert len(decision.satisfied_gates) == 7
+    assert len(decision.satisfied_gates) == 8
 
 
 def test_missing_context_denies():
@@ -322,6 +323,124 @@ def test_unknown_calendar_state_denies():
     decision = evaluate_execution_safety(entry_context(decision_time=out_of_range))
     assert decision.outcome is ExecutionSafetyOutcome.DENY
     assert "DENY_CALENDAR_DATE_OUTSIDE_SUPPORTED_RANGE" in decision.reason_codes
+
+
+# ---------------------------------------------------------------------
+# M14 ISSUE 7: COMMISSIONING SUSPENSION GATE
+# ---------------------------------------------------------------------
+
+
+def test_suspension_clear_allows():
+    decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="CLEAR"))
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.ALLOW
+    assert "commissioning_suspension_clear" in decision.satisfied_gates
+
+
+@pytest.mark.parametrize("state,expected_reason", [
+    ("SUSPENDED", "DENY_SUSPENSION_SUSPENDED"),
+    ("CLEARANCE_PENDING_REVIEW", "DENY_SUSPENSION_CLEARANCE_PENDING_REVIEW"),
+    ("PERMANENT_HALT", "DENY_SUSPENSION_PERMANENT_HALT"),
+    ("MALFORMED_STATE", "DENY_SUSPENSION_MALFORMED_STATE"),
+    ("READ_FAILED", "DENY_SUSPENSION_READ_FAILED"),
+    ("NOT_EVALUATED", "DENY_SUSPENSION_NOT_EVALUATED"),
+    ("SOMETHING_UNRECOGNIZED", "DENY_SUSPENSION_SOMETHING_UNRECOGNIZED"),
+])
+def test_suspension_non_clear_states_deny(state, expected_reason):
+    decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state=state))
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.DENY
+    assert expected_reason in decision.reason_codes
+
+
+def test_suspension_state_missing_from_evidence_denies_by_default():
+    """A caller that constructs CommissioningGovernanceEvidence without
+    explicitly supplying suspension_state gets the NOT_EVALUATED sentinel,
+    which never satisfies the gate -- absence of the fact must not become
+    permission."""
+    evidence = valid_evidence()
+    overrides = {k: v for k, v in vars(evidence).items() if k != "suspension_state"}
+    bare_evidence = CommissioningGovernanceEvidence(**overrides)
+    assert bare_evidence.suspension_state == "NOT_EVALUATED"
+    decision = evaluate_execution_safety(entry_context(evidence=bare_evidence))
+    assert decision.outcome is ExecutionSafetyOutcome.DENY
+    assert "DENY_SUSPENSION_NOT_EVALUATED" in decision.reason_codes
+
+
+def test_suspension_result_changes_decision_digest():
+    """M14 Issue 7 requirement: the suspension gate's result is bound into
+    the decision digest -- it is not a side channel outside authenticity.
+    Since a CLEAR vs SUSPENDED context produces different outcomes (ALLOW
+    vs DENY) this is somewhat implied already, but confirms the digest
+    genuinely differs and is not, say, computed before gates run."""
+    clear_decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="CLEAR"))
+    )
+    suspended_decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="SUSPENDED"))
+    )
+    assert clear_decision.decision_digest != suspended_decision.decision_digest
+    assert clear_decision.outcome is ExecutionSafetyOutcome.ALLOW
+    assert suspended_decision.outcome is ExecutionSafetyOutcome.DENY
+
+
+def test_mutating_suspension_gate_result_invalidates_decision_authenticity():
+    """Closes the same class of gap M14 Issue 6 closed for bound_* fields:
+    a decision computed with a DENY suspension result, then hand-mutated
+    (failed_gates/reason_codes cleared) to look like a clean ALLOW, must
+    fail validate_execution_safety_decision's digest self-consistency
+    check -- the mutation is not reflected in the stored digest."""
+    denied = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="SUSPENDED"))
+    )
+    assert denied.outcome is ExecutionSafetyOutcome.DENY
+    forged_allow = dataclasses.replace(
+        denied, outcome=ExecutionSafetyOutcome.ALLOW,
+        satisfied_gates=denied.satisfied_gates + ("commissioning_suspension_clear",),
+        failed_gates=(), reason_codes=(),
+    )
+    result = validate_execution_safety_decision(
+        forged_allow, role="entry", arguments=ENTRY_PAYLOAD,
+        now=denied.evaluated_at,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_DECISION_DIGEST_MISMATCH"
+
+
+def test_stop_and_cancel_contexts_also_require_suspension_clear():
+    """gate_commissioning_suspension_clear does not inspect role/action at
+    all -- it is unconditionally part of DEFAULT_COMMISSIONING_GATES, so
+    entry, stop, and cancel are gated identically by construction. This is
+    a deliberate, conservative choice: durable_suspension_controller.py's
+    own module docstring states suspension dominates every other condition
+    and none of them is even consulted while one is active; carving out a
+    risk-reducing-action exemption for cancel would be inventing a policy
+    this repository does not already state, so none was added."""
+    for context_factory, role in ((stop_context, "stop"), (cancel_context, "cancel")):
+        allowed = evaluate_execution_safety(context_factory())
+        assert allowed.outcome is ExecutionSafetyOutcome.ALLOW, role
+
+        suspended = evaluate_execution_safety(
+            context_factory(evidence=valid_evidence(suspension_state="SUSPENDED"))
+        )
+        assert suspended.outcome is ExecutionSafetyOutcome.DENY, role
+        assert "DENY_SUSPENSION_SUSPENDED" in suspended.reason_codes, role
+
+
+def test_suspended_decision_cannot_reach_adapter_write():
+    session = _RecordingSession(_place_response())
+    adapter = RobinhoodCommissioningAdapter(session, "transient")
+    decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="SUSPENDED"))
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.DENY
+    with pytest.raises(ExecutionSafetyDeniedError):
+        asyncio.run(adapter.place_equity_order(
+            ENTRY_PAYLOAD, role="entry", safety_decision=decision,
+        ))
+    assert session.calls == 0
 
 
 # ---------------------------------------------------------------------

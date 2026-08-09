@@ -1318,10 +1318,17 @@ def test_no_controller_result_opens_a_gate_or_enables_strategy():
     assert "ACTIVATION_APPROVALS" not in _code_identifiers(MODULE_PATH)
 
 
-def test_the_controller_is_not_in_the_milestone_9_pinned_closure():
+def test_the_controller_is_in_the_pinned_closure_only_since_m14_issue_7():
+    """Originally asserted the opposite: this Milestone 9/10 PR must not move
+    the checkpoint digest by accident, and it did not. M14 Issue 7
+    deliberately does move it -- src/robinhood_commissioning_session.py
+    (already pinned) now imports src/commissioning_suspension_identity.py,
+    which imports THIS module directly to open the commissioning suspension
+    durable store. See src/read_only_authorization_manifest.py for the full
+    pinned-closure reasoning."""
     from src.read_only_authorization_manifest import PINNED_IMPLEMENTATION_CLOSURE
 
-    assert "src/durable_suspension_controller.py" not in PINNED_IMPLEMENTATION_CLOSURE
+    assert "src/durable_suspension_controller.py" in PINNED_IMPLEMENTATION_CLOSURE
 
 
 # --------------------------------------------------------------------------

@@ -139,6 +139,17 @@ class CommissioningGovernanceEvidence:
     `account_fingerprint_reference` default to an unverified state because
     they are legitimately not known until account resolution completes;
     every other field has no safe default and must be supplied explicitly.
+
+    `suspension_state` (M14 Issue 7) defaults to `"NOT_EVALUATED"` -- a
+    value that never equals `"CLEAR"` -- so a caller that forgets to supply
+    it (an old test fixture, a future construction site nobody updated)
+    fails closed rather than silently passing. This module never reads
+    durable suspension state itself (no I/O in a gate, matching every other
+    fact here); the caller is expected to read it fresh, immediately
+    adjacent to each write, via `src.commissioning_suspension_identity`'s
+    `CommissioningSuspensionStateProvider.assess()` -- never via
+    `ensure_registered()`/`register()`, which would fabricate a CLEAR row
+    for an identity this system has never actually reviewed.
     """
 
     commissioning_mode: CommissioningMode
@@ -149,6 +160,7 @@ class CommissioningGovernanceEvidence:
     implementation_digest: str
     account_fingerprint_matched: bool = False
     account_fingerprint_reference: str = ""
+    suspension_state: str = "NOT_EVALUATED"
 
 
 @dataclass(frozen=True)
@@ -315,6 +327,33 @@ def gate_exchange_calendar(context: ExecutionSafetyContext) -> GateResult:
     return _satisfied(name)
 
 
+#: Every value `CommissioningGovernanceEvidence.suspension_state` may
+#: honestly hold. Anything outside this set (including the "NOT_EVALUATED"
+#: default and a caller's own "READ_FAILED" fail-closed sentinel) already
+#: fails the gate below because it is not `"CLEAR"` -- this set exists only
+#: to make the vocabulary explicit, not to change the gate's logic.
+KNOWN_SUSPENSION_STATES: frozenset[str] = frozenset({
+    "CLEAR", "SUSPENDED", "CLEARANCE_PENDING_REVIEW", "PERMANENT_HALT",
+    "MALFORMED_STATE", "READ_FAILED", "NOT_EVALUATED",
+})
+
+
+def gate_commissioning_suspension_clear(context: ExecutionSafetyContext) -> GateResult:
+    """M14 Issue 7: durable commissioning suspension state must be
+    explicitly CLEAR. CLEAR is the only value that satisfies this gate --
+    every other value (SUSPENDED, CLEARANCE_PENDING_REVIEW, PERMANENT_HALT,
+    MALFORMED_STATE, READ_FAILED, NOT_EVALUATED, or any unrecognized
+    string) denies. This gate does no I/O itself: `suspension_state` is a
+    fact the caller already read fresh, immediately before this evaluation
+    -- consistent with every other gate here never reading live state
+    directly."""
+    name = "commissioning_suspension_clear"
+    state = context.governance_evidence.suspension_state
+    if state != "CLEAR":
+        return _failed(name, f"DENY_SUSPENSION_{state}")
+    return _satisfied(name)
+
+
 #: The gates actually bound to the live commissioning write path today.
 #: Adding a gate here is an authority-tightening change (more restrictive);
 #: removing one is an authority-loosening change and must not be made
@@ -327,6 +366,7 @@ DEFAULT_COMMISSIONING_GATES: tuple[GateEvaluator, ...] = (
     gate_commissioning_bounds,
     gate_action_identity_valid,
     gate_exchange_calendar,
+    gate_commissioning_suspension_clear,
 )
 
 
@@ -734,6 +774,8 @@ __all__ = [
     "gate_commissioning_bounds",
     "gate_action_identity_valid",
     "gate_exchange_calendar",
+    "KNOWN_SUSPENSION_STATES",
+    "gate_commissioning_suspension_clear",
     "DEFAULT_COMMISSIONING_GATES",
     "ExecutionSafetyDecision",
     "evaluate_execution_safety",
