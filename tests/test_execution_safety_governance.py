@@ -34,6 +34,7 @@ from src.execution_safety_governance import (
     evaluate_execution_safety,
 )
 from src.execution_safety_governance_deferred_gates import (
+    make_commissioning_risk_state_gate,
     make_operational_health_gate,
     make_risk_limit_gate,
     make_suspension_gate,
@@ -399,6 +400,250 @@ def test_risk_gate_evaluator_exception_denies():
     result = gate(entry_context())
     assert result.outcome is GateOutcome.FAILED
     assert result.reason_code == "DENY_RISK_EVALUATION_FAILED"
+
+
+# ---------------------------------------------------------------------
+# RISK STATE (M14 Issue 2 deferred adapter -- not part of
+# DEFAULT_COMMISSIONING_GATES)
+# ---------------------------------------------------------------------
+
+
+def _risk_state_availability(**overrides):
+    from src.commissioning_risk_state import RequiredRiskInputAvailability
+
+    values = dict(
+        kill_switch_source_available=True,
+        realized_daily_loss_source_available=True,
+        position_exposure_source_available=True,
+    )
+    values.update(overrides)
+    return RequiredRiskInputAvailability(**values)
+
+
+def _risk_state_evidence_provider(**overrides):
+    """A fake, honest evidence provider bound to whatever context it is
+    called with -- the exact contract `make_commissioning_risk_state_gate`
+    requires."""
+    from src.commissioning_risk_state import evaluate_commissioning_risk_state
+    from src.risk_limits import ActionLedger, ActionProposal
+
+    def _provider(context):
+        limits, state, kill_switch, ledger = _risk_inputs()
+        proposal = ActionProposal(
+            idempotency_key=f"{context.run_id}:{context.role}",
+            quantity=int(Decimal(context.quantity)), order_value=Decimal("100"),
+            observed_monotonic=1.0,
+        )
+        kwargs = dict(
+            run_id=context.run_id, action_identity=context.action_identity(),
+            availability=_risk_state_availability(), proposal=proposal,
+            limits=limits, state=state, kill_switch=kill_switch, ledger=ledger,
+            current_monotonic=1.0,
+        )
+        kwargs.update(overrides)
+        return evaluate_commissioning_risk_state(**kwargs)
+
+    return _provider
+
+
+def test_risk_state_gate_pass_continues():
+    gate = make_commissioning_risk_state_gate(
+        evidence_provider=_risk_state_evidence_provider()
+    )
+    result = gate(entry_context())
+    assert result.outcome is GateOutcome.SATISFIED
+
+
+def test_risk_state_gate_limit_violation_denies():
+    # Force a limit violation: the order value proposed (100) exceeds a
+    # deliberately tiny order-value ceiling.
+    from src.commissioning_risk_state import evaluate_commissioning_risk_state
+    from src.risk_limits import (
+        AccountRiskState, ActionLedger, ActionProposal, KillSwitchState, RiskLimits,
+    )
+
+    def _oversized_provider(context):
+        limits = RiskLimits(
+            maximum_position_quantity=1, maximum_order_value=Decimal("1"),
+            maximum_daily_loss=Decimal("500"), maximum_open_positions=1,
+        )
+        state = AccountRiskState(realized_daily_loss=Decimal("0"), open_position_count=0)
+        proposal = ActionProposal(
+            idempotency_key=f"{context.run_id}:{context.role}",
+            quantity=int(Decimal(context.quantity)), order_value=Decimal("100"),
+            observed_monotonic=1.0,
+        )
+        return evaluate_commissioning_risk_state(
+            run_id=context.run_id, action_identity=context.action_identity(),
+            availability=_risk_state_availability(), proposal=proposal,
+            limits=limits, state=state, kill_switch=KillSwitchState.DISENGAGED,
+            ledger=ActionLedger(), current_monotonic=1.0,
+        )
+
+    gate = make_commissioning_risk_state_gate(evidence_provider=_oversized_provider)
+    result = gate(entry_context())
+    assert result.outcome is GateOutcome.FAILED
+    assert result.reason_code == "DENY_RISK_STATE_AVAILABLE_BLOCKING"
+
+
+def test_risk_state_gate_unavailable_denies():
+    gate = make_commissioning_risk_state_gate(
+        evidence_provider=_risk_state_evidence_provider(
+            availability=_risk_state_availability(kill_switch_source_available=False)
+        )
+    )
+    result = gate(entry_context())
+    assert result.outcome is GateOutcome.FAILED
+    assert result.reason_code == "DENY_RISK_STATE_UNAVAILABLE"
+
+
+def test_risk_state_gate_stale_denies():
+    gate = make_commissioning_risk_state_gate(
+        evidence_provider=_risk_state_evidence_provider(current_monotonic=999.0)
+    )
+    result = gate(entry_context())
+    assert result.outcome is GateOutcome.FAILED
+    assert result.reason_code == "DENY_RISK_STATE_STALE"
+
+
+def test_risk_state_gate_provider_exception_denies():
+    def _exploding_provider(context):
+        raise RuntimeError("evidence source unavailable")
+
+    gate = make_commissioning_risk_state_gate(evidence_provider=_exploding_provider)
+    result = gate(entry_context())
+    assert result.outcome is GateOutcome.FAILED
+    assert result.reason_code == "DENY_RISK_STATE_PROVIDER_EXCEPTION"
+
+
+def test_risk_state_gate_malformed_evidence_denies():
+    def _malformed_provider(context):
+        return "not-risk-state-evidence"
+
+    gate = make_commissioning_risk_state_gate(evidence_provider=_malformed_provider)
+    result = gate(entry_context())
+    assert result.outcome is GateOutcome.FAILED
+    assert result.reason_code == "DENY_RISK_STATE_EVIDENCE_MALFORMED"
+
+
+def test_risk_state_gate_identity_mismatch_denies():
+    """Evidence computed for a DIFFERENT run/action than the one under
+    evaluation must not satisfy this gate, even if its own internal status
+    would otherwise be AVAILABLE_VALID."""
+    from src.commissioning_risk_state import evaluate_commissioning_risk_state
+    from src.risk_limits import ActionLedger
+
+    def _forged_provider(context):
+        limits, state, kill_switch, ledger = _risk_inputs()
+        proposal = _risk_proposal_for(context)
+        return evaluate_commissioning_risk_state(
+            run_id="a-completely-different-run",
+            action_identity="0" * 64,
+            availability=_risk_state_availability(), proposal=proposal,
+            limits=limits, state=state, kill_switch=kill_switch, ledger=ledger,
+            current_monotonic=1.0,
+        )
+
+    gate = make_commissioning_risk_state_gate(evidence_provider=_forged_provider)
+    result = gate(entry_context())
+    assert result.outcome is GateOutcome.FAILED
+    assert result.reason_code == "DENY_RISK_STATE_IDENTITY_MISMATCH"
+
+
+def test_risk_state_gate_not_wired_into_default_commissioning_gates():
+    """M14 Issue 2's own conclusion, asserted structurally: activation
+    remains deferred because no honest kill-switch/realized-daily-loss
+    source exists yet. `DEFAULT_COMMISSIONING_GATES` must still be exactly
+    the seven M14 Issue 1 gates, and the new risk-state gate must not be
+    among them."""
+    from src.execution_safety_governance import DEFAULT_COMMISSIONING_GATES
+
+    assert len(DEFAULT_COMMISSIONING_GATES) == 7
+    default_names = {getattr(gate, "__name__", "") for gate in DEFAULT_COMMISSIONING_GATES}
+    assert "commissioning_risk_state" not in default_names
+    assert not any("risk" in name for name in default_names)
+
+
+def test_full_pipeline_allows_when_risk_state_and_all_other_gates_pass():
+    """Threaded through the full `evaluate_execution_safety` fold, not just
+    the standalone gate: composing the risk-state gate with every default
+    gate still yields ALLOW when every one of them is satisfied."""
+    from src.execution_safety_governance import DEFAULT_COMMISSIONING_GATES
+
+    risk_gate = make_commissioning_risk_state_gate(
+        evidence_provider=_risk_state_evidence_provider()
+    )
+    decision = evaluate_execution_safety(
+        entry_context(), gates=DEFAULT_COMMISSIONING_GATES + (risk_gate,)
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.ALLOW
+    assert "commissioning_risk_state" in decision.satisfied_gates
+    assert len(decision.satisfied_gates) == 8
+
+
+def test_full_pipeline_denies_when_risk_state_denies_even_if_all_others_pass():
+    from src.execution_safety_governance import DEFAULT_COMMISSIONING_GATES
+
+    risk_gate = make_commissioning_risk_state_gate(
+        evidence_provider=_risk_state_evidence_provider(
+            availability=_risk_state_availability(
+                realized_daily_loss_source_available=False
+            )
+        )
+    )
+    decision = evaluate_execution_safety(
+        entry_context(), gates=DEFAULT_COMMISSIONING_GATES + (risk_gate,)
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.DENY
+    assert "DENY_RISK_STATE_UNAVAILABLE" in decision.reason_codes
+    # Every other gate is still satisfied -- the risk-state gate is what
+    # tips the fold to DENY, and it is additive, never a bypass of the rest.
+    assert "commissioning_risk_state" in decision.failed_gates
+    assert len(decision.satisfied_gates) == 7
+
+
+def test_no_broker_write_occurs_when_risk_state_denies_through_full_pipeline():
+    """Threaded all the way to the write boundary: a DENY produced by the
+    fold that includes the risk-state gate is treated by the adapter
+    identically to any other DENY -- no broker call is ever made."""
+    from src.execution_safety_governance import DEFAULT_COMMISSIONING_GATES
+
+    risk_gate = make_commissioning_risk_state_gate(
+        evidence_provider=_risk_state_evidence_provider(
+            availability=_risk_state_availability(kill_switch_source_available=False)
+        )
+    )
+    decision = evaluate_execution_safety(
+        entry_context(), gates=DEFAULT_COMMISSIONING_GATES + (risk_gate,)
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.DENY
+
+    session = _RecordingSession(_place_response())
+    adapter = RobinhoodCommissioningAdapter(session, "transient")
+    with pytest.raises(ExecutionSafetyDeniedError):
+        asyncio.run(adapter.place_equity_order(
+            ENTRY_PAYLOAD, role="entry", safety_decision=decision
+        ))
+    assert session.calls == 0
+
+
+def test_no_alternate_path_bypasses_the_risk_state_gate():
+    """The only way a write reaches the broker is an ALLOW decision computed
+    over the exact gates list actually used, bound to the exact write. A
+    write attempted with an unrelated ALLOW decision (one that never saw the
+    risk-state gate at all) is refused just as an outright DENY would be,
+    because it does not bind this exact payload/role."""
+    session = _RecordingSession(_place_response())
+    adapter = RobinhoodCommissioningAdapter(session, "transient")
+    unrelated_allow = allow_decision(role="stop", arguments={
+        "symbol": "AAPL", "side": "sell", "type": "stop_market",
+        "quantity": "1", "stop_price": "185.00",
+    })
+    with pytest.raises(ExecutionSafetyDeniedError):
+        asyncio.run(adapter.place_equity_order(
+            ENTRY_PAYLOAD, role="entry", safety_decision=unrelated_allow
+        ))
+    assert session.calls == 0
 
 
 # ---------------------------------------------------------------------

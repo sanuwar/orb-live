@@ -1,5 +1,5 @@
 """Real, tested gate adapters for safety components not yet activated for
-attended commissioning (M14 Issue 1).
+attended commissioning (M14 Issue 1, M14 Issue 2).
 
 Deliberately **not imported** by `src/execution_safety_governance.py`,
 `src/robinhood_commissioning_adapter.py`,
@@ -7,13 +7,24 @@ Deliberately **not imported** by `src/execution_safety_governance.py`,
 `src/robinhood_commissioning_session.py` -- nothing on the live commissioning
 write path reaches this module. That is a structural signal, not an
 oversight: each gate below is real and independently tested against the
-actual `src/risk_limits.py`, `src/durable_suspension_controller.py`, and
-`src/operational_monitor.py` APIs, but each also requires evidence that does
-not exist yet for a synchronous, attended, single-run commissioning flow --
-a realized-daily-loss/kill-switch source, a commissioning-specific
+actual `src/risk_limits.py`, `src/commissioning_risk_state.py`,
+`src/durable_suspension_controller.py`, and `src/operational_monitor.py`
+APIs, but each also requires evidence that does not exist yet for a
+synchronous, attended, single-run commissioning flow -- a
+realized-daily-loss/kill-switch source, a commissioning-specific
 suspension-controller identity and durable store, or a live heartbeat
 process. Synthesizing that evidence to activate these gates today would be
 exactly the "fake integration" the M14 Issue 1 handoff prohibits.
+
+`make_commissioning_risk_state_gate` (M14 Issue 2) is the honest,
+fail-closed alternative to hand-assembling `AccountRiskState`/
+`KillSwitchState` inline: it wraps
+`src.commissioning_risk_state.evaluate_commissioning_risk_state`, whose own
+module docstring documents exactly which required risk inputs (kill switch,
+realized daily loss) have no repository-owned source today. It remains
+undeployed for the same reason `make_risk_limit_gate` does -- see that
+module's docstring for the full accounting of what is and is not honestly
+available.
 
 Kept out of `src/execution_safety_governance.py`'s import graph specifically
 so these deferrals never silently expand `PINNED_IMPLEMENTATION_CLOSURE`
@@ -78,6 +89,50 @@ def make_risk_limit_gate(
     return _gate
 
 
+def make_commissioning_risk_state_gate(
+    *,
+    evidence_provider: Callable[[ExecutionSafetyContext], "RiskStateEvidence"],  # noqa: F821
+) -> GateEvaluator:
+    """Wrap `src.commissioning_risk_state.evaluate_commissioning_risk_state`
+    output (M14 Issue 2). Not part of `DEFAULT_COMMISSIONING_GATES`: see
+    `src/commissioning_risk_state.py` for exactly which required risk inputs
+    (kill switch, realized daily loss) have no honest source for attended
+    one-share commissioning today.
+
+    `evidence_provider` is called with the exact `ExecutionSafetyContext`
+    under evaluation, so it can build a `RequiredRiskInputAvailability` and
+    the underlying `risk_limits` inputs (or admit they are unavailable) using
+    the run and action this specific write is for. The returned evidence is
+    checked for exact identity binding independently of whatever the
+    provider claims, exactly as `decision_binds_write` re-checks a governance
+    decision at the write boundary.
+    """
+
+    from src.commissioning_risk_state import (
+        RiskEvidenceStatus,
+        RiskStateEvidence,
+        risk_state_binds_action,
+    )
+
+    def _gate(context: ExecutionSafetyContext) -> GateResult:
+        name = "commissioning_risk_state"
+        try:
+            evidence = evidence_provider(context)
+        except Exception:
+            return _failed(name, "DENY_RISK_STATE_PROVIDER_EXCEPTION")
+        if not isinstance(evidence, RiskStateEvidence):
+            return _failed(name, "DENY_RISK_STATE_EVIDENCE_MALFORMED")
+        if not risk_state_binds_action(
+            evidence, run_id=context.run_id, action_identity=context.action_identity()
+        ):
+            return _failed(name, "DENY_RISK_STATE_IDENTITY_MISMATCH")
+        if evidence.status is not RiskEvidenceStatus.AVAILABLE_VALID:
+            return _failed(name, f"DENY_RISK_STATE_{evidence.status.value}")
+        return _satisfied(name)
+
+    return _gate
+
+
 def make_suspension_gate(
     *, controller: "DurableSuspensionController", controller_id: str  # noqa: F821
 ) -> GateEvaluator:
@@ -133,6 +188,7 @@ def make_operational_health_gate(
 
 __all__ = [
     "make_risk_limit_gate",
+    "make_commissioning_risk_state_gate",
     "make_suspension_gate",
     "make_operational_health_gate",
 ]
