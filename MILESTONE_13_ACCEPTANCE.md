@@ -52,7 +52,7 @@ provenance.
 ## 6. Final implementation digest
 
 ```
-a4c579faeafdd97415af6cee4b42ad8c4ceafb0fa082b92672cd4871f6f77f40
+8c0351559d1f2e5c5e876351ebf483d2ef8d452e8b177299bf1f52b9aded3bc8
 ```
 
 Independently reconstructed (separate hashing routine, separate
@@ -65,15 +65,30 @@ This value is kept live, not frozen at M13's own close: M14 Issue 1 added
 (reached from `src/robinhood_commissioning_adapter.py` and
 `src/one_share_commissioning_orchestrator.py`, both already pinned for
 M13), which moved the digest and count below. The milestone's own
-findings are otherwise unchanged.
+findings are otherwise unchanged. M14 Issue 6 (broker write-boundary
+decision authenticity) subsequently changed the CONTENT of two already-
+pinned files (`src/execution_safety_governance.py`,
+`src/robinhood_commissioning_adapter.py`) without adding or removing any
+pinned path, moving the digest again. M14 Issue 7 (commissioning
+suspension gate) then added 8 newly-reachable files: `src/robinhood_
+commissioning_session.py` (already pinned) now imports `src/commissioning_
+suspension_identity.py`, whose `make_gate()` deferred-imports `src/
+execution_safety_governance_deferred_gates.py`, whose three gate-factory
+functions each deferred-import a different module (`durable_suspension_
+controller.py` -> `attestation_authority.py`, `durable_scheduler.py`,
+`execution_gates.py`; plus `operational_monitor.py`; plus `risk_limits.
+py`). This is reachability, not activation: `DEFAULT_COMMISSIONING_GATES`
+gained only the one suspension gate; the risk and operational-health
+factories remain unwired. That moved the digest to the value above.
 
 ## 7. Pinned file count
 
-**28**, independently confirmed: every path exists, no duplicates, all
+**36**, independently confirmed: every path exists, no duplicates, all
 required M13 runtime files present, no test-only tool improperly pinned,
 and the declared closure equals a fresh AST-based execution-closure walk
 from the checkpoint's entry points exactly (0 discovered-but-not-pinned,
-0 pinned-but-not-discovered).
+0 pinned-but-not-discovered). (28 through M14 Issue 6; +8 in M14 Issue 7,
+see above.)
 
 ## 8. Route counts
 

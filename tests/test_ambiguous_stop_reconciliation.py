@@ -331,6 +331,7 @@ def make_orchestrator(tmp_path, scenario: str = "pending", *, run_id="stop-run")
         regular_market_hours=True,
         time_policy=POLICY,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        assess_commissioning_suspension=lambda: "CLEAR",
     )
     return instance, adapter, clock, handoffs
 
@@ -484,6 +485,7 @@ def test_normal_filled_stop_response_reconciles_flat_without_more_writes(tmp_pat
         regular_market_hours=True,
         time_policy=POLICY,
         governance_evidence=GOVERNANCE_EVIDENCE,
+        assess_commissioning_suspension=lambda: "CLEAR",
     )
     assert run(instance).state is State.COMPLETE
     assert handoffs == []

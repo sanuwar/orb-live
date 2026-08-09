@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from src.execution_safety_governance import (
-    ACTION_FOR_ROLE, CommissioningGovernanceEvidence, ExecutionSafetyContext,
-    ExecutionSafetyDecision, ExecutionSafetyOutcome, decision_is_fresh,
-    evaluate_execution_safety,
+    ACTION_FOR_ROLE, KNOWN_SUSPENSION_STATES, CommissioningGovernanceEvidence,
+    ExecutionSafetyContext, ExecutionSafetyDecision, ExecutionSafetyOutcome,
+    decision_is_fresh, evaluate_execution_safety,
 )
 from src.live_order_state_model import OrderStateClass, classify_order_state
 from src.one_share_commissioning import (
@@ -170,6 +170,13 @@ class OneShareCommissioningOrchestrator:
     regular_market_hours: bool
     time_policy: CommissioningTimePolicy
     governance_evidence: CommissioningGovernanceEvidence
+    # M14 Issue 7: reads durable commissioning suspension state fresh,
+    # immediately before EACH write (not once at construction) -- expected
+    # to return one of KNOWN_SUSPENSION_STATES's state strings (typically
+    # CommissioningSuspensionStateProvider.assess().state.value). May raise
+    # or return anything else; _assess_suspension_state() below always
+    # treats that as READ_FAILED, never as CLEAR.
+    assess_commissioning_suspension: Callable[[], str]
     machine: CommissioningMachine = field(init=False)
     _last_write: str | None = field(default=None, init=False)
     _stage: str = field(default="ORCHESTRATOR_INITIALIZATION", init=False)
@@ -299,15 +306,39 @@ class OneShareCommissioningOrchestrator:
         self.machine.record_tool_call("review_equity_order")
         return await self.adapter.review_equity_order(arguments, role=role)
 
+    def _assess_suspension_state(self) -> str:
+        """M14 Issue 7: fresh, per-write suspension read, immediately
+        adjacent to the write it will gate -- never cached across writes
+        within a run, never defaulted to CLEAR on any failure. Any
+        exception from the injected callable, or any value it returns that
+        is not a recognized suspension-state string, becomes "READ_FAILED"
+        here rather than propagating or being silently treated as CLEAR."""
+        try:
+            state = self.assess_commissioning_suspension()
+        except Exception:
+            return "READ_FAILED"
+        if not isinstance(state, str) or state not in KNOWN_SUSPENSION_STATES:
+            return "READ_FAILED"
+        return state
+
     def _evaluate_write_safety(
         self, role: str, arguments: Mapping[str, Any]
     ) -> ExecutionSafetyDecision | None:
-        """M14 Issue 1: compute the governance decision for exactly this
+        """M14 Issue 1/7: compute the governance decision for exactly this
         write. Never raises -- any failure to even construct a well-formed
         context is treated as no decision, which the caller must treat as a
-        DENY (fail closed), not as an exception to propagate."""
+        DENY (fail closed), not as an exception to propagate. Suspension
+        state is read fresh here (via _assess_suspension_state), every
+        single call, immediately before the same evaluate_execution_safety
+        call that already re-reads the clock for decision_time -- both are
+        "immediately adjacent to the write", not read once at construction
+        and reused for the life of the run."""
         try:
             action = ACTION_FOR_ROLE[role]
+            evidence = replace(
+                self.governance_evidence,
+                suspension_state=self._assess_suspension_state(),
+            )
             if role == "cancel":
                 context = ExecutionSafetyContext(
                     context_version="1", decision_time=self.now_eastern(),
@@ -315,7 +346,7 @@ class OneShareCommissioningOrchestrator:
                     side="sell", order_type="stop_market",
                     quantity=format(QUANTITY, "f"), stop_price=None,
                     order_id=arguments.get("order_id"),
-                    governance_evidence=self.governance_evidence,
+                    governance_evidence=evidence,
                 )
             else:
                 context = ExecutionSafetyContext(
@@ -326,7 +357,7 @@ class OneShareCommissioningOrchestrator:
                     order_type=arguments.get("type", ""),
                     quantity=arguments.get("quantity", ""),
                     stop_price=arguments.get("stop_price"), order_id=None,
-                    governance_evidence=self.governance_evidence,
+                    governance_evidence=evidence,
                 )
             decision = evaluate_execution_safety(context)
         except Exception:

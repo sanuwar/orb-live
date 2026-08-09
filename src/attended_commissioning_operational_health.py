@@ -17,24 +17,31 @@ every other durable-process health concept in this repository --
 `durable_runner_liveness.DurableRunnerLiveness` (keyed by heartbeat sequence
 and expected-cycle cadence), `durable_alert_outbox.DurableAlertOutbox`
 (claims/delivery evidence for a *running* alert pipeline), and
-`durable_suspension_controller.DurableSuspensionController` (a registered
-controller identity with its own durable store, which attended commissioning
-does not have -- see `execution_safety_governance_deferred_gates.
-make_suspension_gate`'s own docstring). None of them can be read honestly
-by a process that has no history to read.
+`durable_runner_liveness.DurableRunnerLiveness` and `durable_alert_outbox.
+DurableAlertOutbox` above: neither can be read honestly by a process that
+has no history to read. `durable_suspension_controller.
+DurableSuspensionController` was in the same position when this module was
+first written -- attended commissioning had no registered controller
+identity or durable store convention yet (see `execution_safety_governance_
+deferred_gates.make_suspension_gate`'s own docstring at the time). M14
+Issues 3 and 7 (merged after this module) since established that identity/
+store and wired it in directly as `execution_safety_governance.
+gate_commissioning_suspension_clear` -- so as of those merges this signal is
+no longer `UNSAFE_TO_INFER`; it reclassifies to duplicating an already-active
+gate, exactly like repository/runtime integrity below. See `CLASSIFICATION`.
 
 This module does not try to make any of that apply anyway. It defines the
 narrow three-state result a synchronous, one-shot health read is honestly
 capable of producing -- `PASS`, `BLOCK`, or `UNKNOWN` -- and a fail-closed
 fold over zero or more such reads, where `UNKNOWN` is denial-equivalent and
 can never silently become `PASS`. `AttendedHealthCheck` is the contract a
-future, genuinely-synchronous signal would implement. As of this module's
-introduction no signal in this repository clears that bar without either
-duplicating an already-active gate (repository/runtime integrity is already
-enforced by `execution_safety_governance.gate_source_hash_verified`) or
-requiring evidence attended commissioning does not have today (a
-commissioning-scoped durable store or controller identity). See
-`CLASSIFICATION` below for the full reasoning per signal. Consequently no
+future, genuinely-synchronous signal would implement. Every signal this
+module classifies either duplicates an already-active gate (repository/
+runtime integrity via `gate_source_hash_verified`; durable commissioning
+suspension via `gate_commissioning_suspension_clear`, both already wired
+directly into `execution_safety_governance.py`, not through this module) or
+requires evidence attended commissioning still does not honestly have (see
+`CLASSIFICATION` below for the full reasoning per signal). Consequently no
 adapter is registered here; `evaluate_attended_health(())` -- zero checks --
 is itself a real, tested case (vacuous PASS), not a placeholder.
 
@@ -239,16 +246,20 @@ CLASSIFICATION: dict[str, str] = {
         RELEVANT_ONLY_TO_DURABLE_UNATTENDED_PROCESSES
     ),
     # durable_suspension_controller.py -- a synchronous read of already-
-    # durable state is, in principle, exactly the kind of check a one-shot
-    # invocation could honestly make (no heartbeat history required). It is
-    # UNSAFE_TO_INFER only because attended commissioning has no registered
-    # controller identity or durable store convention today -- the same gap
-    # execution_safety_governance_deferred_gates.make_suspension_gate
-    # already documents. Once a future milestone establishes that identity/
-    # store for commissioning, this reclassifies to
-    # RELEVANT_BEFORE_A_COMMISSIONING_WRITE, not before.
+    # durable state was, in principle, exactly the kind of check a one-shot
+    # invocation could honestly make (no heartbeat history required), and
+    # was UNSAFE_TO_INFER only because attended commissioning had no
+    # registered controller identity or durable store convention when this
+    # module was written. M14 Issues 3 and 7 (merged after this module)
+    # established that identity/store and wired it in directly as
+    # execution_safety_governance.gate_commissioning_suspension_clear --
+    # NOT through this operational-health module. Reclassified accordingly:
+    # duplicating an already-active gate, exactly like repository/runtime
+    # integrity below.
     "durable_suspension_controller.ControllerState (stale controller state)": (
-        UNSAFE_TO_INFER
+        RELEVANT_BEFORE_A_COMMISSIONING_WRITE
+        + " (already active via gate_commissioning_suspension_clear as of "
+          "M14 Issue 7; out of scope to duplicate here)"
     ),
     # Repository/runtime integrity is already an active, wired signal:
     # execution_safety_governance.gate_source_hash_verified, backed by

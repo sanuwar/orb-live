@@ -164,6 +164,30 @@ PINNED_IMPLEMENTATION_CLOSURE: tuple[str, ...] = (
     # already pinned above) now import it. Performs no broker call; decides
     # only whether an already-requested write may proceed.
     "src/execution_safety_governance.py",
+    # M14 Issue 7: the commissioning suspension gate. Reached because
+    # src/robinhood_commissioning_session.py (already pinned above) now
+    # imports src/commissioning_suspension_identity.py to derive the
+    # suspension controller identity and open its durable store; that
+    # module's own make_gate() helper (a deferred, function-local import
+    # for a not-yet-called-here convenience path) in turn reaches src/
+    # execution_safety_governance_deferred_gates.py, and THAT file's three
+    # gate-factory functions each deferred-import a different module. All
+    # five are pulled in together because this closure walk deliberately
+    # follows deferred imports (see discovered_execution_closure's
+    # docstring in tests/test_read_only_authorization_manifest.py) --
+    # reachability, not activation: none of the risk/suspension/
+    # operational-health gates are in DEFAULT_COMMISSIONING_GATES except
+    # the suspension one added in Issue 7 (see execution_safety_
+    # governance.py). Pinning the other two is a conservative side effect
+    # of one shared deferred-gates module, not a decision to activate them.
+    "src/commissioning_suspension_identity.py",
+    "src/durable_suspension_controller.py",
+    "src/execution_safety_governance_deferred_gates.py",
+    "src/attestation_authority.py",
+    "src/durable_scheduler.py",
+    "src/execution_gates.py",
+    "src/operational_monitor.py",
+    "src/risk_limits.py",
 )
 
 #: Domain separation. A digest of this closure must never collide with a digest

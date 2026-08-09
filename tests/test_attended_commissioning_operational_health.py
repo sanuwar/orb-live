@@ -283,9 +283,21 @@ def test_no_signal_is_classified_required_and_available_without_an_adapter():
             )
 
 
-def test_durable_suspension_controller_state_is_explicitly_unsafe_to_infer_today():
+def test_durable_suspension_controller_state_reclassified_after_m14_issue_7():
+    """Was UNSAFE_TO_INFER when this module was written (no commissioning
+    suspension identity/durable store existed yet). M14 Issues 3 and 7
+    (merged after this module) established that identity/store and wired
+    it in directly as execution_safety_governance.
+    gate_commissioning_suspension_clear -- so this signal now duplicates an
+    already-active gate rather than being unsafe to infer. Never copy the
+    historical UNSAFE_TO_INFER value forward once the underlying repository
+    state it documented has changed."""
     key = "durable_suspension_controller.ControllerState (stale controller state)"
-    assert CLASSIFICATION[key] == UNSAFE_TO_INFER
+    assert CLASSIFICATION[key] == (
+        RELEVANT_BEFORE_A_COMMISSIONING_WRITE
+        + " (already active via gate_commissioning_suspension_clear as of "
+          "M14 Issue 7; out of scope to duplicate here)"
+    )
 
 
 def test_heartbeat_and_liveness_signals_are_durable_unattended_only():
