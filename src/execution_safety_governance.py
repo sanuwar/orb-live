@@ -355,7 +355,7 @@ class ExecutionSafetyDecision:
         return self.outcome is ExecutionSafetyOutcome.ALLOW
 
 
-def _decision_digest(
+def compute_decision_digest(
     *,
     policy_version: str,
     action_identity: str,
@@ -364,7 +364,42 @@ def _decision_digest(
     failed: tuple[str, ...],
     reasons: tuple[str, ...],
     authority_ceiling: str,
+    bound_role: str,
+    bound_symbol: str,
+    bound_side: str,
+    bound_order_type: str,
+    bound_quantity: str,
+    bound_stop_price: str | None,
+    bound_order_id: str | None,
 ) -> str:
+    """Canonical content digest for an `ExecutionSafetyDecision` (M14 Issue 6).
+
+    Binds every field that determines whether this decision authorizes one
+    specific write: the decision's own outcome/policy identity AND the exact
+    bound write payload (`bound_role`/`bound_symbol`/`bound_side`/
+    `bound_order_type`/`bound_quantity`/`bound_stop_price`/`bound_order_id`).
+    Mutating any bound field after construction (e.g. via `dataclasses.
+    replace`) now changes this digest, closing the gap the M14 Issue 4
+    verifier found: previously the digest covered only `action_identity` --
+    a hash computed once from the *original* context -- so a bound field
+    mutated afterward went undetected because nothing re-derived
+    `action_identity` from the mutated value.
+
+    Deliberately excludes:
+    - `evaluated_at` -- freshness is an orthogonal, time-varying property
+      checked separately by `decision_is_fresh`/
+      `validate_execution_safety_decision`; folding a continuously-changing
+      timestamp into a content-addressed digest would not add authenticity
+      and would make two decisions over identical facts, computed moments
+      apart, spuriously non-identical.
+    - `decision_id` -- equal to this digest by construction, so including it
+      would be circular.
+    - `context_version` -- already transitively bound inside
+      `action_identity`, itself a hash over the full originating context.
+
+    Reuses the module's one canonical hashing convention (`_DIGEST_DOMAIN` +
+    `canonical_bytes`) rather than introducing a second one.
+    """
     payload: dict[str, Any] = {
         "policy_version": policy_version,
         "action_identity": action_identity,
@@ -373,6 +408,13 @@ def _decision_digest(
         "failed_gates": list(failed),
         "reason_codes": list(reasons),
         "authority_ceiling": authority_ceiling,
+        "bound_role": bound_role,
+        "bound_symbol": bound_symbol,
+        "bound_side": bound_side,
+        "bound_order_type": bound_order_type,
+        "bound_quantity": bound_quantity,
+        "bound_stop_price": bound_stop_price,
+        "bound_order_id": bound_order_id,
     }
     return hashlib.sha256(
         _DIGEST_DOMAIN + b"\x00decision\x00" + canonical_bytes(payload)
@@ -386,7 +428,7 @@ def _denied_for_invalid_context() -> ExecutionSafetyDecision:
     satisfied: tuple[str, ...] = ()
     failed = ("context",)
     reasons = ("DENY_CONTEXT_INVALID",)
-    digest = _decision_digest(
+    digest = compute_decision_digest(
         policy_version=POLICY_VERSION,
         action_identity=action_identity,
         outcome=ExecutionSafetyOutcome.DENY,
@@ -394,6 +436,13 @@ def _denied_for_invalid_context() -> ExecutionSafetyDecision:
         failed=failed,
         reasons=reasons,
         authority_ceiling=AUTHORITY_CEILING,
+        bound_role="",
+        bound_symbol="",
+        bound_side="",
+        bound_order_type="",
+        bound_quantity="",
+        bound_stop_price=None,
+        bound_order_id=None,
     )
     return ExecutionSafetyDecision(
         decision_id=digest,
@@ -460,7 +509,8 @@ def evaluate_execution_safety(
         ExecutionSafetyOutcome.DENY if failed_t else ExecutionSafetyOutcome.ALLOW
     )
     action_identity = context.action_identity()
-    digest = _decision_digest(
+    role = context.role
+    digest = compute_decision_digest(
         policy_version=context.policy_version,
         action_identity=action_identity,
         outcome=outcome,
@@ -468,6 +518,13 @@ def evaluate_execution_safety(
         failed=failed_t,
         reasons=reasons_t,
         authority_ceiling=AUTHORITY_CEILING,
+        bound_role=role,
+        bound_symbol=context.symbol,
+        bound_side=context.side,
+        bound_order_type=context.order_type,
+        bound_quantity=context.quantity,
+        bound_stop_price=context.stop_price,
+        bound_order_id=context.order_id,
     )
     return ExecutionSafetyDecision(
         decision_id=digest,
@@ -480,7 +537,7 @@ def evaluate_execution_safety(
         decision_digest=digest,
         evaluated_at=context.decision_time,
         authority_ceiling=AUTHORITY_CEILING,
-        bound_role=context.role,
+        bound_role=role,
         bound_symbol=context.symbol,
         bound_side=context.side,
         bound_order_type=context.order_type,
@@ -548,6 +605,112 @@ def decision_is_fresh(
     return 0.0 <= age <= max_age_seconds
 
 
+class DecisionValidationOutcome(str, Enum):
+    VALID = "VALID"
+    INVALID = "INVALID"
+
+
+@dataclass(frozen=True)
+class DecisionValidationResult:
+    outcome: DecisionValidationOutcome
+    reason_code: str
+
+    @property
+    def valid(self) -> bool:
+        return self.outcome is DecisionValidationOutcome.VALID
+
+
+def _invalid(reason_code: str) -> DecisionValidationResult:
+    return DecisionValidationResult(DecisionValidationOutcome.INVALID, reason_code)
+
+
+_VALID_DECISION = DecisionValidationResult(DecisionValidationOutcome.VALID, "OK")
+
+
+def validate_execution_safety_decision(
+    decision: Any,
+    *,
+    role: str,
+    arguments: Mapping[str, Any],
+    now: datetime,
+    max_age_seconds: float = MAX_DECISION_AGE_SECONDS,
+) -> DecisionValidationResult:
+    """Independent, write-boundary-time authenticity check for an already-
+    computed `ExecutionSafetyDecision` (M14 Issue 6).
+
+    `evaluate_execution_safety` is the only place a *real* decision is ever
+    produced, and `decision_binds_write`/`decision_is_fresh` already existed
+    as independent checks -- but nothing previously required the actual
+    write boundary to use all of them together, or to confirm the decision
+    object itself was never forged or mutated after construction. This
+    function is meant to be called again at the real write site (not only
+    trusted from an upstream caller) as defense in depth: even if every
+    caller above the write boundary were wrong, compromised, or bypassed, a
+    write still requires an object that independently proves itself
+    authentic, exactly bound, fresh, and ALLOW here.
+
+    Checked in this order (each is a hard requirement; the first failure
+    wins and no check downstream of a failure is a stronger guarantee than
+    the ones already stated):
+    1. is actually an `ExecutionSafetyDecision`
+    2. outcome is ALLOW (cheapest, most common rejection)
+    3. policy_version matches this module's live `POLICY_VERSION`
+    4. authority_ceiling matches this module's live `AUTHORITY_CEILING`
+    5. decision_digest is well-formed and matches an independent
+       recomputation from the decision's OWN stored fields (proves the
+       object was not hand-constructed or mutated after the fact -- only
+       after this passes are the object's `bound_*` fields trusted at all)
+    6. decision_id matches decision_digest (cheap internal-consistency
+       sanity check; both are set equal to the same value by
+       `evaluate_execution_safety`)
+    7. decision_binds_write: the now-trusted bound_* fields match the EXACT
+       write about to be sent (role/symbol/side/order_type/quantity/
+       stop_price/order_id as applicable)
+    8. decision_is_fresh: not stale, not from clock-skewed future, relative
+       to the caller-supplied `now`
+
+    Never raises: any structurally wrong input (wrong type, missing
+    attribute) is caught by the `isinstance` gate at step 1 and every other
+    step operates on an already-confirmed `ExecutionSafetyDecision`, whose
+    fields are always the declared types.
+    """
+    if not isinstance(decision, ExecutionSafetyDecision):
+        return _invalid("EXECUTION_SAFETY_DECISION_MISSING")
+    if decision.outcome is not ExecutionSafetyOutcome.ALLOW:
+        return _invalid("EXECUTION_SAFETY_DENIED")
+    if decision.policy_version != POLICY_VERSION:
+        return _invalid("EXECUTION_SAFETY_POLICY_VERSION_MISMATCH")
+    if decision.authority_ceiling != AUTHORITY_CEILING:
+        return _invalid("EXECUTION_SAFETY_AUTHORITY_CEILING_MISMATCH")
+    if not isinstance(decision.decision_digest, str) or not decision.decision_digest:
+        return _invalid("EXECUTION_SAFETY_DECISION_DIGEST_MALFORMED")
+    recomputed_digest = compute_decision_digest(
+        policy_version=decision.policy_version,
+        action_identity=decision.action_identity,
+        outcome=decision.outcome,
+        satisfied=decision.satisfied_gates,
+        failed=decision.failed_gates,
+        reasons=decision.reason_codes,
+        authority_ceiling=decision.authority_ceiling,
+        bound_role=decision.bound_role,
+        bound_symbol=decision.bound_symbol,
+        bound_side=decision.bound_side,
+        bound_order_type=decision.bound_order_type,
+        bound_quantity=decision.bound_quantity,
+        bound_stop_price=decision.bound_stop_price,
+        bound_order_id=decision.bound_order_id,
+    )
+    if recomputed_digest != decision.decision_digest:
+        return _invalid("EXECUTION_SAFETY_DECISION_DIGEST_MISMATCH")
+    if decision.decision_id != decision.decision_digest:
+        return _invalid("EXECUTION_SAFETY_DECISION_ID_MISMATCH")
+    if not decision_binds_write(decision, role=role, arguments=arguments):
+        return _invalid("EXECUTION_SAFETY_ACTION_MISMATCH")
+    if not decision_is_fresh(decision, now=now, max_age_seconds=max_age_seconds):
+        return _invalid("EXECUTION_SAFETY_DECISION_STALE")
+    return _VALID_DECISION
+
+
 __all__ = [
     "ExecutionSafetyError",
     "ExecutionSafetyOutcome",
@@ -575,6 +738,10 @@ __all__ = [
     "ExecutionSafetyDecision",
     "evaluate_execution_safety",
     "reviewed_manifest_digest",
+    "compute_decision_digest",
     "decision_binds_write",
     "decision_is_fresh",
+    "DecisionValidationOutcome",
+    "DecisionValidationResult",
+    "validate_execution_safety_decision",
 ]

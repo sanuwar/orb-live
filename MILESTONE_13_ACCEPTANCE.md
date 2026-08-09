@@ -52,7 +52,7 @@ provenance.
 ## 6. Final implementation digest
 
 ```
-a4c579faeafdd97415af6cee4b42ad8c4ceafb0fa082b92672cd4871f6f77f40
+866caedd98d4b3f83c94dbaaa1c44710f39f79e1eb3ddee937ca0b9c8227b59d
 ```
 
 Independently reconstructed (separate hashing routine, separate
@@ -65,7 +65,12 @@ This value is kept live, not frozen at M13's own close: M14 Issue 1 added
 (reached from `src/robinhood_commissioning_adapter.py` and
 `src/one_share_commissioning_orchestrator.py`, both already pinned for
 M13), which moved the digest and count below. The milestone's own
-findings are otherwise unchanged.
+findings are otherwise unchanged. M14 Issue 6 (broker write-boundary
+decision authenticity) subsequently changed the CONTENT of two already-
+pinned files (`src/execution_safety_governance.py`,
+`src/robinhood_commissioning_adapter.py`) without adding or removing any
+pinned path, moving the digest again to the value above; the pinned file
+count is unchanged.
 
 ## 7. Pinned file count
 

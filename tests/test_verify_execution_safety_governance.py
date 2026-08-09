@@ -1,14 +1,16 @@
-"""Regression tests for the M14 Issue 4 independent governance verifier
+"""Regression tests for the M14 Issue 4/6 independent governance verifier
 (scripts/verify_execution_safety_governance.py).
 
-These tests do not re-check the M14 Issue 1 governance logic itself --
+These tests do not re-check the M14 Issue 1/6 governance logic itself --
 tests/test_execution_safety_governance.py already does that. They check
-that the *verifier* keeps behaving as designed: every structural check it
-is supposed to pass still passes, the three deliberately-surfaced
-adversarial findings (a forged decision, a stale decision, and a
+that the *verifier* keeps behaving as designed: every check now passes,
+including the three checks that used to document real, intentionally-
+surfaced adversarial findings (a forged decision, a stale decision, and a
 digest/binding-field mismatch, all reaching the adapter's write boundary
-today) are still detected and reported as FAIL rather than silently
-passing, and the report is deterministic and offline.
+before M14 Issue 6 closed them via validate_execution_safety_decision), and
+the report stays deterministic and offline. If any of these three checks
+starts failing again, that is a real regression in the M14 Issue 6 fix, not
+an update to make here.
 """
 from __future__ import annotations
 
@@ -17,14 +19,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 import scripts.verify_execution_safety_governance as verifier
 
-#: Checks that must PASS today. Deliberately excludes the three known,
-#: intentionally-surfaced adversarial findings below.
+#: Every check must PASS today (M14 Issue 6 closed the three checks that
+#: used to be expected, intentional adversarial findings: "9",
+#: "tamper_stale_decision", "tamper_digest_binding_mismatch"). If any of
+#: these move back into a "known finding" set, that documents a real
+#: regression -- it should come with an explanation, not a silent test edit.
 _EXPECTED_PASSING_CHECK_IDS = {
-    "1", "2", "3", "4", "5", "6", "7", "8", "10", "11", "12", "13",
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
     "14", "15", "16", "17", "18", "19", "20_21_22", "23", "24", "25",
     "write_capable_second_site_is_downstream_forwarding_only",
     "decision_construction_single_point",
@@ -37,18 +44,13 @@ _EXPECTED_PASSING_CHECK_IDS = {
     "self_test_getattr_limitation_documented",
     "self_test_authority_grant",
     "self_test_hypothetical_paths",
-}
-
-#: Checks that document a real, narrow, currently-true structural finding
-#: about the write boundary -- expected to FAIL until a future milestone
-#: changes the underlying code. A verifier that started silently passing
-#: these would be a regression in the verifier itself, not good news about
-#: the boundary.
-_EXPECTED_ADVERSARIAL_FINDING_IDS = {
-    "9",
+    "decision_authenticity_gate",
     "tamper_stale_decision",
     "tamper_digest_binding_mismatch",
 }
+
+#: No known adversarial findings remain open after M14 Issue 6.
+_EXPECTED_ADVERSARIAL_FINDING_IDS: set[str] = set()
 
 
 def test_report_check_ids_match_expected_pass_and_fail_sets():
@@ -108,11 +110,10 @@ def test_cli_json_mode_matches_build_report():
     payload = json.loads(completed.stdout)
     in_process = verifier.build_report(REPOSITORY_ROOT)
     assert payload == in_process
-    # The three intentionally-surfaced findings make the overall result FAIL
-    # and the process exit non-zero -- exactly the fail-closed behavior this
-    # verifier is meant to have; a silent PASS here would be the bug.
-    assert payload["final_result"] == "FAIL"
-    assert completed.returncode == 1
+    # M14 Issue 6 closed the three findings that used to make this FAIL;
+    # every check is now expected to PASS and the process to exit 0.
+    assert payload["final_result"] == "PASS"
+    assert completed.returncode == 0
 
 
 def test_dispatch_scanner_resolves_literal_and_cross_file_validated_sites():
@@ -153,21 +154,50 @@ def test_authority_grant_scanner_ignores_docstring_mentions():
 
 
 def test_forged_decision_finding_actually_reflects_a_broker_call():
-    """Confirms check 9's FAIL is backed by an observed broker call, not a
-    mislabeled assertion -- re-runs the exact adversarial scenario and
-    inspects the fake session directly."""
+    """Confirms check 9's PASS is backed by an observed refusal, not a
+    mislabeled assertion -- re-runs the exact adversarial scenario (a
+    hand-built decision with a bogus authority_ceiling and an unrecomputed
+    decision_digest) and inspects the fake session directly."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    from src.execution_safety_governance import ExecutionSafetyOutcome
+    from src.robinhood_commissioning_adapter import (
+        ExecutionSafetyDeniedError, RobinhoodCommissioningAdapter,
+    )
+
+    forged = verifier._hand_built_decision(
+        outcome=ExecutionSafetyOutcome.ALLOW, role="entry", arguments=verifier._ENTRY_ARGS,
+        evaluated_at=datetime.now(timezone.utc),
+        authority_ceiling="NOT_A_REAL_AUTHORITY_CEILING",
+        decision_digest="never-computed-by-compute_decision_digest",
+    )
+    session = verifier._FakeSession(verifier._fake_place_response())
+    adapter = RobinhoodCommissioningAdapter(session, "verifier-account")
+    with pytest.raises(ExecutionSafetyDeniedError):
+        asyncio.run(adapter.place_equity_order(verifier._ENTRY_ARGS, role="entry", safety_decision=forged))
+    assert len(session.calls) == 0
+
+
+def test_hand_built_decision_default_is_authentic_and_reaches_write():
+    """The verifier's own convenience helper must default to an AUTHENTIC
+    decision (real POLICY_VERSION/AUTHORITY_CEILING, correctly-computed
+    digest) so checks 6/7/8/10/bypass_without_role/stale-tamper -- which
+    are not themselves testing forgery -- still exercise real adapter
+    enforcement rather than accidentally re-triggering the forged-decision
+    pattern check 9 exists to catch."""
     import asyncio
     from datetime import datetime, timezone
 
     from src.execution_safety_governance import ExecutionSafetyOutcome
     from src.robinhood_commissioning_adapter import RobinhoodCommissioningAdapter
 
-    forged = verifier._hand_built_decision(
+    authentic = verifier._hand_built_decision(
         outcome=ExecutionSafetyOutcome.ALLOW, role="entry", arguments=verifier._ENTRY_ARGS,
         evaluated_at=datetime.now(timezone.utc),
     )
     session = verifier._FakeSession(verifier._fake_place_response())
     adapter = RobinhoodCommissioningAdapter(session, "verifier-account")
-    asyncio.run(adapter.place_equity_order(verifier._ENTRY_ARGS, role="entry", safety_decision=forged))
+    asyncio.run(adapter.place_equity_order(verifier._ENTRY_ARGS, role="entry", safety_decision=authentic))
     assert len(session.calls) == 1
     assert session.calls[0][0] == "place_equity_order"
