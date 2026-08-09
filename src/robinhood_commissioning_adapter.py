@@ -9,14 +9,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Callable
 
-from src.execution_safety_governance import (
-    ExecutionSafetyDecision,
-    ExecutionSafetyOutcome,
-    decision_binds_write,
-)
+from src.execution_safety_governance import validate_execution_safety_decision
 from src.live_order_contract import (
     classify_place_order_object_violation,
     classify_place_response_shape,
@@ -161,6 +158,13 @@ class RobinhoodCommissioningAdapter:
     call_counts: dict[str, int] = field(default_factory=dict)
     _write_keys: set[str] = field(default_factory=set)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # M14 Issue 6: the write boundary independently re-checks decision
+    # freshness at the actual point of write (not only upstream, in the
+    # orchestrator) -- this is the clock it uses to do that. Defaults to
+    # the real wall clock; production construction threads the SAME
+    # callable the orchestrator uses (now_eastern) so both freshness checks
+    # agree, but this stays independently overridable for tests.
+    now_eastern: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def __post_init__(self) -> None:
         if self.session is None or not callable(getattr(self.session, "call_tool", None)):
@@ -209,19 +213,23 @@ class RobinhoodCommissioningAdapter:
         if allowed in WRITE_TOOLS:
             if not write_key or write_key in self._write_keys:
                 raise CommissioningError("write operation may occur only once")
-            # M14 Issue 1: the governance boundary is the last check before
-            # the broker call below. No write tool may be invoked without an
-            # explicit, exactly-bound ALLOW -- a missing decision, a DENY, or
-            # a decision computed for a different action all fail closed
-            # here, before self._write_keys is even touched.
+            # M14 Issue 1/6: the governance boundary is the last check
+            # before the broker call below, and it is independently
+            # re-verified HERE -- not merely trusted from the orchestrator
+            # -- so a forged, mutated, or stale decision object cannot
+            # reach a real write even if every caller upstream of this
+            # adapter were wrong or bypassed. validate_execution_safety_
+            # decision alone decides ALLOW vs DENY for the presented
+            # decision; role=None is this method's own separate contract
+            # (it cannot even ask the question without a role).
             if role is None:
                 raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_ROLE_MISSING")
-            if not isinstance(safety_decision, ExecutionSafetyDecision):
-                raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_DECISION_MISSING")
-            if safety_decision.outcome is not ExecutionSafetyOutcome.ALLOW:
-                raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_DENIED")
-            if not decision_binds_write(safety_decision, role=role, arguments=arguments):
-                raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_ACTION_MISMATCH")
+            validation = validate_execution_safety_decision(
+                safety_decision, role=role, arguments=arguments,
+                now=self.now_eastern(),
+            )
+            if not validation.valid:
+                raise ExecutionSafetyDeniedError(validation.reason_code)
             self._write_keys.add(write_key)
         self.call_counts[allowed] = self.call_counts.get(allowed, 0) + 1
         async def invoke() -> Mapping[str, Any]:
