@@ -8,7 +8,9 @@ import pytest
 
 from scripts.validate_read_only_deployment_profile import main as validate_cli
 from src.execution_gates import ACTIVATION_APPROVALS
-from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
+from src.read_only_authorization_manifest import (
+    PINNED_IMPLEMENTATION_CLOSURE, checkpoint_implementation_digest, resolve_head_sha,
+)
 from src.read_only_deployment_profile import (
     ProfileError,
     ProfileIdentityError,
@@ -27,6 +29,7 @@ def valid_raw() -> dict[str, object]:
     value = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     value["release_commit_sha"] = resolve_head_sha(ROOT)
     value["implementation_digest"] = checkpoint_implementation_digest(ROOT)
+    value["pinned_file_count"] = len(PINNED_IMPLEMENTATION_CLOSURE)
     return value
 
 

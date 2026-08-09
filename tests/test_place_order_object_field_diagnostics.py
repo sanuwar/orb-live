@@ -41,6 +41,7 @@ from src.robinhood_commissioning_adapter import (
     BrokerRejectedError,
     RobinhoodCommissioningAdapter,
 )
+from tests.execution_safety_test_support import allow_decision
 from tests.test_one_share_commissioning_orchestrator import (
     FakeAdapter,
     make_orchestrator,
@@ -310,7 +311,11 @@ def place_payload(role):
 
 def place(session, role):
     adapter = RobinhoodCommissioningAdapter(session, "transient")
-    return asyncio.run(adapter.place_equity_order(place_payload(role), role=role))
+    payload = place_payload(role)
+    return asyncio.run(adapter.place_equity_order(
+        payload, role=role,
+        safety_decision=allow_decision(role=role, arguments=payload),
+    ))
 
 
 @pytest.mark.parametrize("role", ["entry", "stop", "exit"])
@@ -357,9 +362,11 @@ class NamedViolationAdapter(FakeAdapter):
         super().__init__(**kwargs)
         self.failing_role = failing_role
 
-    async def place_equity_order(self, arguments, *, role):
+    async def place_equity_order(self, arguments, *, role, safety_decision=None):
         if role != self.failing_role:
-            return await super().place_equity_order(arguments, role=role)
+            return await super().place_equity_order(
+                arguments, role=role, safety_decision=safety_decision
+            )
         self._record("place_equity_order")
         self.write_roles.append(role)
         order = order_object(role, fees=None)

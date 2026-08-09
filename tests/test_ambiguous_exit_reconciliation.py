@@ -50,9 +50,11 @@ class AmbiguousExitAdapter(FakeAdapter):
         self.exit_scenario = exit_scenario
         self.exit_reads = 0
 
-    async def place_equity_order(self, arguments, *, role):
+    async def place_equity_order(self, arguments, *, role, safety_decision=None):
         if role != "exit":
-            return await super().place_equity_order(arguments, role=role)
+            return await super().place_equity_order(
+                arguments, role=role, safety_decision=safety_decision
+            )
         self._record("place_equity_order")
         self.write_roles.append("exit")
         # The sell reached the broker; only the local response was lost.

@@ -37,6 +37,7 @@ from src.robinhood_commissioning_adapter import (
     PlacementSymbolMismatchError,
     RobinhoodCommissioningAdapter,
 )
+from tests.execution_safety_test_support import allow_decision
 from tests.test_one_share_commissioning_orchestrator import (
     FakeAdapter,
     make_orchestrator,
@@ -173,7 +174,11 @@ def request_payload(role):
 
 def place(session, role):
     adapter = RobinhoodCommissioningAdapter(session, "transient")
-    return asyncio.run(adapter.place_equity_order(request_payload(role), role=role))
+    payload = request_payload(role)
+    return asyncio.run(adapter.place_equity_order(
+        payload, role=role,
+        safety_decision=allow_decision(role=role, arguments=payload),
+    ))
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -224,12 +229,18 @@ def test_no_placement_is_ever_repeated_for_any_symbol_state(role):
                              ("MSFT", PlacementSymbolMismatchError)):
         session = Session(place_envelope(role, symbol))
         adapter = RobinhoodCommissioningAdapter(session, "transient")
+        payload = request_payload(role)
+        decision = allow_decision(role=role, arguments=payload)
         try:
-            asyncio.run(adapter.place_equity_order(request_payload(role), role=role))
+            asyncio.run(adapter.place_equity_order(
+                payload, role=role, safety_decision=decision
+            ))
         except Exception as error:
             assert expected is not None and isinstance(error, expected)
         with pytest.raises(CommissioningError, match="only once"):
-            asyncio.run(adapter.place_equity_order(request_payload(role), role=role))
+            asyncio.run(adapter.place_equity_order(
+                payload, role=role, safety_decision=decision
+            ))
         assert len(session.calls) == 1
 
 
@@ -242,7 +253,7 @@ class BlankSymbolCreationAdapter(FakeAdapter):
     This is the exact live shape from run …-06.
     """
 
-    async def place_equity_order(self, arguments, *, role):
+    async def place_equity_order(self, arguments, *, role, safety_decision=None):
         self._record("place_equity_order")
         self.write_roles.append(role)
         # The write DID land at the broker; only the creation response could
@@ -295,7 +306,7 @@ def test_live_shape_reconciles_to_complete_without_malformed_classification(tmp_
 
 
 class WrongSymbolCreationAdapter(FakeAdapter):
-    async def place_equity_order(self, arguments, *, role):
+    async def place_equity_order(self, arguments, *, role, safety_decision=None):
         self._record("place_equity_order")
         self.write_roles.append(role)
         raise PlacementSymbolMismatchError(f"{role.upper()}_PLACE_SYMBOL_MISMATCH")

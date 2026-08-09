@@ -9,14 +9,19 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
+from src.execution_safety_governance import (
+    ACTION_FOR_ROLE, CommissioningGovernanceEvidence, ExecutionSafetyContext,
+    ExecutionSafetyDecision, ExecutionSafetyOutcome, decision_is_fresh,
+    evaluate_execution_safety,
+)
 from src.live_order_state_model import OrderStateClass, classify_order_state
 from src.one_share_commissioning import (
     ALLOWED_FAILURE_CATEGORIES, AtomicEvidenceStore, AuthorizationInputError,
     CommissioningDiagnosticError, CommissioningError,
     CommissioningMachine, EntryWindowError,
     EASTERN, ENTRY_FILL_DEADLINE_SECONDS, EntryFillObservation, OrderObservation,
-    RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
-    ALLOWED_PLACE_DIAGNOSTICS,
+    QUANTITY, RuntimeAuthorization, State, STOP_OBSERVATION_DEADLINE_SECONDS,
+    SYMBOL, ALLOWED_PLACE_DIAGNOSTICS,
     WriteDisposition, cancel_timeout_layer, coarse_duration_bucket,
     sanitized_exception_type,
 )
@@ -164,6 +169,7 @@ class OneShareCommissioningOrchestrator:
     strategy_enabled: bool
     regular_market_hours: bool
     time_policy: CommissioningTimePolicy
+    governance_evidence: CommissioningGovernanceEvidence
     machine: CommissioningMachine = field(init=False)
     _last_write: str | None = field(default=None, init=False)
     _stage: str = field(default="ORCHESTRATOR_INITIALIZATION", init=False)
@@ -293,17 +299,66 @@ class OneShareCommissioningOrchestrator:
         self.machine.record_tool_call("review_equity_order")
         return await self.adapter.review_equity_order(arguments, role=role)
 
+    def _evaluate_write_safety(
+        self, role: str, arguments: Mapping[str, Any]
+    ) -> ExecutionSafetyDecision | None:
+        """M14 Issue 1: compute the governance decision for exactly this
+        write. Never raises -- any failure to even construct a well-formed
+        context is treated as no decision, which the caller must treat as a
+        DENY (fail closed), not as an exception to propagate."""
+        try:
+            action = ACTION_FOR_ROLE[role]
+            if role == "cancel":
+                context = ExecutionSafetyContext(
+                    context_version="1", decision_time=self.now_eastern(),
+                    run_id=self.run_id, action=action, symbol=SYMBOL,
+                    side="sell", order_type="stop_market",
+                    quantity=format(QUANTITY, "f"), stop_price=None,
+                    order_id=arguments.get("order_id"),
+                    governance_evidence=self.governance_evidence,
+                )
+            else:
+                context = ExecutionSafetyContext(
+                    context_version="1", decision_time=self.now_eastern(),
+                    run_id=self.run_id, action=action,
+                    symbol=arguments.get("symbol", ""),
+                    side=arguments.get("side", ""),
+                    order_type=arguments.get("type", ""),
+                    quantity=arguments.get("quantity", ""),
+                    stop_price=arguments.get("stop_price"), order_id=None,
+                    governance_evidence=self.governance_evidence,
+                )
+            decision = evaluate_execution_safety(context)
+        except Exception:
+            return None
+        if not decision_is_fresh(decision, now=self.now_eastern()):
+            return None
+        return decision
+
     async def _place(self, role: str, arguments: Mapping[str, Any]) -> Any:
         if role != "entry":
             await self._require_before_flat_deadline(
                 position=True, stop=role == "exit",
                 action="Take immediate manual Robinhood control; do not submit another write.",
             )
+        decision = self._evaluate_write_safety(role, arguments)
+        if decision is None or decision.outcome is not ExecutionSafetyOutcome.ALLOW:
+            await self._handoff(
+                f"{role.upper()}_EXECUTION_SAFETY_DENIED",
+                position=role != "entry", stop=role in {"stop", "exit"},
+                action=(
+                    "Stop the run; no broker write boundary was reached."
+                    if role == "entry" else
+                    "Take immediate manual Robinhood control; do not submit another write."
+                ),
+            )
         self.machine.record_tool_call("place_equity_order")
         self.machine.persist_write_boundary(role, "before")
         self._last_write = role
         try:
-            result = await self.adapter.place_equity_order(arguments, role=role)
+            result = await self.adapter.place_equity_order(
+                arguments, role=role, safety_decision=decision,
+            )
         except AmbiguousWriteError as error:
             # Every role records the same structural facts about what came
             # back. This is the single choke point for all three placements,
@@ -824,6 +879,12 @@ class OneShareCommissioningOrchestrator:
             position=True, stop=True,
             action="Take immediate manual Robinhood control; reconcile the stop and position.",
         )
+        decision = self._evaluate_write_safety("cancel", {"order_id": stop_id})
+        if decision is None or decision.outcome is not ExecutionSafetyOutcome.ALLOW:
+            await self._handoff(
+                "STOP_CANCEL_EXECUTION_SAFETY_DENIED", position=True, stop=True,
+                action="Take immediate manual Robinhood control; reconcile the stop and position.",
+            )
         self.machine.record_tool_call("cancel_equity_order")
         self.machine.persist_write_boundary("cancel", "before")
         self._last_write = "cancel"
@@ -835,7 +896,9 @@ class OneShareCommissioningOrchestrator:
         reconciliation_stage = self._stage
         self._stage = "STOP_CANCEL_SUBMISSION"
         try:
-            result = await self.adapter.cancel_equity_order({"order_id": stop_id})
+            result = await self.adapter.cancel_equity_order(
+                {"order_id": stop_id}, safety_decision=decision,
+            )
         except AmbiguousWriteError as error:
             self._record_cancel_call_outcome(
                 cancel_started,

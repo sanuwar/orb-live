@@ -26,7 +26,9 @@ from src.protection_observation_model import (
 from src.live_order_state_model import ProtectiveCoverage
 from src.order_lifecycle_model import MappingProvenance
 from src.read_only_broker_state import SnapshotFreshness
-from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
+from src.read_only_authorization_manifest import (
+    PINNED_IMPLEMENTATION_CLOSURE, checkpoint_implementation_digest, resolve_head_sha,
+)
 from src.supervised_operator_console import load_console_snapshot
 
 TOOL_ID = "orb-live.operator-demo.v1"
@@ -62,7 +64,7 @@ def _safe_root(root: Path, replace: bool) -> Path:
 
 def _fixture_files(root: Path, sha: str, digest: str) -> None:
     (root / "config").mkdir(); (root / "evidence").mkdir(); (root / "history").mkdir()
-    profile=json.loads((Path(__file__).resolve().parents[1]/"examples/read-only-deployment/valid-supervised-read-only-profile.json").read_text(encoding="utf-8")); profile.update(release_commit_sha=sha,implementation_digest=digest)
+    profile=json.loads((Path(__file__).resolve().parents[1]/"examples/read-only-deployment/valid-supervised-read-only-profile.json").read_text(encoding="utf-8")); profile.update(release_commit_sha=sha,implementation_digest=digest,pinned_file_count=len(PINNED_IMPLEMENTATION_CLOSURE))
     lifecycle=json.loads((Path(__file__).resolve().parents[1]/"examples/read-only-deployment/host-process-lifecycle.json").read_text(encoding="utf-8")); lifecycle.update(release_commit_sha=sha,implementation_digest=digest)
     (root/"config/deployment-profile.json").write_text(json.dumps(profile,sort_keys=True),encoding="utf-8")
     (root/"config/lifecycle-contract.json").write_text(json.dumps(lifecycle,sort_keys=True),encoding="utf-8")

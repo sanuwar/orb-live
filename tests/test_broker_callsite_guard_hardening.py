@@ -421,7 +421,11 @@ def test_existing_commissioning_write_site_remains_detected():
         s for s in sites if s.path == "src/robinhood_commissioning_adapter.py"
     ]
     assert len(commissioning) == 1
-    assert commissioning[0].line == 203
+    # Line moved from 203 in M14 Issue 1: the safety-governance boundary
+    # (RobinhoodCommissioningAdapter._call's role/safety_decision checks)
+    # was inserted immediately before this same single write call, which is
+    # still exactly one call site, still SAFE_WRAPPER, still the only one.
+    assert commissioning[0].line == 229
     assert commissioning[0].kind == SAFE_WRAPPER
 
 

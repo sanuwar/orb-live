@@ -27,7 +27,9 @@ from src.one_share_commissioning import (
     FLATTEN_AUTHORIZATION_STAGE, State,
 )
 from src.one_share_commissioning_orchestrator import OneShareCommissioningOrchestrator
-from tests.test_one_share_commissioning_orchestrator import Clock, FakeAdapter, TIME_POLICY
+from tests.test_one_share_commissioning_orchestrator import (
+    Clock, DEFAULT_GOVERNANCE_EVIDENCE, FakeAdapter, TIME_POLICY,
+)
 
 PRIVATE_FAKE_INPUT = "PRIVATE_FAKE_INPUT_SENTINEL"
 NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
@@ -125,6 +127,7 @@ async def run_case(case: str, root: Path, run_id: str) -> int:
             evidence_store=store, emergency_handoff=emergency_handoffs.append,
             strategy_enabled=False, regular_market_hours=True,
             time_policy=TIME_POLICY,
+            governance_evidence=DEFAULT_GOVERNANCE_EVIDENCE,
         )
         result = await orchestrator.run()
     evidence_path = (

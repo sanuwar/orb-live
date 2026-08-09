@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from src.execution_safety_governance import (
+    ExecutionSafetyDecision,
+    ExecutionSafetyOutcome,
+    decision_binds_write,
+)
 from src.live_order_contract import (
     classify_place_order_object_violation,
     classify_place_response_shape,
@@ -60,6 +65,13 @@ class AmbiguousWriteError(CommissioningError):
 
 class BrokerRejectedError(CommissioningError):
     """The broker returned an explicit rejection rather than an ambiguous result."""
+
+
+class ExecutionSafetyDeniedError(CommissioningError):
+    """M14 Issue 1: the safety-governance boundary did not return ALLOW for
+    this exact write. No broker call is made when this is raised -- unlike
+    `AmbiguousWriteError`/`BrokerRejectedError`, which are raised only after
+    the broker call already returned, this is raised strictly before it."""
 
 
 class PlacementSymbolMismatchError(CommissioningError):
@@ -191,11 +203,25 @@ class RobinhoodCommissioningAdapter:
                 raise CommissioningError("stop price is not contract-normalized")
 
     async def _call(self, tool_name: str, arguments: Mapping[str, Any],
-                    *, write_key: str | None = None) -> Mapping[str, Any]:
+                    *, write_key: str | None = None, role: str | None = None,
+                    safety_decision: Any = None) -> Mapping[str, Any]:
         allowed = assert_tool_allowed(tool_name)
         if allowed in WRITE_TOOLS:
             if not write_key or write_key in self._write_keys:
                 raise CommissioningError("write operation may occur only once")
+            # M14 Issue 1: the governance boundary is the last check before
+            # the broker call below. No write tool may be invoked without an
+            # explicit, exactly-bound ALLOW -- a missing decision, a DENY, or
+            # a decision computed for a different action all fail closed
+            # here, before self._write_keys is even touched.
+            if role is None:
+                raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_ROLE_MISSING")
+            if not isinstance(safety_decision, ExecutionSafetyDecision):
+                raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_DECISION_MISSING")
+            if safety_decision.outcome is not ExecutionSafetyOutcome.ALLOW:
+                raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_DENIED")
+            if not decision_binds_write(safety_decision, role=role, arguments=arguments):
+                raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_ACTION_MISMATCH")
             self._write_keys.add(write_key)
         self.call_counts[allowed] = self.call_counts.get(allowed, 0) + 1
         async def invoke() -> Mapping[str, Any]:
@@ -362,9 +388,15 @@ class RobinhoodCommissioningAdapter:
             raise CommissioningError("review response stop mismatch")
         return data
 
-    async def place_equity_order(self, arguments: Mapping[str, Any], *, role: str) -> Any:
+    async def place_equity_order(
+        self, arguments: Mapping[str, Any], *, role: str,
+        safety_decision: Any = None,
+    ) -> Any:
         self._validate_order_arguments(arguments, role=role)
-        data = await self._call("place_equity_order", arguments, write_key=f"place:{role}")
+        data = await self._call(
+            "place_equity_order", arguments, write_key=f"place:{role}",
+            role=role, safety_decision=safety_decision,
+        )
         try:
             parsed = parse_place_response({"data": data, "guide": "commissioning response"})
         except Exception as exc:
@@ -459,7 +491,9 @@ class RobinhoodCommissioningAdapter:
             raise AmbiguousWriteError("STOP_PLACE_RESPONSE_MALFORMED")
         return parsed
 
-    async def cancel_equity_order(self, arguments: Mapping[str, Any]) -> Any:
+    async def cancel_equity_order(
+        self, arguments: Mapping[str, Any], *, safety_decision: Any = None,
+    ) -> Any:
         if set(arguments) != {"order_id"}:
             raise CommissioningError("cancel payload fields do not match fixed policy")
         order_id = arguments.get("order_id")
@@ -474,7 +508,13 @@ class RobinhoodCommissioningAdapter:
             "account_number": self.commissioned_account_number,
             "order_id": order_id,
         }
-        data = await self._call("cancel_equity_order", payload, write_key="cancel:stop")
+        # The governance binding check (decision_binds_write) matches against
+        # {"order_id": ...} only, so the account_number added above cannot
+        # cause a spurious binding mismatch.
+        data = await self._call(
+            "cancel_equity_order", payload, write_key="cancel:stop",
+            role="cancel", safety_decision=safety_decision,
+        )
         try:
             return parse_cancel_response({"data": data, "guide": "commissioning response"})
         except Exception as exc:

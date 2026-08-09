@@ -52,7 +52,7 @@ provenance.
 ## 6. Final implementation digest
 
 ```
-6b0c54b09dd528c82c8c5e4ea5376d7cba5367543c658acee9995e498259bc51
+a4c579faeafdd97415af6cee4b42ad8c4ceafb0fa082b92672cd4871f6f77f40
 ```
 
 Independently reconstructed (separate hashing routine, separate
@@ -60,9 +60,16 @@ AST-based execution-closure walk -- see `scripts/verify_m13_protection_
 grounding.py::check_implementation_digest_and_closure`) and confirmed to
 match the declared value exactly at the final reviewed SHA.
 
+This value is kept live, not frozen at M13's own close: M14 Issue 1 added
+`src/execution_safety_governance.py` to `PINNED_IMPLEMENTATION_CLOSURE`
+(reached from `src/robinhood_commissioning_adapter.py` and
+`src/one_share_commissioning_orchestrator.py`, both already pinned for
+M13), which moved the digest and count below. The milestone's own
+findings are otherwise unchanged.
+
 ## 7. Pinned file count
 
-**27**, independently confirmed: every path exists, no duplicates, all
+**28**, independently confirmed: every path exists, no duplicates, all
 required M13 runtime files present, no test-only tool improperly pinned,
 and the declared closure equals a fresh AST-based execution-closure walk
 from the checkpoint's entry points exactly (0 discovered-but-not-pinned,

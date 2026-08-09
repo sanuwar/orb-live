@@ -123,6 +123,13 @@ ALLOWED_FAILURE_CATEGORIES = frozenset({
     "CANCEL_RECONCILIATION_FAILED", "FLATTEN_FAILED",
     "FINAL_FLAT_VERIFICATION_FAILED", "EVIDENCE_PERSISTENCE_FAILED",
     "SESSION_CLOSE_FAILED", "INTERNAL_INVARIANT_FAILURE",
+    # M14 Issue 1: the safety-governance boundary denied (or could not
+    # evaluate) an exact proposed write. Raised strictly before any broker
+    # call for that write is attempted -- see
+    # src/execution_safety_governance.py and
+    # RobinhoodCommissioningAdapter.ExecutionSafetyDeniedError.
+    "ENTRY_EXECUTION_SAFETY_DENIED", "STOP_EXECUTION_SAFETY_DENIED",
+    "EXIT_EXECUTION_SAFETY_DENIED", "STOP_CANCEL_EXECUTION_SAFETY_DENIED",
 })
 
 ALLOWED_FAILURE_STAGES = frozenset({

@@ -158,6 +158,12 @@ PINNED_IMPLEMENTATION_CLOSURE: tuple[str, ...] = (
     # optional --protection-assessment-store flag is used. Performs no
     # broker call; persists the already-computed assessment unchanged.
     "src/protection_assessment_store.py",
+    # M14 Issue 1: the safety-governance boundary imposed on the existing
+    # commissioning write. Reached because src/robinhood_commissioning_
+    # adapter.py and src/one_share_commissioning_orchestrator.py (both
+    # already pinned above) now import it. Performs no broker call; decides
+    # only whether an already-requested write may proceed.
+    "src/execution_safety_governance.py",
 )
 
 #: Domain separation. A digest of this closure must never collide with a digest

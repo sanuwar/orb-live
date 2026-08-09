@@ -7,6 +7,9 @@ import pytest
 from tests.test_one_share_commissioning_orchestrator import TIME_POLICY
 
 from src.broker_snapshot import account_fingerprint
+from src.execution_safety_governance import (
+    CommissioningGovernanceEvidence, CommissioningMode, OperatorAcknowledgements,
+)
 from src.one_share_commissioning import CommissioningError, State
 from src.one_share_commissioning import CommissioningDiagnosticError
 from src.robinhood_commissioning_session import (
@@ -21,6 +24,17 @@ from src.robinhood_commissioning_session import (
 
 ACCOUNT = "OFFLINE-FIXTURE-ACCOUNT"
 OTHER = "OFFLINE-FIXTURE-OTHER"
+GOVERNANCE_EVIDENCE = CommissioningGovernanceEvidence(
+    commissioning_mode=CommissioningMode.ATTENDED,
+    operator_attended=True,
+    operator_acknowledgements=OperatorAcknowledgements(
+        acknowledges_loss_may_exceed_plan=True, operator_present=True,
+        robinhood_ui_open=True, no_second_trade=True,
+    ),
+    source_hash_verified=True,
+    release_sha="a" * 40,
+    implementation_digest="b" * 64,
+)
 
 
 def account(number=ACCOUNT, **changes):
@@ -109,6 +123,7 @@ def binding(factory, resolver, *, orchestrator_failure=False):
         authorization_provider=lambda stage: None,
         evidence_store=SimpleNamespace(),
         emergency_handoff=lambda payload: None,
+        governance_evidence=GOVERNANCE_EVIDENCE,
         adapter_factory=adapter_factory,
         orchestrator_factory=Orchestrator,
     )

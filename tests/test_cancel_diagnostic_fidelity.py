@@ -64,7 +64,7 @@ class RaisingCancelAdapter(FakeAdapter):
         self.classification = classification
         self.advance_phase = advance_phase
 
-    async def cancel_equity_order(self, arguments):
+    async def cancel_equity_order(self, arguments, *, safety_decision=None):
         self._record("cancel_equity_order")
         self.write_roles.append("cancel")
         if self.advance_phase:
@@ -80,7 +80,7 @@ class RaisingCancelAdapter(FakeAdapter):
 class RejectedCancelAdapter(FakeAdapter):
     """The broker explicitly refused the cancel request."""
 
-    async def cancel_equity_order(self, arguments):
+    async def cancel_equity_order(self, arguments, *, safety_decision=None):
         self._record("cancel_equity_order")
         self.write_roles.append("cancel")
         self.phase = "cancel"

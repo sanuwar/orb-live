@@ -11,6 +11,9 @@ from types import SimpleNamespace
 import pytest
 
 from checkpoint_7c_one_share_commissioning_launcher import RETIRED_LIVE_RUN_IDS
+from src.execution_safety_governance import (
+    CommissioningGovernanceEvidence, CommissioningMode, OperatorAcknowledgements,
+)
 from src.one_share_commissioning import (
     AtomicEvidenceStore,
     EASTERN,
@@ -29,10 +32,24 @@ from src.robinhood_commissioning_adapter import (
     CommissioningPositionRecord,
     RobinhoodCommissioningAdapter,
 )
+from tests.execution_safety_test_support import allow_decision
 from tests.test_live_order_contract import make_place_response
 
 
 NOW = datetime(2026, 7, 29, 10, 40, tzinfo=EASTERN)
+GOVERNANCE_EVIDENCE = CommissioningGovernanceEvidence(
+    commissioning_mode=CommissioningMode.ATTENDED,
+    operator_attended=True,
+    operator_acknowledgements=OperatorAcknowledgements(
+        acknowledges_loss_may_exceed_plan=True, operator_present=True,
+        robinhood_ui_open=True, no_second_trade=True,
+    ),
+    source_hash_verified=True,
+    release_sha="a" * 40,
+    implementation_digest="b" * 64,
+    account_fingerprint_matched=True,
+    account_fingerprint_reference="c" * 64,
+)
 POLICY = CommissioningTimePolicy(
     execution_date=date(2026, 7, 29),
     entry_start=datetime(2026, 7, 29, 10, 35, tzinfo=EASTERN),
@@ -278,7 +295,7 @@ class AmbiguousStopAdapter:
             "type": arguments["type"],
         }
 
-    async def place_equity_order(self, arguments, *, role):
+    async def place_equity_order(self, arguments, *, role, safety_decision=None):
         self._record("place_equity_order")
         self.write_roles.append(role)
         if role == "entry":
@@ -290,7 +307,7 @@ class AmbiguousStopAdapter:
         self.phase = "exit"
         return SimpleNamespace(server_order_id="exit-fixture", state="filled")
 
-    async def cancel_equity_order(self, arguments):
+    async def cancel_equity_order(self, arguments, *, safety_decision=None):
         self._record("cancel_equity_order")
         self.write_roles.append("cancel")
         self.phase = "cancel"
@@ -313,6 +330,7 @@ def make_orchestrator(tmp_path, scenario: str = "pending", *, run_id="stop-run")
         strategy_enabled=False,
         regular_market_hours=True,
         time_policy=POLICY,
+        governance_evidence=GOVERNANCE_EVIDENCE,
     )
     return instance, adapter, clock, handoffs
 
@@ -378,7 +396,10 @@ def test_nested_stop_place_response_preserves_state(state, category):
     )
     adapter = RobinhoodCommissioningAdapter(Session(response), "transient")
     parsed = asyncio.run(
-        adapter.place_equity_order(stop_payload(), role="stop")
+        adapter.place_equity_order(
+            stop_payload(), role="stop",
+            safety_decision=allow_decision(role="stop", arguments=stop_payload()),
+        )
     )
     assert parsed.state == state
     assert (
@@ -398,11 +419,17 @@ def test_stop_ambiguity_subtypes_are_sanitized(response, error, category):
     session = Session(response, error)
     adapter = RobinhoodCommissioningAdapter(session, "transient")
     with pytest.raises(AmbiguousWriteError) as captured:
-        asyncio.run(adapter.place_equity_order(stop_payload(), role="stop"))
+        asyncio.run(adapter.place_equity_order(
+            stop_payload(), role="stop",
+            safety_decision=allow_decision(role="stop", arguments=stop_payload()),
+        ))
     assert captured.value.category == category
     assert session.calls == 1
     with pytest.raises(Exception):
-        asyncio.run(adapter.place_equity_order(stop_payload(), role="stop"))
+        asyncio.run(adapter.place_equity_order(
+            stop_payload(), role="stop",
+            safety_decision=allow_decision(role="stop", arguments=stop_payload()),
+        ))
     assert session.calls == 1
 
 
@@ -425,9 +452,11 @@ def test_ambiguous_stop_is_uniquely_reconciled_without_retry(tmp_path, scenario)
 
 def test_normal_filled_stop_response_reconciles_flat_without_more_writes(tmp_path):
     class NormalFilledStopAdapter(AmbiguousStopAdapter):
-        async def place_equity_order(self, arguments, *, role):
+        async def place_equity_order(self, arguments, *, role, safety_decision=None):
             if role != "stop":
-                return await super().place_equity_order(arguments, role=role)
+                return await super().place_equity_order(
+                    arguments, role=role, safety_decision=safety_decision
+                )
             self._record("place_equity_order")
             self.write_roles.append("stop")
             self.phase = "ambiguous_stop"
@@ -454,6 +483,7 @@ def test_normal_filled_stop_response_reconciles_flat_without_more_writes(tmp_pat
         strategy_enabled=False,
         regular_market_hours=True,
         time_policy=POLICY,
+        governance_evidence=GOVERNANCE_EVIDENCE,
     )
     assert run(instance).state is State.COMPLETE
     assert handoffs == []
