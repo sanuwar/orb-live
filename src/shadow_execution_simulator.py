@@ -115,6 +115,43 @@ def _result_digest(fields: dict[str, Any]) -> str:
     return hashlib.sha256(_DIGEST_DOMAIN + b"\x00result\x00" + canonical_bytes(fields)).hexdigest()
 
 
+def compute_shadow_execution_result_digest(result: ShadowExecutionResult) -> str:
+    """Independently reconstruct an immutable simulation result identity."""
+    if not isinstance(result, ShadowExecutionResult):
+        raise TypeError("result must be a ShadowExecutionResult")
+    fields = {
+        "source_shadow_decision_id": result.source_shadow_decision_id,
+        "symbol": result.symbol,
+        "trading_date": result.trading_date.isoformat(),
+        "strategy_version": result.strategy_version,
+        "implementation_digest": result.implementation_digest,
+        "source_market_data_digest": result.source_market_data_digest,
+        "opening_range_identity": result.opening_range_identity,
+        "signal_timestamp": result.signal_timestamp.isoformat(),
+        "fill_policy_version": result.fill_policy_version,
+        "slippage_policy_version": result.slippage_policy_version,
+        "slippage_assumption_bps": _decimal(result.slippage_assumption_bps),
+        "exit_policy_version": result.exit_policy_version,
+        "input_market_data_digest": result.input_market_data_digest,
+        "state": result.state.value,
+        "entry_timestamp": _timestamp(result.entry_timestamp),
+        "entry_price": _decimal(result.entry_price),
+        "initial_stop_price": _decimal(result.initial_stop_price),
+        "final_stop_price": _decimal(result.final_stop_price),
+        "target_price": _decimal(result.target_price),
+        "exit_timestamp": _timestamp(result.exit_timestamp),
+        "exit_price": _decimal(result.exit_price),
+        "exit_reason": result.exit_reason,
+        "realized_pnl": _decimal(result.realized_pnl),
+        "realized_pnl_percent": _decimal(result.realized_pnl_percent),
+        "maximum_favorable_excursion": _decimal(result.maximum_favorable_excursion),
+        "maximum_adverse_excursion": _decimal(result.maximum_adverse_excursion),
+        "bars_evaluated_after_entry": result.bars_evaluated_after_entry,
+        "reason_code": result.reason_code,
+        "broker_write_count": result.broker_write_count,
+    }
+    return _result_digest(fields)
+
 def _authentic_candidate(decision: ShadowTradingDecision) -> tuple[bool, str]:
     if not decision.is_candidate or decision.decision_type is not ShadowDecisionType.LONG_CANDIDATE:
         return False, "DECISION_NOT_LONG_CANDIDATE"
@@ -314,5 +351,6 @@ def simulate_shadow_execution(decision: ShadowTradingDecision, subsequent_bars: 
 __all__ = [
     "BROKER_WRITE_COUNT", "EXIT_POLICY_VERSION", "FILL_POLICY_VERSION", "SLIPPAGE_ASSUMPTION_BPS",
     "SLIPPAGE_POLICY_VERSION", "ShadowExecutionResult", "ShadowExecutionState",
+    "compute_shadow_execution_result_digest",
     "simulate_shadow_execution",
 ]
