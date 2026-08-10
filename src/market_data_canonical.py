@@ -334,7 +334,11 @@ def validate_market_data_batch(
         return {index: MarketDataQuality.MIXED_PROVIDER_IDENTITY for index in range(len(bars))}
 
     seen_timestamps: dict[datetime, int] = {}
+    previous_timestamp: datetime | None = None
     for index, bar in enumerate(bars):
+        if previous_timestamp is not None and bar.event_timestamp < previous_timestamp:
+            overrides.setdefault(index, MarketDataQuality.OUT_OF_ORDER)
+        previous_timestamp = bar.event_timestamp
         existing_index = seen_timestamps.get(bar.event_timestamp)
         if existing_index is None:
             seen_timestamps[bar.event_timestamp] = index

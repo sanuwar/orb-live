@@ -102,7 +102,7 @@ def test_malformed_price_rejected():
 # ---------------------------------------------------------------------
 
 
-def test_valid_provider_response_returns_sorted_bars():
+def test_valid_provider_response_preserves_order_for_batch_validation():
     second_bar = dict(RAW_BAR, t="2026-08-11T13:31:00Z")
     response = FakeResponse({"bars": [second_bar, RAW_BAR], "symbol": "AAPL", "next_page_token": None})
     provider, client = _provider(response)
@@ -112,7 +112,7 @@ def test_valid_provider_response_returns_sorted_bars():
         end=datetime(2026, 8, 11, 13, 32, tzinfo=timezone.utc),
     ))
     assert len(bars) == 2
-    assert bars[0].event_timestamp < bars[1].event_timestamp
+    assert bars[0].event_timestamp > bars[1].event_timestamp
     assert client.calls[0]["headers"]["APCA-API-KEY-ID"] == "key"
     assert "secret" == client.calls[0]["headers"]["APCA-API-SECRET-KEY"]
 
