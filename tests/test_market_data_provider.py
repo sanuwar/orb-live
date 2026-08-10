@@ -242,3 +242,9 @@ def test_credentials_never_appear_in_provider_error_text():
     except MarketDataProviderError as error:
         assert "secret" not in str(error)
         assert "key" not in str(error).lower()
+
+
+def test_normalize_uses_exchange_local_trading_date_for_late_bar():
+    raw = dict(RAW_BAR, t="2026-08-12T00:30:00Z")  # Aug 11, 20:30 ET
+    bar = normalize_alpaca_bar(raw, symbol="AAPL", receive_timestamp=datetime.now(timezone.utc))
+    assert bar.trading_date.isoformat() == "2026-08-11"

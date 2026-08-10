@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 import copy
 import hashlib
 import json
@@ -202,6 +203,7 @@ def _base_evidence(*, mode: RunMode, symbols: Sequence[str], started_at: datetim
         "provider_diagnostics": {},
         "quality_outcome": "NOT_EVALUATED",
         "quality_rejection_reasons": [],
+        "quality_rejection_counts": {},
         "opening_range_identity": None,
         "strategy_version": None,
         "shadow_trading_decision": None,
@@ -254,6 +256,40 @@ def _smoke_read_window(moment: datetime) -> tuple[datetime, datetime]:
     _, close = regular_session_bounds(selected_day)
     end = datetime.combine(selected_day, close, tzinfo=EASTERN).astimezone(timezone.utc)
     return end - timedelta(minutes=15), end
+
+def _live_candidate_windows(day: date, moment: datetime, *, lookback_days: int) -> tuple[tuple[datetime, datetime], tuple[datetime, datetime]]:
+    """Return two bounded windows covering the exact baseline and live data."""
+    historical = sorted(_previous_trading_dates(day, lookback_days))
+    midpoint = len(historical) // 2
+    older, recent = historical[:midpoint], historical[midpoint:]
+    if not older or not recent:
+        raise LiveShadowError("historical baseline window could not be constructed")
+    def midnight(value: date) -> datetime:
+        return datetime.combine(value, time.min, tzinfo=EASTERN).astimezone(timezone.utc)
+    return ((midnight(older[0]), midnight(older[-1] + timedelta(days=1))), (midnight(recent[0]), moment))
+
+
+def _live_eligible_bars(symbol: str, bars: Sequence[MarketBar], *, now: datetime, current_day: date) -> tuple[list[MarketBar], dict[str, int], list[str]]:
+    """Discard calendar-invalid surplus bars; retain all other failures."""
+    batch = validate_market_data_batch(bars)
+    latest_current = max((bar.event_timestamp for bar in bars if bar.trading_date == current_day), default=None)
+    eligible: list[MarketBar] = []
+    counts: Counter[str] = Counter()
+    fatal: list[str] = []
+    discardable = {MarketDataQuality.OUTSIDE_SESSION, MarketDataQuality.MARKET_HOLIDAY}
+    for index, bar in enumerate(bars):
+        if bar.event_timestamp.astimezone(EASTERN).date() != bar.trading_date:
+            outcome = MarketDataQuality.WRONG_TRADING_DATE
+        else:
+            policy = DEFAULT_FRESHNESS_POLICY if bar.event_timestamp == latest_current else HISTORICAL_FRESHNESS_POLICY
+            outcome = batch.get(index, validate_market_bar(bar, expected_symbol=symbol, expected_trading_date=bar.trading_date, expected_interval_seconds=60, freshness_policy=policy, now=now))
+        if outcome is MarketDataQuality.VALID:
+            eligible.append(bar)
+        else:
+            counts[outcome.value] += 1
+            if outcome not in discardable:
+                fatal.append(outcome.value)
+    return eligible, dict(sorted(counts.items())), fatal
 
 def _fixture_bar(symbol: str, moment: datetime, *, open_price: str, high: str, low: str, close: str, volume: int) -> MarketBar:
     from src.market_data_provider import ALPACA_IEX_SOURCE
@@ -406,12 +442,26 @@ async def run_session(*, mode: RunMode = RunMode.OFFLINE_FIXTURE, candidate_symb
                 if classification.session is not CalendarSession.REGULAR or not classification.is_regular_session:
                     evidence.update(quality_outcome="OUTSIDE_REGULAR_SESSION", no_signal_or_rejection_reason="LIVE_SHADOW_REQUIRES_REGULAR_SESSION")
                 else:
-                    start = datetime.combine(day - timedelta(days=35), time(0), tzinfo=EASTERN).astimezone(timezone.utc)
-                    candidate_bars = await _fetch(provider, symbol=symbol, start=start, end=moment, attempts=limits.max_attempts_per_fetch)
+                    lookback_days = int(load_config()["signal"]["relative_volume_lookback_days"])
+                    historical_window, current_window = _live_candidate_windows(day, moment, lookback_days=lookback_days)
+                    historical_bars = await _fetch(provider, symbol=symbol, start=historical_window[0], end=historical_window[1], attempts=limits.max_attempts_per_fetch)
+                    historical_diagnostics = dict(provider.last_response_diagnostics)
+                    current_bars = await _fetch(provider, symbol=symbol, start=current_window[0], end=current_window[1], attempts=limits.max_attempts_per_fetch)
+                    current_diagnostics = dict(provider.last_response_diagnostics)
                     spy_start = datetime.combine(day, session_open_for(day), tzinfo=EASTERN).astimezone(timezone.utc)
                     spy_bars = await _fetch(provider, symbol="SPY", start=spy_start, end=moment, attempts=limits.max_attempts_per_fetch)
-                    evidence.update(normalized_bar_count=len(candidate_bars) + len(spy_bars), request_count=transport.request_count)
-                    _evaluate(symbol, {symbol: candidate_bars, "SPY": spy_bars}, now=moment, evidence=evidence)
+                    spy_diagnostics = dict(provider.last_response_diagnostics)
+                    candidate_bars = historical_bars + current_bars
+                    candidate_eligible, candidate_counts, candidate_fatal = _live_eligible_bars(symbol, candidate_bars, now=moment, current_day=day)
+                    spy_eligible, spy_counts, spy_fatal = _live_eligible_bars("SPY", spy_bars, now=moment, current_day=day)
+                    counts = Counter(candidate_counts) + Counter(spy_counts)
+                    evidence.update(normalized_bar_count=len(candidate_bars) + len(spy_bars), request_count=transport.request_count, provider_diagnostics={"datasets": [{"symbol": symbol, "requested_start": historical_window[0], "requested_end": historical_window[1], **historical_diagnostics}, {"symbol": symbol, "requested_start": current_window[0], "requested_end": current_window[1], **current_diagnostics}, {"symbol": "SPY", "requested_start": spy_start, "requested_end": moment, **spy_diagnostics}]}, quality_rejection_counts=dict(sorted(counts.items())), quality_rejection_reasons=sorted(counts))
+                    if candidate_fatal or spy_fatal:
+                        evidence.update(quality_outcome=(candidate_fatal + spy_fatal)[0], no_signal_or_rejection_reason="DATA_INVALID")
+                    else:
+                        _evaluate(symbol, {symbol: candidate_eligible, "SPY": spy_eligible}, now=moment, evidence=evidence)
+                        evidence["quality_rejection_counts"] = dict(sorted(counts.items()))
+                        evidence["quality_rejection_reasons"] = sorted(counts)
     except BaseException as error:
         if isinstance(error, (KeyboardInterrupt, asyncio.CancelledError)):
             evidence["errors"].append("RUN_CANCELLED")
