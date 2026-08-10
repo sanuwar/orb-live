@@ -677,11 +677,12 @@ def test_risk_state_gate_not_wired_into_default_commissioning_gates():
     """M14 Issue 2's own conclusion, asserted structurally: activation
     remains deferred because no honest kill-switch/realized-daily-loss
     source exists yet. `DEFAULT_COMMISSIONING_GATES` must still be exactly
-    the seven M14 Issue 1 gates, and the new risk-state gate must not be
-    among them."""
+    the eight gates active as of M14 Issue 7 (the original seven from M14
+    Issue 1 plus the M14 Issue 7 commissioning-suspension gate), and the
+    new risk-state gate must not be among them."""
     from src.execution_safety_governance import DEFAULT_COMMISSIONING_GATES
 
-    assert len(DEFAULT_COMMISSIONING_GATES) == 7
+    assert len(DEFAULT_COMMISSIONING_GATES) == 8
     default_names = {getattr(gate, "__name__", "") for gate in DEFAULT_COMMISSIONING_GATES}
     assert "commissioning_risk_state" not in default_names
     assert not any("risk" in name for name in default_names)
@@ -701,7 +702,7 @@ def test_full_pipeline_allows_when_risk_state_and_all_other_gates_pass():
     )
     assert decision.outcome is ExecutionSafetyOutcome.ALLOW
     assert "commissioning_risk_state" in decision.satisfied_gates
-    assert len(decision.satisfied_gates) == 8
+    assert len(decision.satisfied_gates) == 9
 
 
 def test_full_pipeline_denies_when_risk_state_denies_even_if_all_others_pass():
@@ -722,7 +723,7 @@ def test_full_pipeline_denies_when_risk_state_denies_even_if_all_others_pass():
     # Every other gate is still satisfied -- the risk-state gate is what
     # tips the fold to DENY, and it is additive, never a bypass of the rest.
     assert "commissioning_risk_state" in decision.failed_gates
-    assert len(decision.satisfied_gates) == 7
+    assert len(decision.satisfied_gates) == 8
 
 
 def test_no_broker_write_occurs_when_risk_state_denies_through_full_pipeline():

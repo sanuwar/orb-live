@@ -1150,6 +1150,8 @@ def test_the_old_five_file_contract_is_gone():
     # robinhood_commissioning_adapter.py and
     # one_share_commissioning_orchestrator.py; +8 in M14 Issue 7 for the
     # commissioning suspension gate and the deferred-gates ecosystem it
-    # transitively reaches (never copy a historical count forward -- this
-    # is the current, live closure size).
-    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 36
+    # transitively reaches; +1 in M14 Issue 2 for the commissioning
+    # risk-state gate, reached through that same already-pinned
+    # deferred-gates ecosystem (never copy a historical count forward --
+    # this is the current, live closure size).
+    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 37

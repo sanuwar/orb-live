@@ -135,8 +135,10 @@ def test_audit_uses_existing_contracts_and_expected_digest() -> None:
     # src/commissioning_suspension_identity.py, which reaches src/
     # execution_safety_governance_deferred_gates.py and its three deferred
     # gate factories' own dependencies) -- reachability, not activation.
-    # Never copy a historical value forward -- this asserts the current,
-    # live-recomputed values.
-    assert report["implementation_digest"] == "8c0351559d1f2e5c5e876351ebf483d2ef8d452e8b177299bf1f52b9aded3bc8"
-    assert report["pinned_file_count"] == 36
+    # M14 Issue 2 then added 1 more: src/commissioning_risk_state.py,
+    # reached because execution_safety_governance_deferred_gates.py
+    # (already pinned) deferred-imports it. Never copy a historical value
+    # forward -- this asserts the current, live-recomputed values.
+    assert report["implementation_digest"] == "c761745ee45d99fe688f6890f9d9bfbd2516cd696de4ef64a27b89894919c8e2"
+    assert report["pinned_file_count"] == 37
     assert report["architecture_audit_reference"] == "scripts/architecture_audit.py:audit_repository"
