@@ -39,9 +39,11 @@ from src.signal_engine import LiveData, OpeningData
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVIDENCE_DIR = REPOSITORY_ROOT / "artifacts" / "live-shadow"
-MAX_SYMBOLS = 2
-MAX_REQUESTS = 4
+MAX_CANDIDATE_SYMBOLS = 10
+MAX_SYMBOLS = MAX_CANDIDATE_SYMBOLS
 MAX_ATTEMPTS_PER_FETCH = 2
+MAX_NOMINAL_REQUESTS = 1 + (2 * MAX_CANDIDATE_SYMBOLS)
+MAX_REQUESTS = MAX_NOMINAL_REQUESTS * MAX_ATTEMPTS_PER_FETCH
 HTTP_TIMEOUT_SECONDS = 8.0
 HISTORICAL_FRESHNESS_POLICY = MarketDataFreshnessPolicy("market-data-history-v1", 45 * 86400.0)
 NORMALIZATION_VERSION = "alpaca-market-data-v1"
@@ -185,7 +187,7 @@ def _run_id(mode: RunMode, symbols: Sequence[str], started_at: datetime) -> str:
 def _base_evidence(*, mode: RunMode, symbols: Sequence[str], started_at: datetime, root: Path) -> dict[str, Any]:
     run_id = _run_id(mode, symbols, started_at)
     return {
-        "schema_version": "m15-live-shadow-evidence-v1",
+        "schema_version": "m16-live-shadow-evidence-v1",
         "run_id": run_id,
         "run_mode": mode.value,
         "reviewed_sha": resolve_head_sha(root),
@@ -193,12 +195,18 @@ def _base_evidence(*, mode: RunMode, symbols: Sequence[str], started_at: datetim
         "provider": "alpaca" if mode is not RunMode.OFFLINE_FIXTURE else "fixture-alpaca-shape",
         "feed": "iex",
         "symbols": list(symbols),
+        "watchlist": [symbol for symbol in symbols if symbol != "SPY"],
+        "symbol_results": {},
+        "shared_market_context": None,
+        "candidate_summary": {"evaluated_count": 0, "candidate_count": 0, "rejected_count": 0, "no_signal_count": 0, "data_invalid_count": 0, "data_incomplete_count": 0, "candidate_decisions": []},
+        "request_budget": {},
         "trading_date": started_at.astimezone(EASTERN).date(),
         "session_identity": None,
         "started_at": started_at,
         "completed_at": None,
         "request_count": 0,
         "normalized_bar_count": 0,
+        "accepted_bar_count": 0,
         "market_data_digest": None,
         "provider_diagnostics": {},
         "quality_outcome": "NOT_EVALUATED",
@@ -296,28 +304,48 @@ def _fixture_bar(symbol: str, moment: datetime, *, open_price: str, high: str, l
     return MarketBar(symbol=symbol, exchange_session="REGULAR", trading_date=moment.astimezone(EASTERN).date(), event_timestamp=moment, end_timestamp=moment + timedelta(minutes=1), receive_timestamp=moment + timedelta(seconds=1), open=Decimal(open_price), high=Decimal(high), low=Decimal(low), close=Decimal(close), volume=volume, source=ALPACA_IEX_SOURCE, interval_seconds=60, provider_sequence_id=None, quality=MarketDataQuality.VALID)
 
 
-def deterministic_fixture(now: datetime) -> dict[str, list[MarketBar]]:
+def _watchlist(candidate_symbol: str, candidate_symbols: Sequence[str] | None, *, max_symbols: int) -> tuple[str, ...]:
+    raw = candidate_symbols if candidate_symbols is not None else (candidate_symbol,)
+    values: list[str] = []
+    for item in raw:
+        symbol = str(item).upper().strip()
+        if not symbol:
+            continue
+        if symbol == "SPY":
+            raise LiveShadowError("SPY is shared market context, not a candidate")
+        if symbol not in values:
+            values.append(symbol)
+    if not values:
+        raise LiveShadowError("watchlist must contain at least one candidate symbol")
+    if len(values) > max_symbols:
+        raise LiveShadowError("symbol scope exceeds the bounded limit")
+    return tuple(values)
+
+
+def deterministic_fixture(now: datetime, *, candidate_symbols: Sequence[str] = ("AAPL",)) -> dict[str, list[MarketBar]]:
     now_et = now.astimezone(EASTERN)
     day = now_et.date()
-    candidate = "AAPL"
-    history: list[MarketBar] = []
-    for historical_day in _previous_trading_dates(day, 20):
-        opening = session_open_for(historical_day)
-        for offset in range(5):
-            history.append(_fixture_bar(candidate, datetime.combine(historical_day, opening, tzinfo=EASTERN) + timedelta(minutes=offset), open_price="200", high="201", low="199", close="200", volume=200000))
-    opening = session_open_for(day)
-    current = [
-        _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=0), open_price="203", high="203.5", low="202", close="203", volume=600000),
-        _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=1), open_price="203", high="204", low="202", close="203.5", volume=600000),
-        _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=2), open_price="203.5", high="204", low="202", close="203.8", volume=600000),
-        _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=3), open_price="203.8", high="204", low="202", close="203.9", volume=600000),
-        _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=4), open_price="203.9", high="204", low="202", close="203.7", volume=600000),
-        _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=15), open_price="204", high="205", low="203.8", close="204.1", volume=100000),
-    ]
+    result: dict[str, list[MarketBar]] = {}
+    for candidate in candidate_symbols:
+        history: list[MarketBar] = []
+        for historical_day in _previous_trading_dates(day, 20):
+            opening = session_open_for(historical_day)
+            for offset in range(5):
+                history.append(_fixture_bar(candidate, datetime.combine(historical_day, opening, tzinfo=EASTERN) + timedelta(minutes=offset), open_price="200", high="201", low="199", close="200", volume=200000))
+        opening = session_open_for(day)
+        current = [
+            _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=0), open_price="203", high="203.5", low="202", close="203", volume=600000),
+            _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=1), open_price="203", high="204", low="202", close="203.5", volume=600000),
+            _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=2), open_price="203.5", high="204", low="202", close="203.8", volume=600000),
+            _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=3), open_price="203.8", high="204", low="202", close="203.9", volume=600000),
+            _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=4), open_price="203.9", high="204", low="202", close="203.7", volume=600000),
+            _fixture_bar(candidate, datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=15), open_price="204", high="205", low="203.8", close="204.1", volume=100000),
+        ]
+        result[candidate] = sorted(history, key=lambda bar: bar.event_timestamp) + current
     spy = [_fixture_bar("SPY", datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=offset), open_price="690", high="691", low="689", close="690", volume=100000) for offset in range(5)]
     spy.append(_fixture_bar("SPY", datetime.combine(day, opening, tzinfo=EASTERN) + timedelta(minutes=15), open_price="690", high="692", low="689", close="691", volume=100000))
-    return {candidate: sorted(history, key=lambda bar: bar.event_timestamp) + current, "SPY": spy}
-
+    result["SPY"] = spy
+    return result
 
 def _quality_for(symbol: str, bars: Sequence[MarketBar], *, now: datetime, current_day: date) -> tuple[MarketDataQuality, list[str]]:
     if not bars:
@@ -343,12 +371,12 @@ def _complete_opening_range(bars: Sequence[MarketBar], *, day: date, minutes: in
     return len(actual) == minutes and set(actual) == expected
 
 
-def _evaluate(symbol: str, bars_by_symbol: Mapping[str, Sequence[MarketBar]], *, now: datetime, evidence: dict[str, Any]) -> None:
+def _evaluate(symbol: str, bars_by_symbol: Mapping[str, Sequence[MarketBar]], *, now: datetime, evidence: dict[str, Any], shared_spy_quality: tuple[MarketDataQuality, list[str]] | None = None) -> None:
     day = now.astimezone(EASTERN).date()
     candidate_bars = list(bars_by_symbol[symbol])
     spy_bars = list(bars_by_symbol["SPY"])
     quality, reasons = _quality_for(symbol, candidate_bars, now=now, current_day=day)
-    spy_quality, spy_reasons = _quality_for("SPY", spy_bars, now=now, current_day=day)
+    spy_quality, spy_reasons = shared_spy_quality or _quality_for("SPY", spy_bars, now=now, current_day=day)
     evidence["quality_rejection_reasons"] = reasons + spy_reasons
     if quality is not MarketDataQuality.VALID or spy_quality is not MarketDataQuality.VALID:
         evidence["quality_outcome"] = (quality if quality is not MarketDataQuality.VALID else spy_quality).value
@@ -401,67 +429,145 @@ async def _fetch(provider: AlpacaMarketDataProvider, *, symbol: str, start: date
     raise AssertionError("unreachable")
 
 
-async def run_session(*, mode: RunMode = RunMode.OFFLINE_FIXTURE, candidate_symbol: str = "AAPL", output_dir: Path = DEFAULT_EVIDENCE_DIR, now: datetime | None = None, environment: Mapping[str, str] | None = None, http_client: Any | None = None, limits: SessionLimits = SessionLimits(), production_confirmed: bool = False, root: Path = REPOSITORY_ROOT) -> tuple[dict[str, Any], Path]:
+def _symbol_evidence(session_evidence: Mapping[str, Any], symbol: str) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "run_id": f"{session_evidence['run_id']}-{symbol}",
+        "implementation_digest": session_evidence["implementation_digest"],
+        "normalized_bar_count": 0,
+        "accepted_bar_count": 0,
+        "market_data_digest": None,
+        "provider_diagnostics": {"datasets": []},
+        "quality_outcome": "NOT_EVALUATED",
+        "quality_rejection_reasons": [],
+        "quality_rejection_counts": {},
+        "opening_range_identity": None,
+        "strategy_version": None,
+        "shadow_trading_decision": None,
+        "proposed_entry": None,
+        "proposed_stop": None,
+        "no_signal_or_rejection_reason": None,
+        "errors": [],
+        "evaluation_state": "NOT_EVALUATED",
+    }
+
+
+def _finalize_symbol_result(result: dict[str, Any]) -> None:
+    if result["errors"]:
+        result["evaluation_state"] = "PROVIDER_FAILURE"
+    elif result["quality_outcome"] in {MarketDataQuality.MISSING_OPENING_RANGE_BARS.value, MarketDataQuality.INCOMPLETE_RESPONSE.value}:
+        result["evaluation_state"] = "DATA_INCOMPLETE"
+    elif result["quality_outcome"] != MarketDataQuality.VALID.value:
+        result["evaluation_state"] = "DATA_INVALID"
+    elif result["shadow_trading_decision"] is not None and result["shadow_trading_decision"].is_candidate:
+        result["evaluation_state"] = "VALID_DECISION"
+    elif result["shadow_trading_decision"] is not None and result["shadow_trading_decision"].decision_type.value == "NO_SIGNAL":
+        result["evaluation_state"] = "NO_SIGNAL"
+    else:
+        result["evaluation_state"] = "REJECTED"
+
+
+def _summarize_results(results: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    states = Counter(item["evaluation_state"] for item in results.values())
+    candidates = [item["shadow_trading_decision"] for item in results.values() if item["evaluation_state"] == "VALID_DECISION"]
+    return {
+        "evaluated_count": sum(state in {"VALID_DECISION", "NO_SIGNAL", "REJECTED"} for state in states.elements()),
+        "candidate_count": states["VALID_DECISION"],
+        "rejected_count": states["REJECTED"],
+        "no_signal_count": states["NO_SIGNAL"],
+        "data_invalid_count": states["DATA_INVALID"] + states["PROVIDER_FAILURE"],
+        "data_incomplete_count": states["DATA_INCOMPLETE"],
+        "candidate_decisions": [{"symbol": decision.symbol, "decision_id": decision.decision_id} for decision in candidates],
+    }
+
+
+def _copy_single_result_to_session(evidence: dict[str, Any], result: Mapping[str, Any]) -> None:
+    for field in ("normalized_bar_count", "market_data_digest", "quality_outcome", "quality_rejection_reasons", "quality_rejection_counts", "opening_range_identity", "strategy_version", "shadow_trading_decision", "proposed_entry", "proposed_stop", "no_signal_or_rejection_reason", "errors"):
+        evidence[field] = result[field]
+
+
+async def run_session(*, mode: RunMode = RunMode.OFFLINE_FIXTURE, candidate_symbol: str = "AAPL", candidate_symbols: Sequence[str] | None = None, output_dir: Path = DEFAULT_EVIDENCE_DIR, now: datetime | None = None, environment: Mapping[str, str] | None = None, http_client: Any | None = None, limits: SessionLimits = SessionLimits(), production_confirmed: bool = False, root: Path = REPOSITORY_ROOT) -> tuple[dict[str, Any], Path]:
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    symbol = candidate_symbol.upper().strip()
-    symbols = (symbol,) if mode is RunMode.PRODUCTION_SMOKE_READ else (symbol, "SPY")
-    if not symbol or len(set(symbols)) > limits.max_symbols:
-        raise LiveShadowError("symbol scope exceeds the bounded limit")
-    evidence = _base_evidence(mode=mode, symbols=symbols, started_at=moment, root=root)
+    watchlist = _watchlist(candidate_symbol, candidate_symbols, max_symbols=limits.max_symbols)
+    if mode is RunMode.PRODUCTION_SMOKE_READ and len(watchlist) != 1:
+        raise LiveShadowError("production smoke read permits exactly one candidate symbol")
+    evidence = _base_evidence(mode=mode, symbols=(*watchlist, "SPY") if mode is not RunMode.PRODUCTION_SMOKE_READ else watchlist, started_at=moment, root=root)
+    evidence["watchlist"] = list(watchlist)
+    nominal_request_limit = (1 + (2 * len(watchlist))) if mode is RunMode.LIVE_SHADOW else 1
+    request_attempt_limit = min(limits.max_requests, nominal_request_limit * limits.max_attempts_per_fetch)
+    evidence["request_budget"] = {"shared_requests": 1 if mode is RunMode.LIVE_SHADOW else 0, "requests_per_candidate": 2 if mode is RunMode.LIVE_SHADOW else 0, "nominal_request_limit": nominal_request_limit, "max_http_attempts": request_attempt_limit}
     transport: BudgetedHttpClient | None = None
     try:
+        day = moment.astimezone(EASTERN).date()
         if mode is RunMode.OFFLINE_FIXTURE:
-            bars_by_symbol = deterministic_fixture(moment)
-            fixture_classification = classify(moment, today=moment.astimezone(EASTERN).date())
+            bars_by_symbol = deterministic_fixture(moment, candidate_symbols=watchlist)
+            fixture_classification = classify(moment, today=day)
             evidence["session_identity"] = {"session": fixture_classification.session.value, "reason": fixture_classification.reason.value, "is_regular_session": fixture_classification.is_regular_session}
-            evidence["normalized_bar_count"] = sum(len(items) for items in bars_by_symbol.values())
-            _evaluate(symbol, bars_by_symbol, now=moment, evidence=evidence)
+            spy_bars = bars_by_symbol["SPY"]
+            spy_quality, spy_reasons = _quality_for("SPY", spy_bars, now=moment, current_day=day)
+            evidence["shared_market_context"] = {"symbol": "SPY", "normalized_bar_count": len(spy_bars), "quality_outcome": spy_quality.value, "quality_rejection_reasons": spy_reasons, "market_data_digest": compute_market_data_batch_digest([compute_market_data_digest(bar, normalization_version=NORMALIZATION_VERSION) for bar in spy_bars])}
+            for symbol in watchlist:
+                result = _symbol_evidence(evidence, symbol)
+                result["normalized_bar_count"] = len(bars_by_symbol[symbol])
+                result["accepted_bar_count"] = len(bars_by_symbol[symbol])
+                _evaluate(symbol, {symbol: bars_by_symbol[symbol], "SPY": spy_bars}, now=moment, evidence=result, shared_spy_quality=(spy_quality, spy_reasons))
+                _finalize_symbol_result(result)
+                evidence["symbol_results"][symbol] = result
+            evidence["normalized_bar_count"] = sum(item["normalized_bar_count"] for item in evidence["symbol_results"].values()) + len(spy_bars)
         else:
             if not production_confirmed:
                 raise LiveShadowError("production mode requires explicit confirmation")
-            classification = classify(moment, today=moment.astimezone(EASTERN).date())
+            classification = classify(moment, today=day)
             evidence["session_identity"] = {"session": classification.session.value, "reason": classification.reason.value, "is_regular_session": classification.is_regular_session}
             credentials = _credentials_from_environment(environment if environment is not None else os.environ)
-            transport = BudgetedHttpClient(http_client or UrllibMarketDataHttpClient(timeout_seconds=limits.timeout_seconds), max_requests=limits.max_requests)
+            transport = BudgetedHttpClient(http_client or UrllibMarketDataHttpClient(timeout_seconds=limits.timeout_seconds), max_requests=request_attempt_limit)
             provider = AlpacaMarketDataProvider(credentials=credentials, http_client=transport, now=lambda: moment)
-            day = moment.astimezone(EASTERN).date()
             if mode is RunMode.PRODUCTION_SMOKE_READ:
+                symbol = watchlist[0]
                 smoke_start, smoke_end = _smoke_read_window(moment)
                 bars = await _fetch(provider, symbol=symbol, start=smoke_start, end=smoke_end, attempts=limits.max_attempts_per_fetch)
                 quality, reasons = _quality_for(symbol, bars, now=moment, current_day=day)
-                evidence["provider_diagnostics"] = {
-                    "endpoint_path": f"/v2/stocks/{symbol}/bars",
-                    "requested_symbol": symbol,
-                    "requested_timeframe": "1Min",
-                    "requested_start": smoke_start,
-                    "requested_end": smoke_end,
-                    **provider.last_response_diagnostics,
-                }
+                evidence["provider_diagnostics"] = {"endpoint_path": f"/v2/stocks/{symbol}/bars", "requested_symbol": symbol, "requested_timeframe": "1Min", "requested_start": smoke_start, "requested_end": smoke_end, **provider.last_response_diagnostics}
                 evidence.update(normalized_bar_count=len(bars), request_count=transport.request_count, market_data_digest=compute_market_data_batch_digest([compute_market_data_digest(bar, normalization_version=NORMALIZATION_VERSION) for bar in bars]) if bars else None, quality_outcome=quality.value, quality_rejection_reasons=reasons, no_signal_or_rejection_reason="PRODUCTION_MARKET_DATA_SMOKE_READ")
+            elif classification.session is not CalendarSession.REGULAR or not classification.is_regular_session:
+                evidence.update(quality_outcome="OUTSIDE_REGULAR_SESSION", no_signal_or_rejection_reason="LIVE_SHADOW_REQUIRES_REGULAR_SESSION")
             else:
-                if classification.session is not CalendarSession.REGULAR or not classification.is_regular_session:
-                    evidence.update(quality_outcome="OUTSIDE_REGULAR_SESSION", no_signal_or_rejection_reason="LIVE_SHADOW_REQUIRES_REGULAR_SESSION")
-                else:
-                    lookback_days = int(load_config()["signal"]["relative_volume_lookback_days"])
-                    historical_window, current_window = _live_candidate_windows(day, moment, lookback_days=lookback_days)
-                    historical_bars = await _fetch(provider, symbol=symbol, start=historical_window[0], end=historical_window[1], attempts=limits.max_attempts_per_fetch)
-                    historical_diagnostics = dict(provider.last_response_diagnostics)
-                    current_bars = await _fetch(provider, symbol=symbol, start=current_window[0], end=current_window[1], attempts=limits.max_attempts_per_fetch)
-                    current_diagnostics = dict(provider.last_response_diagnostics)
-                    spy_start = datetime.combine(day, session_open_for(day), tzinfo=EASTERN).astimezone(timezone.utc)
-                    spy_bars = await _fetch(provider, symbol="SPY", start=spy_start, end=moment, attempts=limits.max_attempts_per_fetch)
-                    spy_diagnostics = dict(provider.last_response_diagnostics)
-                    candidate_bars = historical_bars + current_bars
-                    candidate_eligible, candidate_counts, candidate_fatal = _live_eligible_bars(symbol, candidate_bars, now=moment, current_day=day)
-                    spy_eligible, spy_counts, spy_fatal = _live_eligible_bars("SPY", spy_bars, now=moment, current_day=day)
-                    counts = Counter(candidate_counts) + Counter(spy_counts)
-                    evidence.update(normalized_bar_count=len(candidate_bars) + len(spy_bars), request_count=transport.request_count, provider_diagnostics={"datasets": [{"symbol": symbol, "requested_start": historical_window[0], "requested_end": historical_window[1], **historical_diagnostics}, {"symbol": symbol, "requested_start": current_window[0], "requested_end": current_window[1], **current_diagnostics}, {"symbol": "SPY", "requested_start": spy_start, "requested_end": moment, **spy_diagnostics}]}, quality_rejection_counts=dict(sorted(counts.items())), quality_rejection_reasons=sorted(counts))
-                    if candidate_fatal or spy_fatal:
-                        evidence.update(quality_outcome=(candidate_fatal + spy_fatal)[0], no_signal_or_rejection_reason="DATA_INVALID")
-                    else:
-                        _evaluate(symbol, {symbol: candidate_eligible, "SPY": spy_eligible}, now=moment, evidence=evidence)
-                        evidence["quality_rejection_counts"] = dict(sorted(counts.items()))
-                        evidence["quality_rejection_reasons"] = sorted(counts)
+                spy_start = datetime.combine(day, session_open_for(day), tzinfo=EASTERN).astimezone(timezone.utc)
+                spy_bars = await _fetch(provider, symbol="SPY", start=spy_start, end=moment, attempts=limits.max_attempts_per_fetch)
+                spy_diagnostics = dict(provider.last_response_diagnostics)
+                spy_eligible, spy_counts, spy_fatal = _live_eligible_bars("SPY", spy_bars, now=moment, current_day=day)
+                spy_quality, spy_reasons = _quality_for("SPY", spy_eligible, now=moment, current_day=day)
+                if spy_fatal:
+                    spy_quality, spy_reasons = MarketDataQuality(spy_fatal[0]), spy_fatal
+                evidence["shared_market_context"] = {"symbol": "SPY", "normalized_bar_count": len(spy_bars), "accepted_bar_count": len(spy_eligible), "quality_outcome": spy_quality.value, "quality_rejection_reasons": sorted(spy_counts), "quality_rejection_counts": spy_counts, "market_data_digest": compute_market_data_batch_digest([compute_market_data_digest(bar, normalization_version=NORMALIZATION_VERSION) for bar in spy_eligible]) if spy_eligible else None, "provider_diagnostics": {"requested_start": spy_start, "requested_end": moment, **spy_diagnostics}}
+                lookback_days = int(load_config()["signal"]["relative_volume_lookback_days"])
+                historical_window, current_window = _live_candidate_windows(day, moment, lookback_days=lookback_days)
+                for symbol in watchlist:
+                    result = _symbol_evidence(evidence, symbol)
+                    try:
+                        historical_bars = await _fetch(provider, symbol=symbol, start=historical_window[0], end=historical_window[1], attempts=limits.max_attempts_per_fetch)
+                        historical_diagnostics = dict(provider.last_response_diagnostics)
+                        current_bars = await _fetch(provider, symbol=symbol, start=current_window[0], end=current_window[1], attempts=limits.max_attempts_per_fetch)
+                        current_diagnostics = dict(provider.last_response_diagnostics)
+                        candidate_bars = historical_bars + current_bars
+                        candidate_eligible, candidate_counts, candidate_fatal = _live_eligible_bars(symbol, candidate_bars, now=moment, current_day=day)
+                        result.update(normalized_bar_count=len(candidate_bars), accepted_bar_count=len(candidate_eligible), provider_diagnostics={"datasets": [{"requested_start": historical_window[0], "requested_end": historical_window[1], **historical_diagnostics}, {"requested_start": current_window[0], "requested_end": current_window[1], **current_diagnostics}]}, quality_rejection_counts=candidate_counts, quality_rejection_reasons=sorted(candidate_counts))
+                        if candidate_fatal:
+                            result.update(quality_outcome=candidate_fatal[0], no_signal_or_rejection_reason="DATA_INVALID")
+                        else:
+                            _evaluate(symbol, {symbol: candidate_eligible, "SPY": spy_eligible}, now=moment, evidence=result, shared_spy_quality=(spy_quality, spy_reasons))
+                            result["quality_rejection_counts"] = candidate_counts
+                            result["quality_rejection_reasons"] = sorted(candidate_counts)
+                    except BaseException as error:
+                        result["errors"].append(_safe_error(error))
+                        result["no_signal_or_rejection_reason"] = result["errors"][-1]
+                        result["quality_outcome"] = "FAILED_CLOSED"
+                    _finalize_symbol_result(result)
+                    evidence["symbol_results"][symbol] = result
+                evidence["normalized_bar_count"] = len(spy_bars) + sum(item["normalized_bar_count"] for item in evidence["symbol_results"].values())
+        if evidence["symbol_results"]:
+            evidence["candidate_summary"] = _summarize_results(evidence["symbol_results"])
+            _copy_single_result_to_session(evidence, evidence["symbol_results"][watchlist[0]])
     except BaseException as error:
         if isinstance(error, (KeyboardInterrupt, asyncio.CancelledError)):
             evidence["errors"].append("RUN_CANCELLED")
@@ -477,16 +583,16 @@ async def run_session(*, mode: RunMode = RunMode.OFFLINE_FIXTURE, candidate_symb
     evidence["broker_write_count"] = 0
     return evidence, persist_evidence(evidence, output_dir=output_dir)
 
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Bounded read-only Alpaca ORB shadow session")
     parser.add_argument("--mode", choices=[mode.value for mode in RunMode], default=RunMode.OFFLINE_FIXTURE.value)
     parser.add_argument("--symbol", default="AAPL")
+    parser.add_argument("--symbols", help="comma-separated bounded candidate watchlist")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_EVIDENCE_DIR)
     parser.add_argument("--production", action="store_true", help="explicitly permit read-only Alpaca market-data access")
     args = parser.parse_args(argv)
     try:
-        evidence, path = asyncio.run(run_session(mode=RunMode(args.mode), candidate_symbol=args.symbol, output_dir=args.output_dir, production_confirmed=args.production))
+        evidence, path = asyncio.run(run_session(mode=RunMode(args.mode), candidate_symbol=args.symbol, candidate_symbols=tuple(args.symbols.split(",")) if args.symbols is not None else None, output_dir=args.output_dir, production_confirmed=args.production))
     except LiveShadowError:
         return 2
     print(path)
