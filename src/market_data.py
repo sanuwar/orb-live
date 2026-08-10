@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from statistics import median
-from typing import Iterable
+from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
 try:
@@ -181,13 +181,20 @@ def calculate_opening_range(
     *,
     session_date: date,
     opening_range_minutes: int = 5,
+    session_open: time = time(9, 30),
 ) -> OpeningRange:
+    """`session_open` defaults to the regular 9:30 ET open for backward
+    compatibility with every existing caller. M15 callers that need the
+    authoritative session open for a specific date (accounting for
+    holidays/early closes) should pass `src.exchange_calendar.
+    regular_session_bounds(session_date)[0]` explicitly rather than relying
+    on this default."""
     if opening_range_minutes <= 0:
         raise ValueError(
             "Opening-range minutes must be positive."
         )
 
-    opening_start = time(9, 30)
+    opening_start = session_open
     opening_end_datetime = (
         datetime.combine(
             session_date,
@@ -284,7 +291,12 @@ def calculate_median_opening_volume(
     before_date: date,
     lookback_days: int = 20,
     opening_range_minutes: int = 5,
+    session_open_for: Callable[[date], time] | None = None,
 ) -> Decimal:
+    """`session_open_for`, if supplied, is called with each candidate
+    session date to get that date's authoritative open (see
+    `calculate_opening_range`'s own `session_open` parameter); defaults to
+    None, which keeps every existing caller on the fixed 9:30 ET open."""
     if lookback_days <= 0:
         raise ValueError(
             "Lookback days must be positive."
@@ -308,10 +320,15 @@ def calculate_median_opening_volume(
 
     for session_date in available_dates:
         try:
-            opening_range = calculate_opening_range(
-                bars_list,
+            opening_range_kwargs = dict(
                 session_date=session_date,
                 opening_range_minutes=opening_range_minutes,
+            )
+            if session_open_for is not None:
+                opening_range_kwargs["session_open"] = session_open_for(session_date)
+            opening_range = calculate_opening_range(
+                bars_list,
+                **opening_range_kwargs,
             )
         except ValueError:
             continue

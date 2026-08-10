@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -266,3 +266,81 @@ def test_median_volume_requires_complete_lookback():
             before_date=before_date,
             lookback_days=20,
         )
+
+# ---------------------------------------------------------------------
+# M15 Issue 1: session_open / session_open_for threading (calendar-aware
+# opening range, instead of the fixed 9:30 default every existing test
+# above relies on).
+# ---------------------------------------------------------------------
+
+
+def test_calculate_opening_range_accepts_an_explicit_session_open():
+    from src.exchange_calendar import regular_session_bounds
+
+    session_date = date(2026, 8, 11)  # Tuesday
+    calendar_open = regular_session_bounds(session_date)[0]
+    assert calendar_open == time(9, 30)  # documents today's actual value
+
+    bars = [
+        make_bar(
+            session_date=session_date, minute_offset=minute,
+            high="101", low="99", close="100", volume=100,
+        )
+        for minute in range(5)
+    ]
+    default_range = calculate_opening_range(bars, session_date=session_date)
+    explicit_range = calculate_opening_range(
+        bars, session_date=session_date, session_open=calendar_open,
+    )
+    assert default_range == explicit_range
+
+
+def test_calculate_opening_range_with_different_session_open_selects_different_bars():
+    session_date = date(2026, 8, 11)
+    bars = [
+        make_bar(
+            session_date=session_date, minute_offset=minute,
+            high="101", low="99", close="100", volume=100,
+        )
+        for minute in range(10)
+    ]
+    # A later (wrong) session_open should select a later, disjoint window
+    # of real bars -- proving the parameter genuinely changes selection,
+    # not just accepted and ignored.
+    shifted_open = time(9, 35)
+    shifted_range = calculate_opening_range(
+        bars, session_date=session_date, session_open=shifted_open,
+    )
+    default_range = calculate_opening_range(bars, session_date=session_date)
+    assert shifted_range.bar_count == default_range.bar_count == 5
+
+
+def test_calculate_median_opening_volume_accepts_session_open_for():
+    from src.exchange_calendar import regular_session_bounds
+
+    before_date = date(2026, 8, 25)
+    bars = []
+    session_date = before_date
+    for _ in range(30):
+        session_date = session_date - timedelta(days=1)
+        if session_date.weekday() >= 5:
+            continue
+        for minute in range(5):
+            bars.append(
+                make_bar(
+                    session_date=session_date, minute_offset=minute,
+                    high="101", low="99", close="100", volume=100,
+                )
+            )
+
+    def open_for(day: date) -> time:
+        bounds = regular_session_bounds(day)
+        return bounds[0] if bounds is not None else time(9, 30)
+
+    with_calendar = calculate_median_opening_volume(
+        bars, before_date=before_date, lookback_days=15, session_open_for=open_for,
+    )
+    without_calendar = calculate_median_opening_volume(
+        bars, before_date=before_date, lookback_days=15,
+    )
+    assert with_calendar == without_calendar
