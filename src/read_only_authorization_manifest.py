@@ -188,6 +188,13 @@ PINNED_IMPLEMENTATION_CLOSURE: tuple[str, ...] = (
     "src/execution_gates.py",
     "src/operational_monitor.py",
     "src/risk_limits.py",
+    # M14 Issue 2: reached because src/execution_safety_governance_
+    # deferred_gates.py (pinned above via the M14 Issue 7 chain) now
+    # deferred-imports it inside make_commissioning_risk_state_gate.
+    # Reachability, not activation: the commissioning risk-state gate is
+    # not in DEFAULT_COMMISSIONING_GATES -- Issue 2's own conclusion is
+    # that no honest kill-switch/realized-daily-loss source exists yet.
+    "src/commissioning_risk_state.py",
 )
 
 #: Domain separation. A digest of this closure must never collide with a digest

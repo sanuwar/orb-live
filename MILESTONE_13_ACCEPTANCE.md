@@ -52,7 +52,7 @@ provenance.
 ## 6. Final implementation digest
 
 ```
-8c0351559d1f2e5c5e876351ebf483d2ef8d452e8b177299bf1f52b9aded3bc8
+c761745ee45d99fe688f6890f9d9bfbd2516cd696de4ef64a27b89894919c8e2
 ```
 
 Independently reconstructed (separate hashing routine, separate
@@ -79,16 +79,23 @@ controller.py` -> `attestation_authority.py`, `durable_scheduler.py`,
 `execution_gates.py`; plus `operational_monitor.py`; plus `risk_limits.
 py`). This is reachability, not activation: `DEFAULT_COMMISSIONING_GATES`
 gained only the one suspension gate; the risk and operational-health
-factories remain unwired. That moved the digest to the value above.
+factories remain unwired. M14 Issue 2 (commissioning risk-state provider)
+then added one more: `src/commissioning_risk_state.py`, reached because
+`execution_safety_governance_deferred_gates.py` (already pinned via the
+Issue 7 chain) deferred-imports it inside `make_commissioning_risk_state_
+gate` -- again reachability, not activation, since the risk-state gate is
+not in `DEFAULT_COMMISSIONING_GATES` (Issue 2's own conclusion: no honest
+kill-switch/realized-daily-loss source exists yet). That moved the digest
+to the value above.
 
 ## 7. Pinned file count
 
-**36**, independently confirmed: every path exists, no duplicates, all
+**37**, independently confirmed: every path exists, no duplicates, all
 required M13 runtime files present, no test-only tool improperly pinned,
 and the declared closure equals a fresh AST-based execution-closure walk
 from the checkpoint's entry points exactly (0 discovered-but-not-pinned,
-0 pinned-but-not-discovered). (28 through M14 Issue 6; +8 in M14 Issue 7,
-see above.)
+0 pinned-but-not-discovered). (28 through M14 Issue 6; +8 in M14 Issue 7;
++1 in M14 Issue 2, see above.)
 
 ## 8. Route counts
 

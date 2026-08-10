@@ -98,10 +98,10 @@ def test_pinned_implementation_closure_count_matches_live_manifest():
     from src.read_only_authorization_manifest import PINNED_IMPLEMENTATION_CLOSURE
 
     report = verifier.build_report(REPOSITORY_ROOT)
-    # 36 as of M14 Issue 7 (commissioning suspension gate reaches the
-    # deferred-gates ecosystem transitively -- see src/read_only_
+    # 37 as of M14 Issue 2 (commissioning risk-state gate reaches through
+    # the already-pinned deferred-gates ecosystem -- see src/read_only_
     # authorization_manifest.py). Never copy a historical count forward.
-    assert report["pinned_file_count"] == len(PINNED_IMPLEMENTATION_CLOSURE) == 36
+    assert report["pinned_file_count"] == len(PINNED_IMPLEMENTATION_CLOSURE) == 37
     assert "scripts/verify_execution_safety_governance.py" not in PINNED_IMPLEMENTATION_CLOSURE
 
 

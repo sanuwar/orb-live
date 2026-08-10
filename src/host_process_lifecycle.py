@@ -301,11 +301,15 @@ class HostProcessLifecycleContract:
         # controller.py -> attestation_authority.py, durable_scheduler.py,
         # execution_gates.py; plus operational_monitor.py; plus
         # risk_limits.py) -- reachability, not activation: only the
-        # suspension gate is in DEFAULT_COMMISSIONING_GATES. This is a
-        # deliberate manual re-pin gate, not a live comparison: a
-        # closure-size change must be consciously reviewed and this
-        # literal bumped, exactly as it was here.
-        if len(PINNED_IMPLEMENTATION_CLOSURE) != 36:
+        # suspension gate is in DEFAULT_COMMISSIONING_GATES; +1 in M14
+        # Issue 2 for src/commissioning_risk_state.py, reached because
+        # execution_safety_governance_deferred_gates.py (already pinned)
+        # deferred-imports it inside make_commissioning_risk_state_gate --
+        # again reachability, not activation: the risk-state gate remains
+        # unwired. This is a deliberate manual re-pin gate, not a live
+        # comparison: a closure-size change must be consciously reviewed
+        # and this literal bumped, exactly as it was here.
+        if len(PINNED_IMPLEMENTATION_CLOSURE) != 37:
             raise LifecycleIdentityError("pinned implementation closure is invalid")
 
     def to_dict(self) -> dict[str, object]:
