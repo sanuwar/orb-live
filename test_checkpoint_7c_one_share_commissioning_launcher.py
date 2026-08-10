@@ -152,6 +152,7 @@ def launcher_kwargs(tmp_path):
         commissioned_account_number="transient",
         run_id="fake-run",
         evidence_root=tmp_path,
+        suspension_database_path=tmp_path / "commissioning_suspension.sqlite3",
         monotonic=lambda: 0.0,
         sleep=lambda seconds: None,
         now_eastern=lambda: NOW,
@@ -167,7 +168,7 @@ def test_launcher_fake_session_mode_creates_one_adapter_and_orchestrator(
 ):
     created = {"adapter": 0, "orchestrator": 0}
 
-    def fake_adapter(session, account):
+    def fake_adapter(session, account, **kwargs):
         created["adapter"] += 1
         return SimpleNamespace(commissioned_account_number=account)
 
@@ -199,7 +200,7 @@ def test_fake_session_mode_never_creates_real_client(tmp_path, monkeypatch):
     monkeypatch.setattr(
         launcher,
         "RobinhoodCommissioningAdapter",
-        lambda session, account: SimpleNamespace(commissioned_account_number=account),
+        lambda session, account, **kwargs: SimpleNamespace(commissioned_account_number=account),
     )
 
     class FakeOrchestrator:

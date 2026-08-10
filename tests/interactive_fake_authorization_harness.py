@@ -128,6 +128,7 @@ async def run_case(case: str, root: Path, run_id: str) -> int:
             strategy_enabled=False, regular_market_hours=True,
             time_policy=TIME_POLICY,
             governance_evidence=DEFAULT_GOVERNANCE_EVIDENCE,
+            assess_commissioning_suspension=lambda: "CLEAR",
         )
         result = await orchestrator.run()
     evidence_path = (

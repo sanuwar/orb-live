@@ -25,6 +25,10 @@ from src.canonical_source_hash import (
     CanonicalSourceHashError,
     canonical_source_sha256,
 )
+from src.commissioning_suspension_identity import (
+    CommissioningSuspensionIdentity,
+    CommissioningSuspensionStateProvider,
+)
 from src.config import load_config
 from src.execution_safety_governance import (
     CommissioningGovernanceEvidence,
@@ -76,11 +80,11 @@ REVIEWED_HASHES: Mapping[str, str] = {
     "src/one_share_commissioning.py":
         "c26500ade1881108f21ceb38e5223bad7650f4e394623bf4256def90c9fd814d",
     "src/robinhood_commissioning_adapter.py":
-        "f9a39398d81c53e7b3ecb5ac324cd6b9dcffe67361047161d13ab60d57c48458",
+        "c416084ff942f574c8eb2797bcd2dc0d40413e450f29ef51ed935918e4a8df90",
     "src/one_share_commissioning_orchestrator.py":
-        "8574fa1b309133a4aa08bdbeba6f1287da14ec4b9b6cd2d27d2f432df782e9ba",
+        "3e80525c27e2d15b52d35c433452eb28abc8b87a2787e8641892fa2dd9b2c22c",
     "src/robinhood_commissioning_session.py":
-        "d33e925107a81139083eba9c127f8fc8251b3e2dc7ae7071a52d74c74371ee75",
+        "63df511032efb327d681458b0739eabefb3b0e162ce13799eacb6cb7b2fa41db",
     "src/robinhood_client.py":
         "8e00f808dda3e8741a2fccc6ae5edb42deb4a3761af5eae39304c601cfa1f39e",
 }
@@ -374,6 +378,7 @@ async def execute_commissioning(
     commissioned_account_number: str,
     run_id: str,
     evidence_root: Path,
+    suspension_database_path: Path,
     monotonic: Any,
     sleep: Any,
     now_eastern: Any,
@@ -404,7 +409,13 @@ async def execute_commissioning(
             "current Eastern time is outside regular market hours"
         )
     store = AtomicEvidenceStore(evidence_root, run_id)
-    adapter = RobinhoodCommissioningAdapter(session, commissioned_account_number)
+    # M14 Issue 6: the adapter independently re-checks decision freshness at
+    # the actual write boundary. Threading the SAME now_eastern the
+    # orchestrator uses (rather than each defaulting to its own real-clock
+    # read) keeps both freshness checks evaluated against one clock source.
+    adapter = RobinhoodCommissioningAdapter(
+        session, commissioned_account_number, now_eastern=now_eastern,
+    )
     # verify_runtime_posture(root) above already required every REVIEWED_HASHES
     # entry to match; this is an explicitly fake/offline demonstration run, so
     # attended acknowledgements are asserted true by construction rather than
@@ -426,21 +437,40 @@ async def execute_commissioning(
             commissioned_account_number.encode("utf-8")
         ).hexdigest(),
     )
-    orchestrator = OneShareCommissioningOrchestrator(
-        run_id=run_id,
-        adapter=adapter,
-        monotonic=monotonic,
-        sleep=sleep,
-        now_eastern=now_eastern,
-        authorization_provider=authorization_provider,
-        evidence_store=store,
-        emergency_handoff=emergency_handoff,
-        strategy_enabled=strategy_enabled,
-        regular_market_hours=True,
-        time_policy=time_policy,
-        governance_evidence=governance_evidence,
+    # M14 Issue 7: the suspension gate's identity is derived from exactly
+    # the release_sha/account_fingerprint_reference already recorded above
+    # -- never a second, independently-chosen identity. assess() only:
+    # this launcher never calls ensure_registered()/register(), so an
+    # identity this store has never seen (a fresh release, a fresh
+    # database) fails closed rather than being auto-initialized to CLEAR.
+    suspension_provider = CommissioningSuspensionStateProvider(
+        database_path=suspension_database_path,
+        identity=CommissioningSuspensionIdentity.derive(
+            release_sha=governance_evidence.release_sha,
+            account_fingerprint_reference=governance_evidence.account_fingerprint_reference,
+        ),
     )
-    result = await orchestrator.run()
+    try:
+        orchestrator = OneShareCommissioningOrchestrator(
+            run_id=run_id,
+            adapter=adapter,
+            monotonic=monotonic,
+            sleep=sleep,
+            now_eastern=now_eastern,
+            authorization_provider=authorization_provider,
+            evidence_store=store,
+            emergency_handoff=emergency_handoff,
+            strategy_enabled=strategy_enabled,
+            regular_market_hours=True,
+            time_policy=time_policy,
+            governance_evidence=governance_evidence,
+            assess_commissioning_suspension=(
+                lambda: suspension_provider.assess().state.value
+            ),
+        )
+        result = await orchestrator.run()
+    finally:
+        suspension_provider.close()
     print(f"commissioning_state={result.state.value}")
     print("planned_risk_usd=15; actual loss may exceed planned risk")
     return result
@@ -459,6 +489,7 @@ async def execute_real_session(
     binding_factory: Callable[..., Any] = RobinhoodCommissioningSessionBinding,
     monotonic: Callable[[], float] = runtime_time.monotonic,
     sleep: Callable[[float], Any] = asyncio.sleep,
+    suspension_database_path: Path | None = None,
 ) -> OrchestrationResult:
     """Run one reviewed binding after every non-broker gate passes."""
 
@@ -473,6 +504,15 @@ async def execute_real_session(
     )
     handoff = emergency_handoff or sanitized_emergency_handoff
     resolver = commissioned_account_resolver or CommissionedAccountResolver()
+    # M14 Issue 7: never inside repository data/ -- request.evidence_root is
+    # already an operator-designated, non-repository evidence directory for
+    # this exact run; co-locating the suspension store there rather than
+    # hardcoding a repository-relative path keeps it out of data/ the same
+    # way evidence_root itself already is.
+    suspension_db_path = (
+        suspension_database_path
+        or request.evidence_root / "commissioning_suspension.sqlite3"
+    )
     # verify_runtime_posture(root) above already required every REVIEWED_HASHES
     # entry to match and required main to be synchronized with origin/main;
     # validate_live_run_request(request, ...) above already required all four
@@ -509,6 +549,7 @@ async def execute_real_session(
         evidence_store=store,
         emergency_handoff=handoff,
         governance_evidence=governance_evidence,
+        suspension_database_path=suspension_db_path,
     )
     result = await binding.run()
     print(f"commissioning_state={result.state.value}")

@@ -11,6 +11,7 @@ broker/session object, and never as part of the active commissioning policy.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -20,6 +21,7 @@ import pytest
 from src.execution_safety_governance import (
     ACTION_FOR_ROLE,
     AUTHORITY_CEILING,
+    POLICY_VERSION,
     CommissioningGovernanceEvidence,
     CommissioningMode,
     ExecutionAction,
@@ -29,9 +31,11 @@ from src.execution_safety_governance import (
     GateOutcome,
     GateResult,
     OperatorAcknowledgements,
+    compute_decision_digest,
     decision_binds_write,
     decision_is_fresh,
     evaluate_execution_safety,
+    validate_execution_safety_decision,
 )
 from src.execution_safety_governance_deferred_gates import (
     make_commissioning_risk_state_gate,
@@ -66,6 +70,7 @@ def valid_evidence(**overrides) -> CommissioningGovernanceEvidence:
         implementation_digest="b" * 64,
         account_fingerprint_matched=True,
         account_fingerprint_reference="c" * 64,
+        suspension_state="CLEAR",
     )
     base.update(overrides)
     return CommissioningGovernanceEvidence(**base)
@@ -117,7 +122,7 @@ def test_all_required_gates_pass_allows():
     assert decision.allow is True
     assert decision.failed_gates == ()
     assert decision.reason_codes == ()
-    assert len(decision.satisfied_gates) == 7
+    assert len(decision.satisfied_gates) == 8
 
 
 def test_missing_context_denies():
@@ -319,6 +324,124 @@ def test_unknown_calendar_state_denies():
     decision = evaluate_execution_safety(entry_context(decision_time=out_of_range))
     assert decision.outcome is ExecutionSafetyOutcome.DENY
     assert "DENY_CALENDAR_DATE_OUTSIDE_SUPPORTED_RANGE" in decision.reason_codes
+
+
+# ---------------------------------------------------------------------
+# M14 ISSUE 7: COMMISSIONING SUSPENSION GATE
+# ---------------------------------------------------------------------
+
+
+def test_suspension_clear_allows():
+    decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="CLEAR"))
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.ALLOW
+    assert "commissioning_suspension_clear" in decision.satisfied_gates
+
+
+@pytest.mark.parametrize("state,expected_reason", [
+    ("SUSPENDED", "DENY_SUSPENSION_SUSPENDED"),
+    ("CLEARANCE_PENDING_REVIEW", "DENY_SUSPENSION_CLEARANCE_PENDING_REVIEW"),
+    ("PERMANENT_HALT", "DENY_SUSPENSION_PERMANENT_HALT"),
+    ("MALFORMED_STATE", "DENY_SUSPENSION_MALFORMED_STATE"),
+    ("READ_FAILED", "DENY_SUSPENSION_READ_FAILED"),
+    ("NOT_EVALUATED", "DENY_SUSPENSION_NOT_EVALUATED"),
+    ("SOMETHING_UNRECOGNIZED", "DENY_SUSPENSION_SOMETHING_UNRECOGNIZED"),
+])
+def test_suspension_non_clear_states_deny(state, expected_reason):
+    decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state=state))
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.DENY
+    assert expected_reason in decision.reason_codes
+
+
+def test_suspension_state_missing_from_evidence_denies_by_default():
+    """A caller that constructs CommissioningGovernanceEvidence without
+    explicitly supplying suspension_state gets the NOT_EVALUATED sentinel,
+    which never satisfies the gate -- absence of the fact must not become
+    permission."""
+    evidence = valid_evidence()
+    overrides = {k: v for k, v in vars(evidence).items() if k != "suspension_state"}
+    bare_evidence = CommissioningGovernanceEvidence(**overrides)
+    assert bare_evidence.suspension_state == "NOT_EVALUATED"
+    decision = evaluate_execution_safety(entry_context(evidence=bare_evidence))
+    assert decision.outcome is ExecutionSafetyOutcome.DENY
+    assert "DENY_SUSPENSION_NOT_EVALUATED" in decision.reason_codes
+
+
+def test_suspension_result_changes_decision_digest():
+    """M14 Issue 7 requirement: the suspension gate's result is bound into
+    the decision digest -- it is not a side channel outside authenticity.
+    Since a CLEAR vs SUSPENDED context produces different outcomes (ALLOW
+    vs DENY) this is somewhat implied already, but confirms the digest
+    genuinely differs and is not, say, computed before gates run."""
+    clear_decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="CLEAR"))
+    )
+    suspended_decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="SUSPENDED"))
+    )
+    assert clear_decision.decision_digest != suspended_decision.decision_digest
+    assert clear_decision.outcome is ExecutionSafetyOutcome.ALLOW
+    assert suspended_decision.outcome is ExecutionSafetyOutcome.DENY
+
+
+def test_mutating_suspension_gate_result_invalidates_decision_authenticity():
+    """Closes the same class of gap M14 Issue 6 closed for bound_* fields:
+    a decision computed with a DENY suspension result, then hand-mutated
+    (failed_gates/reason_codes cleared) to look like a clean ALLOW, must
+    fail validate_execution_safety_decision's digest self-consistency
+    check -- the mutation is not reflected in the stored digest."""
+    denied = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="SUSPENDED"))
+    )
+    assert denied.outcome is ExecutionSafetyOutcome.DENY
+    forged_allow = dataclasses.replace(
+        denied, outcome=ExecutionSafetyOutcome.ALLOW,
+        satisfied_gates=denied.satisfied_gates + ("commissioning_suspension_clear",),
+        failed_gates=(), reason_codes=(),
+    )
+    result = validate_execution_safety_decision(
+        forged_allow, role="entry", arguments=ENTRY_PAYLOAD,
+        now=denied.evaluated_at,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_DECISION_DIGEST_MISMATCH"
+
+
+def test_stop_and_cancel_contexts_also_require_suspension_clear():
+    """gate_commissioning_suspension_clear does not inspect role/action at
+    all -- it is unconditionally part of DEFAULT_COMMISSIONING_GATES, so
+    entry, stop, and cancel are gated identically by construction. This is
+    a deliberate, conservative choice: durable_suspension_controller.py's
+    own module docstring states suspension dominates every other condition
+    and none of them is even consulted while one is active; carving out a
+    risk-reducing-action exemption for cancel would be inventing a policy
+    this repository does not already state, so none was added."""
+    for context_factory, role in ((stop_context, "stop"), (cancel_context, "cancel")):
+        allowed = evaluate_execution_safety(context_factory())
+        assert allowed.outcome is ExecutionSafetyOutcome.ALLOW, role
+
+        suspended = evaluate_execution_safety(
+            context_factory(evidence=valid_evidence(suspension_state="SUSPENDED"))
+        )
+        assert suspended.outcome is ExecutionSafetyOutcome.DENY, role
+        assert "DENY_SUSPENSION_SUSPENDED" in suspended.reason_codes, role
+
+
+def test_suspended_decision_cannot_reach_adapter_write():
+    session = _RecordingSession(_place_response())
+    adapter = RobinhoodCommissioningAdapter(session, "transient")
+    decision = evaluate_execution_safety(
+        entry_context(evidence=valid_evidence(suspension_state="SUSPENDED"))
+    )
+    assert decision.outcome is ExecutionSafetyOutcome.DENY
+    with pytest.raises(ExecutionSafetyDeniedError):
+        asyncio.run(adapter.place_equity_order(
+            ENTRY_PAYLOAD, role="entry", safety_decision=decision,
+        ))
+    assert session.calls == 0
 
 
 # ---------------------------------------------------------------------
@@ -884,6 +1007,248 @@ def test_existing_attended_commissioning_gates_still_enforced_at_adapter():
             bad_payload, role="entry", safety_decision=decision
         ))
     assert session.calls == 0
+
+
+# ---------------------------------------------------------------------
+# M14 ISSUE 6: WRITE-BOUNDARY DECISION AUTHENTICITY
+#
+# The adapter write boundary now independently re-validates a presented
+# decision (validate_execution_safety_decision), rather than trusting only
+# outcome + decision_binds_write. These tests exercise that consolidated
+# check directly, plus the two most safety-critical properties end-to-end
+# through the real adapter: a forged decision and a stale decision no
+# longer reach a broker call even when decision_binds_write alone would
+# have let them through.
+# ---------------------------------------------------------------------
+
+
+def _authentic_decision(
+    *, role: str, arguments: dict, outcome: ExecutionSafetyOutcome = ExecutionSafetyOutcome.ALLOW,
+    evaluated_at: datetime, action_identity: str = "authentic-action",
+    satisfied_gates: tuple = (), failed_gates: tuple = (), reason_codes: tuple = (),
+    policy_version: str = POLICY_VERSION, authority_ceiling: str = AUTHORITY_CEILING,
+) -> ExecutionSafetyDecision:
+    """Builds a decision whose decision_digest/decision_id are ACTUALLY
+    recomputed from its own fields via compute_decision_digest -- unlike
+    allow_decision/deny_decision (fixed role/arguments), this lets tests
+    below construct an authentic baseline and then mutate exactly one field
+    to prove validate_execution_safety_decision catches it."""
+    bound = dict(
+        bound_role=role,
+        bound_symbol=arguments.get("symbol", ""),
+        bound_side=arguments.get("side", ""),
+        bound_order_type=arguments.get("type", ""),
+        bound_quantity=arguments.get("quantity", ""),
+        bound_stop_price=arguments.get("stop_price"),
+        bound_order_id=arguments.get("order_id"),
+    )
+    digest = compute_decision_digest(
+        policy_version=policy_version, action_identity=action_identity, outcome=outcome,
+        satisfied=satisfied_gates, failed=failed_gates, reasons=reason_codes,
+        authority_ceiling=authority_ceiling, **bound,
+    )
+    return ExecutionSafetyDecision(
+        decision_id=digest, policy_version=policy_version, action_identity=action_identity,
+        outcome=outcome, satisfied_gates=satisfied_gates, failed_gates=failed_gates,
+        reason_codes=reason_codes, decision_digest=digest, evaluated_at=evaluated_at,
+        authority_ceiling=authority_ceiling, **bound,
+    )
+
+
+def test_authentic_baseline_decision_validates():
+    now = datetime.now(timezone.utc)
+    decision = _authentic_decision(role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=now)
+    result = validate_execution_safety_decision(
+        decision, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    )
+    assert result.valid
+    assert result.reason_code == "OK"
+
+
+def test_validate_rejects_non_decision_input():
+    now = datetime.now(timezone.utc)
+    assert not validate_execution_safety_decision(
+        None, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    ).valid
+    assert not validate_execution_safety_decision(
+        "not-a-decision", role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    ).valid
+
+
+def test_validate_rejects_deny_outcome():
+    now = datetime.now(timezone.utc)
+    decision = _authentic_decision(
+        role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=now,
+        outcome=ExecutionSafetyOutcome.DENY,
+    )
+    result = validate_execution_safety_decision(
+        decision, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_DENIED"
+
+
+def test_validate_rejects_wrong_policy_version():
+    now = datetime.now(timezone.utc)
+    decision = _authentic_decision(
+        role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=now, policy_version="not-real",
+    )
+    result = validate_execution_safety_decision(
+        decision, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_POLICY_VERSION_MISMATCH"
+
+
+def test_validate_rejects_wrong_authority_ceiling():
+    now = datetime.now(timezone.utc)
+    decision = _authentic_decision(
+        role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=now, authority_ceiling="not-real",
+    )
+    result = validate_execution_safety_decision(
+        decision, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_AUTHORITY_CEILING_MISMATCH"
+
+
+def test_validate_rejects_empty_and_malformed_digest():
+    now = datetime.now(timezone.utc)
+    baseline = _authentic_decision(role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=now)
+
+    empty_digest = dataclasses.replace(baseline, decision_digest="")
+    result = validate_execution_safety_decision(
+        empty_digest, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_DECISION_DIGEST_MALFORMED"
+
+    wrong_digest = dataclasses.replace(baseline, decision_digest="0" * 64)
+    result = validate_execution_safety_decision(
+        wrong_digest, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_DECISION_DIGEST_MISMATCH"
+
+
+@pytest.mark.parametrize("field_name,override", [
+    ("bound_role", {"bound_role": "stop"}),
+    ("bound_symbol", {"bound_symbol": "MSFT"}),
+    ("bound_side", {"bound_side": "sell"}),
+    ("bound_order_type", {"bound_order_type": "limit"}),
+    ("bound_quantity", {"bound_quantity": "999"}),
+    ("bound_stop_price", {"bound_stop_price": "185.00"}),
+    ("satisfied_gates", {"satisfied_gates": ("mutated_gate",)}),
+    ("reason_codes", {"reason_codes": ("MUTATED_REASON",)}),
+])
+def test_mutating_any_digest_bound_field_invalidates_decision(field_name, override):
+    """Closes the M14 Issue 4 tamper_digest_binding_mismatch finding: mutating
+    a bound_*/gate/reason field after construction, without recomputing the
+    digest, must now fail validation -- it must NOT silently keep validating
+    just because decision_binds_write alone would still match the mutated
+    value against correspondingly-mutated arguments."""
+    now = datetime.now(timezone.utc)
+    baseline = _authentic_decision(role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=now)
+    mutated = dataclasses.replace(baseline, **override)
+    result = validate_execution_safety_decision(
+        mutated, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    )
+    assert not result.valid, f"mutating {field_name} should have invalidated the decision"
+    assert result.reason_code == "EXECUTION_SAFETY_DECISION_DIGEST_MISMATCH"
+
+
+def test_mutating_bound_order_id_invalidates_cancel_decision():
+    now = datetime.now(timezone.utc)
+    cancel_args = {"order_id": "order-1"}
+    baseline = _authentic_decision(role="cancel", arguments=cancel_args, evaluated_at=now)
+    mutated = dataclasses.replace(baseline, bound_order_id="order-999")
+    result = validate_execution_safety_decision(
+        mutated, role="cancel", arguments={"order_id": "order-999"}, now=now,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_DECISION_DIGEST_MISMATCH"
+
+
+def test_validate_rejects_decision_presented_against_non_matching_write():
+    now = datetime.now(timezone.utc)
+    decision = _authentic_decision(role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=now)
+    mismatched_arguments = dict(ENTRY_PAYLOAD, quantity="2")
+    result = validate_execution_safety_decision(
+        decision, role="entry", arguments=mismatched_arguments, now=now,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_ACTION_MISMATCH"
+
+
+def test_validate_rejects_stale_decision():
+    now = datetime.now(timezone.utc)
+    decision = _authentic_decision(
+        role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=now - timedelta(hours=6),
+    )
+    result = validate_execution_safety_decision(
+        decision, role="entry", arguments=ENTRY_PAYLOAD, now=now,
+    )
+    assert not result.valid
+    assert result.reason_code == "EXECUTION_SAFETY_DECISION_STALE"
+
+
+def test_forged_decision_rejected_at_real_adapter_boundary():
+    """End-to-end: a hand-forged decision (bogus authority_ceiling, never-
+    recomputed digest) that correctly binds to the write arguments must
+    still be refused by the real adapter, not merely by validate_execution_
+    safety_decision in isolation."""
+    session = _RecordingSession(_place_response())
+    adapter = RobinhoodCommissioningAdapter(session, "transient")
+    forged = ExecutionSafetyDecision(
+        decision_id="forged", policy_version="forged-policy",
+        action_identity="forged-identity", outcome=ExecutionSafetyOutcome.ALLOW,
+        satisfied_gates=(), failed_gates=(), reason_codes=(),
+        decision_digest="forged-digest-never-recomputed",
+        evaluated_at=datetime.now(timezone.utc), authority_ceiling="FORGED_AUTHORITY",
+        bound_role="entry", bound_symbol="AAPL", bound_side="buy",
+        bound_order_type="market", bound_quantity="1", bound_stop_price=None,
+        bound_order_id=None,
+    )
+    with pytest.raises(ExecutionSafetyDeniedError):
+        asyncio.run(adapter.place_equity_order(
+            ENTRY_PAYLOAD, role="entry", safety_decision=forged,
+        ))
+    assert session.calls == 0
+
+
+def test_stale_decision_rejected_at_real_adapter_boundary_bypassing_orchestrator():
+    """End-to-end: a correctly-bound, authentic-otherwise ALLOW decision that
+    is simply too old is refused directly by the adapter, even when called
+    without going through OneShareCommissioningOrchestrator (which is the
+    only caller that used to check decision_is_fresh)."""
+    session = _RecordingSession(_place_response())
+    adapter = RobinhoodCommissioningAdapter(session, "transient")
+    stale = _authentic_decision(
+        role="entry", arguments=ENTRY_PAYLOAD,
+        evaluated_at=datetime.now(timezone.utc) - timedelta(hours=6),
+    )
+    with pytest.raises(ExecutionSafetyDeniedError) as caught:
+        asyncio.run(adapter.place_equity_order(
+            ENTRY_PAYLOAD, role="entry", safety_decision=stale,
+        ))
+    assert str(caught.value) == "EXECUTION_SAFETY_DECISION_STALE"
+    assert session.calls == 0
+
+
+def test_adapter_now_eastern_is_injectable_and_used_for_freshness():
+    """The adapter's freshness clock is independently overridable (not only
+    real wall-clock), so a decision evaluated against a fixed injected 'now'
+    is fresh relative to THAT clock, not the real one."""
+    session = _RecordingSession(_place_response())
+    fixed_now = datetime(2026, 8, 11, 10, 0, tzinfo=timezone.utc)
+    adapter = RobinhoodCommissioningAdapter(
+        session, "transient", now_eastern=lambda: fixed_now,
+    )
+    decision = _authentic_decision(role="entry", arguments=ENTRY_PAYLOAD, evaluated_at=fixed_now)
+    asyncio.run(adapter.place_equity_order(
+        ENTRY_PAYLOAD, role="entry", safety_decision=decision,
+    ))
+    assert session.calls == 1
 
 
 # ---------------------------------------------------------------------

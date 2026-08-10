@@ -130,12 +130,13 @@ def test_no_runtime_module_is_modified_and_checklist_cannot_change_state() -> No
 
 def test_audit_uses_existing_contracts_and_expected_digest() -> None:
     report = audit.audit_deployment_readiness()
-    # M14 Issue 1 added src/execution_safety_governance.py to
-    # PINNED_IMPLEMENTATION_CLOSURE (reached from
-    # robinhood_commissioning_adapter.py and
-    # one_share_commissioning_orchestrator.py), which moved the digest.
+    # M14 Issue 7 added 8 newly-reachable files to the pinned closure
+    # (src/robinhood_commissioning_session.py, already pinned, now imports
+    # src/commissioning_suspension_identity.py, which reaches src/
+    # execution_safety_governance_deferred_gates.py and its three deferred
+    # gate factories' own dependencies) -- reachability, not activation.
     # Never copy a historical value forward -- this asserts the current,
     # live-recomputed values.
-    assert report["implementation_digest"] == "a4c579faeafdd97415af6cee4b42ad8c4ceafb0fa082b92672cd4871f6f77f40"
-    assert report["pinned_file_count"] == 28
+    assert report["implementation_digest"] == "8c0351559d1f2e5c5e876351ebf483d2ef8d452e8b177299bf1f52b9aded3bc8"
+    assert report["pinned_file_count"] == 36
     assert report["architecture_audit_reference"] == "scripts/architecture_audit.py:audit_repository"

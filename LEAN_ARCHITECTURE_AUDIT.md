@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 62429
-- Test LOC: 55986
+- Production LOC: 65134
+- Test LOC: 57293
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -13,7 +13,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
 ## Prioritized findings
 
 1. **NEEDS_RUNTIME_EVIDENCE / MEDIUM -- Repeated constrained-value validators**
-   Evidence: 77 repeated helper placements across identifier_validation=13, path_validation=7, permission_validation=2, serialization=48, timestamp_validation=12
+   Evidence: 78 repeated helper placements across identifier_validation=13, path_validation=7, permission_validation=2, serialization=49, timestamp_validation=12
    Interpretation: Exact normalized bodies shared across modules: 0. Similar names alone do not establish contract equivalence.
    Estimated removable LOC: production 0, tests 0
 
@@ -48,17 +48,17 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 8. **NEEDS_RUNTIME_EVIDENCE / LOW -- Serialization allowlists repeat exact-key mechanics**
-   Evidence: serialization helpers appear in 48 modules.
+   Evidence: serialization helpers appear in 49 modules.
    Interpretation: A shared primitive may reduce boilerplate, but field privacy and error contracts require equivalence evidence.
    Estimated removable LOC: production 0, tests 0
 
 9. **NO_ACTION / HIGH -- Large modules concentrate durable invariants**
-   Evidence: largest production modules: src/trade_state.py (6006), src/broker_action_saga.py (3051), src/simulation_runner.py (2274), src/broker_saga_orchestrator.py (2058), src/one_share_commissioning_orchestrator.py (1704)
+   Evidence: largest production modules: src/trade_state.py (6006), src/broker_action_saga.py (3051), src/simulation_runner.py (2274), src/broker_saga_orchestrator.py (2058), src/one_share_commissioning_orchestrator.py (1728)
    Interpretation: Size alone is not deletion evidence; transaction and restart invariants require cohesive review.
    Estimated removable LOC: production 0, tests 0
 
 10. **NO_ACTION / HIGH -- Test-heavy modules are visible, not automatically excessive**
-   Evidence: largest tests: tests/test_broker_action_saga.py (2061), tests/test_broker_saga_executor.py (1809), tests/test_broker_saga_orchestrator.py (1729), tests/test_entry_recovery.py (1509), tests/test_read_only_observation_runtime.py (1504); 30 modules have more test LOC than production LOC.
+   Evidence: largest tests: tests/test_broker_action_saga.py (2061), tests/test_broker_saga_executor.py (1809), tests/test_broker_saga_orchestrator.py (1729), tests/test_entry_recovery.py (1509), tests/test_read_only_observation_runtime.py (1504); 32 modules have more test LOC than production LOC.
    Interpretation: Higher test LOC is expected for state, boundary, restart, and adversarial matrices; remove only behaviorally duplicate cases.
    Estimated removable LOC: production 0, tests 0
 

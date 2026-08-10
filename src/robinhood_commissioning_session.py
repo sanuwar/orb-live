@@ -11,10 +11,15 @@ import dataclasses
 import inspect
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from src.broker_identity import CommissionedAccount, load_local_override
 from src.broker_snapshot import account_fingerprint
+from src.commissioning_suspension_identity import (
+    CommissioningSuspensionIdentity,
+    CommissioningSuspensionStateProvider,
+)
 from src.config import load_config
 from src.execution_safety_governance import CommissioningGovernanceEvidence
 from src.one_share_commissioning import (
@@ -238,6 +243,10 @@ class RobinhoodCommissioningSessionBinding:
     evidence_store: Any
     emergency_handoff: Callable[[Any], Any]
     governance_evidence: CommissioningGovernanceEvidence
+    # M14 Issue 7: never inside repository data/ (DurableSuspensionController
+    # itself refuses that); never hardcoded or defaulted here, matching every
+    # other durable store in this repository.
+    suspension_database_path: Path
     adapter_factory: Callable[..., Any] = RobinhoodCommissioningAdapter
     orchestrator_factory: Callable[..., Any] = OneShareCommissioningOrchestrator
     _used: bool = field(default=False, init=False)
@@ -263,8 +272,15 @@ class RobinhoodCommissioningSessionBinding:
                 replay_session = _ReplayInitialAccountsSession(
                     session, resolution.initial_accounts_result
                 )
+                # M14 Issue 6: thread the same now_eastern the orchestrator
+                # uses so the adapter's independent freshness check and the
+                # orchestrator's are evaluated against one clock source
+                # (this real-session path previously left the adapter on
+                # its own real-clock default, unlike the fake-mode launcher
+                # path -- both now agree).
                 adapter = self.adapter_factory(
-                    replay_session, resolution.account_number
+                    replay_session, resolution.account_number,
+                    now_eastern=self.now_eastern,
                 )
                 # Fingerprint verification already happened, fail-closed,
                 # inside the resolver above (CommissionedAccount.verify());
@@ -279,25 +295,47 @@ class RobinhoodCommissioningSessionBinding:
                         resolution.account_number
                     ),
                 )
-                stage = "ORCHESTRATOR_INITIALIZATION"
-                orchestrator = self.orchestrator_factory(
-                    run_id=self.run_id,
-                    adapter=adapter,
-                    monotonic=self.monotonic,
-                    sleep=self.sleep,
-                    now_eastern=self.now_eastern,
-                    authorization_provider=self.authorization_provider,
-                    evidence_store=self.evidence_store,
-                    emergency_handoff=self.emergency_handoff,
-                    strategy_enabled=False,
-                    regular_market_hours=True,
-                    time_policy=self.time_policy,
-                    governance_evidence=governance_evidence,
+                stage = "SUSPENSION_PROVIDER_INITIALIZATION"
+                # M14 Issue 7: identity is derived from exactly the release_
+                # sha/account_fingerprint_reference just recorded above --
+                # never a second, independently-chosen identity. assess()
+                # only: this binding never calls ensure_registered()/
+                # register(), so an identity this store has never seen
+                # fails closed rather than being auto-initialized to CLEAR.
+                suspension_provider = CommissioningSuspensionStateProvider(
+                    database_path=self.suspension_database_path,
+                    identity=CommissioningSuspensionIdentity.derive(
+                        release_sha=governance_evidence.release_sha,
+                        account_fingerprint_reference=(
+                            governance_evidence.account_fingerprint_reference
+                        ),
+                    ),
                 )
-                stage = "INTERNAL_INVARIANT"
-                result = await orchestrator.run()
-                stage = "SESSION_CLOSE"
-                return result
+                try:
+                    stage = "ORCHESTRATOR_INITIALIZATION"
+                    orchestrator = self.orchestrator_factory(
+                        run_id=self.run_id,
+                        adapter=adapter,
+                        monotonic=self.monotonic,
+                        sleep=self.sleep,
+                        now_eastern=self.now_eastern,
+                        authorization_provider=self.authorization_provider,
+                        evidence_store=self.evidence_store,
+                        emergency_handoff=self.emergency_handoff,
+                        strategy_enabled=False,
+                        regular_market_hours=True,
+                        time_policy=self.time_policy,
+                        governance_evidence=governance_evidence,
+                        assess_commissioning_suspension=(
+                            lambda: suspension_provider.assess().state.value
+                        ),
+                    )
+                    stage = "INTERNAL_INVARIANT"
+                    result = await orchestrator.run()
+                    stage = "SESSION_CLOSE"
+                    return result
+                finally:
+                    suspension_provider.close()
         except CommissioningDiagnosticError:
             raise
         except Exception as error:

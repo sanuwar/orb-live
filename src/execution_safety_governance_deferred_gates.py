@@ -1,5 +1,5 @@
 """Real, tested gate adapters for safety components not yet activated for
-attended commissioning (M14 Issue 1, M14 Issue 2).
+attended commissioning (M14 Issue 1, M14 Issue 2, M14 Issue 3).
 
 Deliberately **not imported** by `src/execution_safety_governance.py`,
 `src/robinhood_commissioning_adapter.py`,
@@ -9,22 +9,38 @@ write path reaches this module. That is a structural signal, not an
 oversight: each gate below is real and independently tested against the
 actual `src/risk_limits.py`, `src/commissioning_risk_state.py`,
 `src/durable_suspension_controller.py`, and `src/operational_monitor.py`
-APIs, but each also requires evidence that does not exist yet for a
-synchronous, attended, single-run commissioning flow -- a
-realized-daily-loss/kill-switch source, a commissioning-specific
-suspension-controller identity and durable store, or a live heartbeat
-process. Synthesizing that evidence to activate these gates today would be
-exactly the "fake integration" the M14 Issue 1 handoff prohibits.
+APIs.
 
-`make_commissioning_risk_state_gate` (M14 Issue 2) is the honest,
-fail-closed alternative to hand-assembling `AccountRiskState`/
-`KillSwitchState` inline: it wraps
-`src.commissioning_risk_state.evaluate_commissioning_risk_state`, whose own
-module docstring documents exactly which required risk inputs (kill switch,
-realized daily loss) have no repository-owned source today. It remains
-undeployed for the same reason `make_risk_limit_gate` does -- see that
-module's docstring for the full accounting of what is and is not honestly
-available.
+`make_risk_limit_gate` and `make_commissioning_risk_state_gate` (M14 Issues
+1/2) remain undeployed because attended commissioning still has no
+repository-owned source for `AccountRiskState.realized_daily_loss` or
+`KillSwitchState` -- see `src/commissioning_risk_state.py`'s own module
+docstring for exactly which required risk inputs are missing.
+`make_commissioning_risk_state_gate` is the honest, fail-closed alternative
+to hand-assembling those inputs inline; it is undeployed for the same
+missing-evidence reason `make_risk_limit_gate` is, not a separate one.
+
+`make_operational_health_gate` (M14 Issue 1) remains undeployed because a
+synchronous, single-run attended commissioning invocation has no persistent
+heartbeat process to assess -- see `src/attended_commissioning_operational_
+health.py` (M14 Issue 5) for the full, independently-reasoned classification
+of every operational-monitor-adjacent signal this repository has.
+
+`make_suspension_gate` is different from the other three: it is NOT
+deferred for missing evidence. M14 Issue 3 (`src/commissioning_suspension_
+identity.py`) established the commissioning-specific suspension-controller
+identity and durable-store convention it previously lacked, and M14 Issue 7
+activated durable commissioning suspension as an authoritative
+`DEFAULT_COMMISSIONING_GATES` gate. That activation uses a separate,
+purpose-built pure gate (`execution_safety_governance.
+gate_commissioning_suspension_clear`) fed by a fact the orchestrator reads
+fresh immediately before each write, not this module's `make_suspension_
+gate` -- which performs its own I/O (`controller.assess(...)`) inside gate
+evaluation, unlike every gate actually in `DEFAULT_COMMISSIONING_GATES`.
+`make_suspension_gate` therefore remains real, tested, and genuinely
+unused: a second, I/O-performing implementation of the same capability,
+kept out of the live path by design rather than by missing evidence. See
+that function's own docstring.
 
 Kept out of `src/execution_safety_governance.py`'s import graph specifically
 so these deferrals never silently expand `PINNED_IMPLEMENTATION_CLOSURE`
@@ -137,8 +153,22 @@ def make_suspension_gate(
     *, controller: "DurableSuspensionController", controller_id: str  # noqa: F821
 ) -> GateEvaluator:
     """Wrap `DurableSuspensionController.assess`. Not part of
-    `DEFAULT_COMMISSIONING_GATES`: commissioning has no registered
-    controller identity or durable store convention today."""
+    `DEFAULT_COMMISSIONING_GATES` -- and, unlike every other gate in this
+    module, not because required evidence is missing.
+
+    M14 Issue 3 established the identity/durable-store convention this
+    docstring used to say was missing (`src/commissioning_suspension_
+    identity.py`; see `CommissioningSuspensionStateProvider.make_gate()`,
+    which builds exactly this evaluator against a real identity and store).
+    M14 Issue 7 then activated durable commissioning suspension as an
+    authoritative `DEFAULT_COMMISSIONING_GATES` gate -- but via a separate,
+    purpose-built pure gate (`execution_safety_governance.
+    gate_commissioning_suspension_clear`) that only inspects an
+    already-read fact, not via this function, which performs I/O
+    (`controller.assess(...)`) inside gate evaluation itself. This function
+    remains real, tested, and deliberately unwired: a second,
+    I/O-performing implementation of the same capability that the live
+    path does not use."""
 
     from src.durable_suspension_controller import ControllerState
 

@@ -1148,6 +1148,8 @@ def test_the_old_five_file_contract_is_gone():
     # --protection-assessment-store persistence call; +1 in M14 Issue 1 for
     # the execution-safety-governance boundary reached from
     # robinhood_commissioning_adapter.py and
-    # one_share_commissioning_orchestrator.py (never copy a historical count
-    # forward -- this is the current, live closure size).
-    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 28
+    # one_share_commissioning_orchestrator.py; +8 in M14 Issue 7 for the
+    # commissioning suspension gate and the deferred-gates ecosystem it
+    # transitively reaches (never copy a historical count forward -- this
+    # is the current, live closure size).
+    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 36
