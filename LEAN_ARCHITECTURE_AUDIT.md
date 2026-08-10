@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 67625
-- Test LOC: 58891
+- Production LOC: 67800
+- Test LOC: 58970
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -33,7 +33,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 5. **NEEDS_RUNTIME_EVIDENCE / LOW -- Enum members without qualified references**
-   Evidence: 77 enum members have no qualified construction/reference site.
+   Evidence: 84 enum members have no qualified construction/reference site.
    Interpretation: Persisted values, iteration, and indirect deserialization can make these reachable; require runtime evidence before deletion.
    Estimated removable LOC: production 0, tests 0
 
