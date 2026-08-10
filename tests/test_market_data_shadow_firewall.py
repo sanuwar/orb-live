@@ -23,6 +23,7 @@ M15_MODULES = (
     "src/market_data_provider.py",
     "src/shadow_trading_decision.py",
     "src/shadow_execution_simulator.py",
+    "src/shadow_candidate_commissioning_review.py",
 )
 
 #: Names that, if referenced anywhere in an M15 module's AST, would mean a
