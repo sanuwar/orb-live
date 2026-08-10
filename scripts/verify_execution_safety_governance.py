@@ -1854,6 +1854,7 @@ _EXPECTED_GOVERNANCE_REACHERS = frozenset({
     "src/one_share_commissioning_orchestrator.py",
     "src/one_share_commissioning.py",
     "src/attended_safety_evaluation_bridge.py",
+    "src/attended_commissioning_handoff.py",
 })
 
 _GOVERNANCE_NAMES = frozenset({
@@ -1985,6 +1986,7 @@ def check_authority_ceiling_and_fields(root: Path) -> list[CheckResult]:
         "src/one_share_commissioning_orchestrator.py",
         "src/one_share_commissioning.py",
         "src/attended_safety_evaluation_bridge.py",
+    "src/attended_commissioning_handoff.py",
     )
     offending: list[str] = []
     for relative in write_path_files:
