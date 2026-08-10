@@ -241,7 +241,10 @@ class AlpacaMarketDataProvider:
             for raw_bar in raw_bars
             if raw_bar is not None
         ]
-        return sorted(bars, key=lambda bar: bar.event_timestamp)
+        # Preserve provider arrival order until the canonical batch-quality
+        # gate has had a chance to reject an out-of-order response. A caller
+        # may sort only after that validation.
+        return bars
 
 
 __all__ = [
