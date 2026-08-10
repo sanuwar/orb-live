@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 67188
-- Test LOC: 58740
+- Production LOC: 67625
+- Test LOC: 58891
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -13,7 +13,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
 ## Prioritized findings
 
 1. **NEEDS_RUNTIME_EVIDENCE / MEDIUM -- Repeated constrained-value validators**
-   Evidence: 78 repeated helper placements across identifier_validation=13, path_validation=7, permission_validation=2, serialization=49, timestamp_validation=12
+   Evidence: 79 repeated helper placements across identifier_validation=13, path_validation=7, permission_validation=2, serialization=50, timestamp_validation=12
    Interpretation: Exact normalized bodies shared across modules: 0. Similar names alone do not establish contract equivalence.
    Estimated removable LOC: production 0, tests 0
 
@@ -48,7 +48,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 8. **NEEDS_RUNTIME_EVIDENCE / LOW -- Serialization allowlists repeat exact-key mechanics**
-   Evidence: serialization helpers appear in 49 modules.
+   Evidence: serialization helpers appear in 50 modules.
    Interpretation: A shared primitive may reduce boilerplate, but field privacy and error contracts require equivalence evidence.
    Estimated removable LOC: production 0, tests 0
 
