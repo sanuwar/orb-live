@@ -9,7 +9,7 @@ from pathlib import Path
 
 from src.live_shadow_session import (
     BudgetedHttpClient, RunMode, SessionLimits, _base_evidence, _evaluate,
-    deterministic_fixture, run_session,
+    deterministic_fixture, main, run_session,
 )
 from src.exchange_calendar import EASTERN
 from src.market_data_canonical import MarketDataQuality
@@ -131,11 +131,11 @@ def test_request_and_symbol_bounds_are_enforced():
     else:
         raise AssertionError("budget must refuse the second request")
     try:
-        SessionLimits(max_symbols=3)
+        SessionLimits(max_symbols=11)
     except Exception:
         pass
     else:
-        raise AssertionError("two-symbol maximum must be enforced")
+        raise AssertionError("ten-candidate maximum must be enforced")
 
 
 def test_runner_has_no_commissioning_or_broker_write_names():
@@ -207,7 +207,7 @@ def test_live_shadow_uses_bounded_baseline_windows_and_discards_extended_surplus
     second.append(raw_bar(datetime(2026, 8, 11, 13, 0, tzinfo=timezone.utc)))
     second.sort(key=lambda bar: bar["t"])
     spy = [_raw_market_bar(bar) for bar in fixture["SPY"]]
-    client = Client([Response({"bars": first}), Response({"bars": second}), Response({"bars": spy})])
+    client = Client([Response({"bars": spy}), Response({"bars": first}), Response({"bars": second})])
 
     evidence, _ = asyncio.run(run_session(mode=RunMode.LIVE_SHADOW, now=NOW, output_dir=tmp_path, environment=CREDS, http_client=client, production_confirmed=True))
 
@@ -239,3 +239,85 @@ def test_live_calendar_filter_keeps_historical_regular_bars_and_rejects_extended
     assert counts[MarketDataQuality.OUTSIDE_SESSION.value] == 2
     assert counts[MarketDataQuality.MARKET_HOLIDAY.value] == 2
     assert fatal == []
+
+
+def _live_responses_for(symbols, *, invalid_symbol=None):
+    fixture = deterministic_fixture(NOW, candidate_symbols=symbols)
+    day = NOW.astimezone(EASTERN).date()
+    first_window, second_window = __import__("src.live_shadow_session", fromlist=["_live_candidate_windows"])._live_candidate_windows(day, NOW, lookback_days=20)
+    responses = [Response({"bars": [_raw_market_bar(bar) for bar in fixture["SPY"]]})]
+    for symbol in symbols:
+        if symbol == invalid_symbol:
+            responses.extend([Response({"bars": []}), Response({"bars": []})])
+            continue
+        first = [_raw_market_bar(bar) for bar in fixture[symbol] if first_window[0] <= bar.event_timestamp < first_window[1]]
+        second = [_raw_market_bar(bar) for bar in fixture[symbol] if second_window[0] <= bar.event_timestamp < second_window[1]]
+        responses.extend([Response({"bars": first}), Response({"bars": second})])
+    return responses
+
+
+def test_watchlist_parsing_deduplication_and_maximum_are_deterministic():
+    from src.live_shadow_session import LiveShadowError, _watchlist
+
+    assert _watchlist("AAPL", ("msft", "AAPL", "MSFT"), max_symbols=10) == ("MSFT", "AAPL")
+    for values in ((), ("",), ("SPY",), tuple(f"S{index}" for index in range(11))):
+        try:
+            _watchlist("AAPL", values, max_symbols=10)
+        except LiveShadowError:
+            pass
+        else:
+            raise AssertionError("invalid bounded watchlist must be rejected")
+
+
+def test_offline_multi_symbol_evidence_reuses_shared_spy_and_is_deterministic(tmp_path):
+    first, _ = asyncio.run(run_session(now=NOW, output_dir=tmp_path / "one", candidate_symbols=("AAPL", "MSFT")))
+    second, _ = asyncio.run(run_session(now=NOW, output_dir=tmp_path / "two", candidate_symbols=("AAPL", "MSFT")))
+
+    assert first["watchlist"] == ["AAPL", "MSFT"]
+    assert list(first["symbol_results"]) == ["AAPL", "MSFT"]
+    assert first["shared_market_context"]["symbol"] == "SPY"
+    assert first["candidate_summary"]["evaluated_count"] == 2
+    assert all(item["market_data_digest"] and item["opening_range_identity"] and item["strategy_version"] for item in first["symbol_results"].values())
+    assert json.dumps(first, default=str, sort_keys=True) == json.dumps(second, default=str, sort_keys=True)
+    assert first["broker_write_count"] == 0
+
+
+def test_live_multi_symbol_uses_spy_once_and_isolates_invalid_candidate(tmp_path):
+    client = Client(_live_responses_for(("AAPL", "MSFT"), invalid_symbol="MSFT"))
+    evidence, _ = asyncio.run(run_session(mode=RunMode.LIVE_SHADOW, now=NOW, output_dir=tmp_path, candidate_symbols=("AAPL", "MSFT"), environment=CREDS, http_client=client, production_confirmed=True))
+
+    assert client.calls == 5  # one shared SPY request + two per candidate
+    assert [request["params"]["symbols"] if "symbols" in request["params"] else request["url"].split("/stocks/")[1].split("/")[0] for request in client.requests].count("SPY") == 1
+    assert evidence["symbol_results"]["AAPL"]["evaluation_state"] == "VALID_DECISION"
+    assert evidence["symbol_results"]["MSFT"]["evaluation_state"] == "DATA_INCOMPLETE"
+    assert evidence["candidate_summary"]["evaluated_count"] == 1
+    assert evidence["candidate_summary"]["data_incomplete_count"] == 1
+    assert evidence["broker_write_count"] == 0
+
+
+def test_multi_symbol_request_budget_is_enforced(tmp_path):
+    client = Client(_live_responses_for(("AAPL", "MSFT")))
+    evidence, _ = asyncio.run(run_session(mode=RunMode.LIVE_SHADOW, now=NOW, output_dir=tmp_path, candidate_symbols=("AAPL", "MSFT"), environment=CREDS, http_client=client, production_confirmed=True, limits=SessionLimits(max_requests=4)))
+
+    assert evidence["request_count"] == 4
+    assert evidence["symbol_results"]["MSFT"]["evaluation_state"] == "PROVIDER_FAILURE"
+    assert evidence["symbol_results"]["AAPL"]["evaluation_state"] == "VALID_DECISION"
+
+
+def test_cli_symbols_parsing_preserves_single_symbol_compatibility(tmp_path, capsys):
+    assert main(["--symbols", "AAPL,MSFT", "--output-dir", str(tmp_path)]) == 0
+    multi_path = Path(capsys.readouterr().out.strip())
+    assert json.loads(multi_path.read_text())["watchlist"] == ["AAPL", "MSFT"]
+    assert main(["--symbol", "AAPL", "--output-dir", str(tmp_path)]) == 0
+    single_path = Path(capsys.readouterr().out.strip())
+    assert json.loads(single_path.read_text())["watchlist"] == ["AAPL"]
+
+
+def test_shared_provider_failure_stops_live_watchlist_deterministically(tmp_path):
+    client = Client([Response({"message": "forbidden"}, status=403)])
+    evidence, _ = asyncio.run(run_session(mode=RunMode.LIVE_SHADOW, now=NOW, output_dir=tmp_path, candidate_symbols=("AAPL", "MSFT"), environment=CREDS, http_client=client, production_confirmed=True))
+
+    assert client.calls == 1
+    assert evidence["errors"] == ["PROVIDER_HTTP_ERROR"]
+    assert evidence["symbol_results"] == {}
+    assert evidence["broker_write_count"] == 0
