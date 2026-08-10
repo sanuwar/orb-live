@@ -174,7 +174,8 @@ def _module_string_set_constants(tree: ast.Module) -> dict[str, set[str]]:
 
 
 def _validator_allowlist_in_tree(tree: ast.Module, validator_name: str) -> set[str] | None:
-    """If a top-level function named `validator_name` contains an `in`/`not
+    """If a top-level function named `validator_name` contains an `in`/
+ot
     in` membership test against a module-level string-set constant, return
     that constant's literal contents -- proof of the exact set the validator
     constrains its argument to, independent of the validator's own return
@@ -1852,6 +1853,7 @@ _EXPECTED_GOVERNANCE_REACHERS = frozenset({
     "src/robinhood_commissioning_session.py",
     "src/one_share_commissioning_orchestrator.py",
     "src/one_share_commissioning.py",
+    "src/attended_safety_evaluation_bridge.py",
 })
 
 _GOVERNANCE_NAMES = frozenset({
@@ -1982,6 +1984,7 @@ def check_authority_ceiling_and_fields(root: Path) -> list[CheckResult]:
         "src/robinhood_commissioning_session.py",
         "src/one_share_commissioning_orchestrator.py",
         "src/one_share_commissioning.py",
+        "src/attended_safety_evaluation_bridge.py",
     )
     offending: list[str] = []
     for relative in write_path_files:

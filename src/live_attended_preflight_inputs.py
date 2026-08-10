@@ -89,6 +89,7 @@ class LiveAttendedPreflightResult:
     opening_range_identity: str
     quantity: str
     account_fingerprint_observation_status: str
+    account_fingerprint_reference: str | None
     account_fingerprint_observation_digest: str | None
     suspension_observation_status: str
     suspension_observation_id: str | None
@@ -134,6 +135,7 @@ def _fields(result: LiveAttendedPreflightResult) -> dict[str, Any]:
         "opening_range_identity": result.opening_range_identity,
         "quantity": result.quantity,
         "account_fingerprint_observation_status": result.account_fingerprint_observation_status,
+        "account_fingerprint_reference": result.account_fingerprint_reference or "",
         "account_fingerprint_observation_digest": result.account_fingerprint_observation_digest or "",
         "suspension_observation_status": result.suspension_observation_status,
         "suspension_observation_id": result.suspension_observation_id or "",
@@ -264,6 +266,7 @@ def build_live_attended_preflight_result(
         opening_range_identity=preflight.opening_range_identity,
         quantity="1",
         account_fingerprint_observation_status=account_status,
+        account_fingerprint_reference=(snapshot.metadata.account_fingerprint if account_status == "MATCHED" else None),
         account_fingerprint_observation_digest=None if validation is None else validation.snapshot_digest,
         suspension_observation_status=suspension_status,
         suspension_observation_id=suspension_id,
