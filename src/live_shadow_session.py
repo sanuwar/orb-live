@@ -199,6 +199,7 @@ def _base_evidence(*, mode: RunMode, symbols: Sequence[str], started_at: datetim
         "request_count": 0,
         "normalized_bar_count": 0,
         "market_data_digest": None,
+        "provider_diagnostics": {},
         "quality_outcome": "NOT_EVALUATED",
         "quality_rejection_reasons": [],
         "opening_range_identity": None,
@@ -232,6 +233,27 @@ def _previous_trading_dates(day: date, count: int) -> list[date]:
         cursor -= timedelta(days=1)
     return values
 
+
+def _smoke_read_window(moment: datetime) -> tuple[datetime, datetime]:
+    """Return a bounded window ending at the latest completed regular session.
+
+    Smoke-read authentication/parser validation must work outside market hours;
+    this deliberately does not alter LIVE_SHADOW's current-session rules.
+    """
+    local = moment.astimezone(EASTERN)
+    day = local.date()
+    bounds = regular_session_bounds(day)
+    if bounds is not None and local.time() >= bounds[1]:
+        selected_day = day
+    elif bounds is not None and bounds[0] <= local.time() < bounds[1]:
+        return moment - timedelta(minutes=15), moment
+    else:
+        selected_day = day - timedelta(days=1)
+        while regular_session_bounds(selected_day) is None:
+            selected_day -= timedelta(days=1)
+    _, close = regular_session_bounds(selected_day)
+    end = datetime.combine(selected_day, close, tzinfo=EASTERN).astimezone(timezone.utc)
+    return end - timedelta(minutes=15), end
 
 def _fixture_bar(symbol: str, moment: datetime, *, open_price: str, high: str, low: str, close: str, volume: int) -> MarketBar:
     from src.market_data_provider import ALPACA_IEX_SOURCE
@@ -368,8 +390,17 @@ async def run_session(*, mode: RunMode = RunMode.OFFLINE_FIXTURE, candidate_symb
             provider = AlpacaMarketDataProvider(credentials=credentials, http_client=transport, now=lambda: moment)
             day = moment.astimezone(EASTERN).date()
             if mode is RunMode.PRODUCTION_SMOKE_READ:
-                bars = await _fetch(provider, symbol=symbol, start=moment - timedelta(minutes=15), end=moment, attempts=limits.max_attempts_per_fetch)
+                smoke_start, smoke_end = _smoke_read_window(moment)
+                bars = await _fetch(provider, symbol=symbol, start=smoke_start, end=smoke_end, attempts=limits.max_attempts_per_fetch)
                 quality, reasons = _quality_for(symbol, bars, now=moment, current_day=day)
+                evidence["provider_diagnostics"] = {
+                    "endpoint_path": f"/v2/stocks/{symbol}/bars",
+                    "requested_symbol": symbol,
+                    "requested_timeframe": "1Min",
+                    "requested_start": smoke_start,
+                    "requested_end": smoke_end,
+                    **provider.last_response_diagnostics,
+                }
                 evidence.update(normalized_bar_count=len(bars), request_count=transport.request_count, market_data_digest=compute_market_data_batch_digest([compute_market_data_digest(bar, normalization_version=NORMALIZATION_VERSION) for bar in bars]) if bars else None, quality_outcome=quality.value, quality_rejection_reasons=reasons, no_signal_or_rejection_reason="PRODUCTION_MARKET_DATA_SMOKE_READ")
             else:
                 if classification.session is not CalendarSession.REGULAR or not classification.is_regular_session:

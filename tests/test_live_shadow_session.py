@@ -31,8 +31,10 @@ class Client:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = 0
+        self.requests = []
     async def get(self, url, *, headers, params):
         self.calls += 1
+        self.requests.append({"url": url, "params": dict(params)})
         value = self.responses.pop(0)
         if isinstance(value, BaseException):
             raise value
@@ -151,3 +153,34 @@ def test_authority_and_evidence_identity_fields_are_preserved(tmp_path):
     assert saved["broker_write_count"] == 0
     assert saved["authority_ceiling"] == "ATTENDED_COMMISSIONING_ONLY"
     assert all(saved[name] is False for name in ("strategy_enabled", "protection_grounded", "activation_approved", "permits_automated_action", "live_ready", "unattended_ready"))
+
+def test_smoke_read_uses_last_completed_regular_session_outside_hours(tmp_path):
+    sunday = datetime(2026, 8, 10, 4, 36, tzinfo=timezone.utc)
+    friday_bar = raw_bar(datetime(2026, 8, 7, 19, 59, tzinfo=timezone.utc))
+    client = Client([Response({"bars": [friday_bar]})])
+    evidence, _ = asyncio.run(run_session(
+        mode=RunMode.PRODUCTION_SMOKE_READ,
+        now=sunday,
+        output_dir=tmp_path,
+        environment=CREDS,
+        http_client=client,
+        production_confirmed=True,
+    ))
+    assert client.calls == 1
+    assert client.requests[0]["params"]["start"] == "2026-08-07T19:45:00Z"
+    assert client.requests[0]["params"]["end"] == "2026-08-07T20:00:00Z"
+    assert evidence["normalized_bar_count"] == 1
+    assert evidence["market_data_digest"] is not None
+    assert evidence["quality_outcome"] == MarketDataQuality.VALID.value
+    assert evidence["provider_diagnostics"] == {
+        "endpoint_path": "/v2/stocks/AAPL/bars",
+        "requested_symbol": "AAPL",
+        "requested_timeframe": "1Min",
+        "requested_start": datetime(2026, 8, 7, 19, 45, tzinfo=timezone.utc),
+        "requested_end": datetime(2026, 8, 7, 20, 0, tzinfo=timezone.utc),
+        "http_status": 200,
+        "top_level_keys": ["bars"],
+        "returned_bar_count": 1,
+        "returned_timestamps": ["2026-08-07T19:59:00+00:00"],
+    }
+    assert evidence["broker_write_count"] == 0
