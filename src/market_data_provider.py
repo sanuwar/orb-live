@@ -185,6 +185,12 @@ class AlpacaMarketDataProvider:
         self._http_client = http_client
         self._now = now
         self._base_url = base_url
+        self._last_response_diagnostics: dict[str, object] = {}
+
+    @property
+    def last_response_diagnostics(self) -> dict[str, object]:
+        """Sanitized facts about the most recent provider response."""
+        return dict(self._last_response_diagnostics)
 
     async def fetch_minute_bars(
         self, *, symbol: str, start: datetime, end: datetime,
@@ -214,6 +220,7 @@ class AlpacaMarketDataProvider:
         except Exception as exc:
             raise MarketDataProviderError("provider request failed") from exc
 
+        self._last_response_diagnostics = {"http_status": response.status_code}
         if response.status_code != 200:
             raise MarketDataProviderError(
                 f"provider returned a non-success status ({response.status_code})"
@@ -224,15 +231,21 @@ class AlpacaMarketDataProvider:
         except Exception as exc:
             raise MarketDataProviderError("provider response was not valid JSON") from exc
 
+        if isinstance(payload, Mapping):
+            self._last_response_diagnostics["top_level_keys"] = sorted(
+                str(key) for key in payload
+            )
         if not isinstance(payload, Mapping) or "bars" not in payload:
             raise MarketDataProviderError("provider response is missing 'bars'")
 
         raw_bars = payload["bars"]
         if raw_bars is None:
+            self._last_response_diagnostics["returned_bar_count"] = 0
             return []
         if not isinstance(raw_bars, list):
             raise MarketDataProviderError("provider 'bars' field is not a list")
 
+        self._last_response_diagnostics["returned_bar_count"] = len(raw_bars)
         receive_timestamp = self._now()
         bars = [
             normalize_alpaca_bar(
@@ -244,6 +257,9 @@ class AlpacaMarketDataProvider:
         # Preserve provider arrival order until the canonical batch-quality
         # gate has had a chance to reject an out-of-order response. A caller
         # may sort only after that validation.
+        self._last_response_diagnostics["returned_timestamps"] = [
+            bar.event_timestamp.isoformat() for bar in bars
+        ]
         return bars
 
 

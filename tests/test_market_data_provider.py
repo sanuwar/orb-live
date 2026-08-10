@@ -115,6 +115,12 @@ def test_valid_provider_response_preserves_order_for_batch_validation():
     assert bars[0].event_timestamp > bars[1].event_timestamp
     assert client.calls[0]["headers"]["APCA-API-KEY-ID"] == "key"
     assert "secret" == client.calls[0]["headers"]["APCA-API-SECRET-KEY"]
+    assert provider.last_response_diagnostics == {
+        "http_status": 200,
+        "top_level_keys": ["bars", "next_page_token", "symbol"],
+        "returned_bar_count": 2,
+        "returned_timestamps": ["2026-08-11T13:31:00+00:00", "2026-08-11T13:30:00+00:00"],
+    }
 
 
 def test_empty_bars_list_returns_empty():
