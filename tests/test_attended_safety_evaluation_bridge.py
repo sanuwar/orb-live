@@ -60,7 +60,8 @@ def source_preflight():
         candidate(), reviewed_at=NOW, trusted_implementation_digest=TRUSTED,
     )
     dry_run = build_supervised_micro_live_dry_run_plan(
-        review, trusted_implementation_digest=TRUSTED,
+        review, account_fingerprint_reference=account_fingerprint("TEST12345678"),
+        trusted_implementation_digest=TRUSTED,
     )
     return build_supervised_micro_live_preflight(
         review, dry_run,

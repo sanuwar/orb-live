@@ -63,13 +63,20 @@ class AttendedSafetyEvaluationResult:
     action_identity: str | None
     symbol: str
     trading_date: str
+    implementation_digest: str
+    strategy_version: str
+    market_data_digest: str
+    opening_range_identity: str
     quantity: str
     account_fingerprint_status: str
     suspension_status: str
+    suspension_decision_identity: str | None
     candidate_freshness_status: str
     operator_acknowledgements_status: str
     required_operator_acknowledgements: tuple[str, ...]
     safety_result: str
+    source_hash_status: str
+    release_sha: str
     blocking_reasons: tuple[str, ...]
     evaluation_state: AttendedSafetyEvaluationState
     protection_grounded: bool
@@ -107,13 +114,20 @@ def _fields(result: AttendedSafetyEvaluationResult) -> dict[str, Any]:
         "safety_decision_digest": result.safety_decision_digest or "",
         "action_identity": result.action_identity or "",
         "symbol": result.symbol, "trading_date": result.trading_date,
+        "implementation_digest": result.implementation_digest,
+        "strategy_version": result.strategy_version,
+        "market_data_digest": result.market_data_digest,
+        "opening_range_identity": result.opening_range_identity,
         "quantity": result.quantity,
         "account_fingerprint_status": result.account_fingerprint_status,
         "suspension_status": result.suspension_status,
+        "suspension_decision_identity": result.suspension_decision_identity or "",
         "candidate_freshness_status": result.candidate_freshness_status,
         "operator_acknowledgements_status": result.operator_acknowledgements_status,
         "required_operator_acknowledgements": result.required_operator_acknowledgements,
         "safety_result": result.safety_result,
+        "source_hash_status": result.source_hash_status,
+        "release_sha": result.release_sha,
         "blocking_reasons": result.blocking_reasons,
         "evaluation_state": result.evaluation_state.value,
         "protection_grounded": False, "execution_authorized": False,
@@ -223,13 +237,18 @@ def build_attended_safety_evaluation_result(
         safety_decision_id=None if decision is None else decision.decision_id,
         safety_decision_digest=None if decision is None else decision.decision_digest,
         action_identity=action_identity, symbol=live_preflight.symbol,
-        trading_date=live_preflight.trading_date, quantity="1",
+        trading_date=live_preflight.trading_date, implementation_digest=live_preflight.implementation_digest,
+        strategy_version=live_preflight.strategy_version, market_data_digest=live_preflight.market_data_digest,
+        opening_range_identity=live_preflight.opening_range_identity, quantity="1",
         account_fingerprint_status=live_preflight.account_fingerprint_observation_status,
         suspension_status=live_preflight.suspension_observation_status,
+        suspension_decision_identity=live_preflight.suspension_observation_id,
         candidate_freshness_status=live_preflight.candidate_freshness_status,
         operator_acknowledgements_status=acknowledgement_status,
         required_operator_acknowledgements=_REQUIRED_ACKNOWLEDGEMENTS,
         safety_result=("INCOMPLETE" if decision is None else decision.outcome.value),
+        source_hash_status=("VERIFIED" if inputs.source_hash_verified and bool(inputs.release_sha) else "REQUIRED"),
+        release_sha=inputs.release_sha,
         blocking_reasons=_dedupe(reasons), evaluation_state=state,
         protection_grounded=False, execution_authorized=False,
         broker_write_count=0, authority_ceiling=AUTHORITY_CEILING,
