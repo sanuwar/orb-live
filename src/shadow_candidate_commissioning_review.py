@@ -269,6 +269,46 @@ def _review_digest(fields: dict[str, Any]) -> str:
     return hashlib.sha256(_DIGEST_DOMAIN + b"\x00review\x00" + canonical_bytes(fields)).hexdigest()
 
 
+def compute_shadow_candidate_commissioning_review_digest(
+    review: ShadowCandidateCommissioningReview,
+) -> str:
+    """Reconstruct a review digest without granting commissioning authority."""
+    if not isinstance(review, ShadowCandidateCommissioningReview):
+        raise TypeError("review must be a ShadowCandidateCommissioningReview")
+    fields = {
+        "review_policy_version": review.review_policy_version,
+        "source_shadow_decision_id": review.source_shadow_decision_id,
+        "source_simulation_id": review.source_simulation_id or "",
+        "symbol": review.symbol,
+        "trading_date": review.trading_date.isoformat(),
+        "strategy_version": review.strategy_version,
+        "implementation_digest": review.implementation_digest,
+        "trusted_implementation_digest": review.trusted_implementation_digest,
+        "opening_range_identity": review.opening_range_identity,
+        "market_data_digest": review.market_data_digest,
+        "proposed_entry": _decimal(review.proposed_entry),
+        "proposed_stop": _decimal(review.proposed_stop),
+        "proposed_target": _decimal(review.proposed_target),
+        "candidate_timestamp": _timestamp(review.candidate_timestamp),
+        "reviewed_at": _timestamp(review.reviewed_at),
+        "candidate_age_seconds": review.candidate_age_seconds,
+        "candidate_freshness_status": review.candidate_freshness_status.value,
+        "protection_plan_complete": review.protection_plan_complete,
+        "simulation_state": review.simulation_state.value if review.simulation_state else "",
+        "simulation_realized_pnl": _decimal(review.simulation_realized_pnl),
+        "simulation_mfe": _decimal(review.simulation_mfe),
+        "simulation_mae": _decimal(review.simulation_mae),
+        "quantity_policy": review.quantity_policy,
+        "suggested_quantity": _decimal(review.suggested_quantity),
+        "authority_ceiling": review.authority_ceiling,
+        "execution_approval_granted": review.execution_approval_granted,
+        "execution_requirements_not_evaluated": list(review.execution_requirements_not_evaluated),
+        "readiness_state": review.readiness_state.value,
+        "blocking_reasons": list(review.blocking_reasons),
+        "broker_write_count": review.broker_write_count,
+    }
+    return _review_digest(fields)
+
 def build_shadow_candidate_commissioning_review(
     decision: ShadowTradingDecision,
     *,
@@ -392,6 +432,7 @@ def build_shadow_candidate_commissioning_review(
 
 __all__ = [
     "CandidateFreshnessStatus",
+    "compute_shadow_candidate_commissioning_review_digest",
     "QUANTITY_POLICY",
     "REVIEW_POLICY_VERSION",
     "ReviewReadinessState",
