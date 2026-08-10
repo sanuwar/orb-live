@@ -11,6 +11,7 @@ from src.live_shadow_session import (
     BudgetedHttpClient, RunMode, SessionLimits, _base_evidence, _evaluate,
     deterministic_fixture, run_session,
 )
+from src.exchange_calendar import EASTERN
 from src.market_data_canonical import MarketDataQuality
 from src.market_data_provider import MarketDataProviderError
 from src.shadow_trading_decision import ShadowDecisionType
@@ -184,3 +185,57 @@ def test_smoke_read_uses_last_completed_regular_session_outside_hours(tmp_path):
         "returned_timestamps": ["2026-08-07T19:59:00+00:00"],
     }
     assert evidence["broker_write_count"] == 0
+
+def _raw_market_bar(bar):
+    return {
+        "t": bar.event_timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "o": str(bar.open), "h": str(bar.high), "l": str(bar.low),
+        "c": str(bar.close), "v": bar.volume,
+    }
+
+
+def test_live_shadow_uses_bounded_baseline_windows_and_discards_extended_surplus(tmp_path):
+    from src.live_shadow_session import _live_candidate_windows
+
+    fixture = deterministic_fixture(NOW)
+    day = NOW.astimezone(EASTERN).date()
+    first_window, second_window = _live_candidate_windows(day, NOW, lookback_days=20)
+    first = [_raw_market_bar(bar) for bar in fixture["AAPL"] if first_window[0] <= bar.event_timestamp < first_window[1]]
+    second = [_raw_market_bar(bar) for bar in fixture["AAPL"] if second_window[0] <= bar.event_timestamp < second_window[1]]
+    # A real multi-day request can contain premarket data. It is rejected by
+    # the calendar validator, counted once in evidence, and never reaches ORB.
+    second.append(raw_bar(datetime(2026, 8, 11, 13, 0, tzinfo=timezone.utc)))
+    second.sort(key=lambda bar: bar["t"])
+    spy = [_raw_market_bar(bar) for bar in fixture["SPY"]]
+    client = Client([Response({"bars": first}), Response({"bars": second}), Response({"bars": spy})])
+
+    evidence, _ = asyncio.run(run_session(mode=RunMode.LIVE_SHADOW, now=NOW, output_dir=tmp_path, environment=CREDS, http_client=client, production_confirmed=True))
+
+    assert client.calls == 3
+    assert evidence["request_count"] == 3
+    assert evidence["quality_outcome"] == MarketDataQuality.VALID.value
+    assert evidence["market_data_digest"] is not None
+    assert evidence["opening_range_identity"] is not None
+    assert evidence["shadow_trading_decision"] is not None
+    assert evidence["quality_rejection_reasons"] == [MarketDataQuality.OUTSIDE_SESSION.value]
+    assert evidence["quality_rejection_counts"] == {MarketDataQuality.OUTSIDE_SESSION.value: 1}
+    assert evidence["broker_write_count"] == 0
+
+
+def test_live_calendar_filter_keeps_historical_regular_bars_and_rejects_extended_weekend_and_holiday():
+    from src.live_shadow_session import _fixture_bar, _live_eligible_bars
+    from src.exchange_calendar import EASTERN
+
+    current_day = NOW.astimezone(EASTERN).date()
+    regular = _fixture_bar("AAPL", datetime(2026, 8, 7, 13, 30, tzinfo=timezone.utc), open_price="1", high="2", low="1", close="2", volume=1)
+    premarket = _fixture_bar("AAPL", datetime(2026, 8, 7, 12, 30, tzinfo=timezone.utc), open_price="1", high="2", low="1", close="2", volume=1)
+    afterhours = _fixture_bar("AAPL", datetime(2026, 8, 7, 20, 30, tzinfo=timezone.utc), open_price="1", high="2", low="1", close="2", volume=1)
+    weekend = _fixture_bar("AAPL", datetime(2026, 8, 8, 13, 30, tzinfo=timezone.utc), open_price="1", high="2", low="1", close="2", volume=1)
+    holiday = _fixture_bar("AAPL", datetime(2026, 7, 3, 13, 30, tzinfo=timezone.utc), open_price="1", high="2", low="1", close="2", volume=1)
+
+    eligible, counts, fatal = _live_eligible_bars("AAPL", [holiday, premarket, regular, afterhours, weekend], now=NOW, current_day=current_day)
+
+    assert eligible == [regular]
+    assert counts[MarketDataQuality.OUTSIDE_SESSION.value] == 2
+    assert counts[MarketDataQuality.MARKET_HOLIDAY.value] == 2
+    assert fatal == []

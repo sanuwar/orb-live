@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from src.exchange_calendar import EASTERN
 from src.market_data_canonical import MarketBar, MarketDataSourceIdentity
 
 
@@ -134,7 +135,8 @@ def normalize_alpaca_bar(
     return MarketBar(
         symbol=symbol.upper().strip(),
         exchange_session="REGULAR",
-        trading_date=event_timestamp.astimezone(timezone.utc).date(),
+        # Trading dates are exchange-local dates, not UTC calendar dates.
+        trading_date=event_timestamp.astimezone(EASTERN).date(),
         event_timestamp=event_timestamp,
         end_timestamp=end_timestamp,
         receive_timestamp=receive_timestamp,
