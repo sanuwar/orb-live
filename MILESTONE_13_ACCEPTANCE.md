@@ -52,7 +52,7 @@ provenance.
 ## 6. Final implementation digest
 
 ```
-c761745ee45d99fe688f6890f9d9bfbd2516cd696de4ef64a27b89894919c8e2
+8e544058a0445c8443f3b5089293b0d8e3a5211dd5d7d3790343d0f34b1866c1
 ```
 
 Independently reconstructed (separate hashing routine, separate
@@ -85,8 +85,11 @@ then added one more: `src/commissioning_risk_state.py`, reached because
 Issue 7 chain) deferred-imports it inside `make_commissioning_risk_state_
 gate` -- again reachability, not activation, since the risk-state gate is
 not in `DEFAULT_COMMISSIONING_GATES` (Issue 2's own conclusion: no honest
-kill-switch/realized-daily-loss source exists yet). That moved the digest
-to the value above.
+kill-switch/realized-daily-loss source exists yet). M20 Issue 1 later
+changed the content of the already-pinned `src/protection_grounding_
+assessment.py` to add broker-authoritative, reversible working-stop
+grounding without adding a pinned path or granting execution authority.
+Those reviewed changes moved the live digest to the value above.
 
 ## 7. Pinned file count
 

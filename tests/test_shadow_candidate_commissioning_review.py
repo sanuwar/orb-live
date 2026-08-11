@@ -29,7 +29,7 @@ from src.shadow_trading_decision import (
 DAY = date(2026, 8, 11)
 SIGNAL = datetime(2026, 8, 11, 14, 45, tzinfo=timezone.utc)
 REVIEWED = datetime(2026, 8, 11, 14, 50, tzinfo=timezone.utc)
-TRUSTED = "c761745ee45d99fe688f6890f9d9bfbd2516cd696de4ef64a27b89894919c8e2"
+TRUSTED = "8e544058a0445c8443f3b5089293b0d8e3a5211dd5d7d3790343d0f34b1866c1"
 
 
 def decision(*, kind=ShadowDecisionType.LONG_CANDIDATE, entry=Decimal("100"), stop=Decimal("99"), target=None):
