@@ -43,6 +43,12 @@ class ProtectiveStopSafetyState(str, Enum):
     INCOMPLETE = "INCOMPLETE"
 
 
+class AttendedExitSafetyState(str, Enum):
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+    INCOMPLETE = "INCOMPLETE"
+
+
 @dataclass(frozen=True)
 class ProtectiveStopSafetyInputs:
     decision_time: datetime
@@ -85,6 +91,51 @@ class ProtectiveStopSafetyEvaluation:
             raise ValueError("protective-stop safety evidence cannot write or authorize")
         if self.authority_ceiling != AUTHORITY_CEILING:
             raise ValueError("authority ceiling drift")
+
+@dataclass(frozen=True)
+class AttendedExitSafetyInputs:
+    decision_time: datetime
+    run_id: str
+    source_shadow_decision_id: str
+    source_handoff_id: str
+    protective_action_identity: str
+    protective_order_identity: str
+    broker_snapshot_identity: str
+    symbol: str
+    authoritative_position_quantity: str
+    exit_quantity: str
+    exit_reason: str
+    stop_cancellation_confirmed: bool
+    implementation_digest: str
+    release_sha: str
+    account_fingerprint_reference: str
+    suspension_state: str
+    operator_acknowledgements: OperatorAcknowledgements | None
+    operator_attended: bool
+    source_hash_verified: bool
+
+
+@dataclass(frozen=True)
+class AttendedExitSafetyEvaluation:
+    source_handoff_id: str
+    source_shadow_decision_id: str
+    safety_context_identity: str | None
+    safety_decision_identity: str | None
+    exit_action_identity: str | None
+    safety_result: AttendedExitSafetyState
+    reason_codes: tuple[str, ...]
+    evaluated_at: datetime
+    execution_authorized: bool = False
+    broker_write_count: int = 0
+    protection_grounded: bool = False
+    authority_ceiling: str = AUTHORITY_CEILING
+
+    def __post_init__(self) -> None:
+        if self.execution_authorized or self.broker_write_count != 0 or self.protection_grounded:
+            raise ValueError("attended-exit safety evidence cannot write or authorize")
+        if self.authority_ceiling != AUTHORITY_CEILING:
+            raise ValueError("authority ceiling drift")
+
 
 @dataclass(frozen=True)
 class AttendedSafetyInputs:
@@ -352,10 +403,61 @@ def evaluate_protective_stop_safety(inputs: ProtectiveStopSafetyInputs) -> Prote
         outcome, decision.reason_codes, decision.evaluated_at,
     )
 
+def evaluate_attended_exit_safety(inputs: AttendedExitSafetyInputs) -> AttendedExitSafetyEvaluation:
+    """Evaluate one explicit attended exit after stop cancellation is proven."""
+    if not isinstance(inputs, AttendedExitSafetyInputs):
+        raise TypeError("inputs must be AttendedExitSafetyInputs")
+    incomplete: list[str] = []
+    if inputs.operator_acknowledgements is None:
+        incomplete.append("OPERATOR_ACK_REQUIRED")
+    if not all((inputs.run_id, inputs.source_shadow_decision_id, inputs.source_handoff_id,
+                inputs.protective_action_identity, inputs.protective_order_identity,
+                inputs.broker_snapshot_identity, inputs.account_fingerprint_reference)):
+        incomplete.append("SOURCE_IDENTITY_INCOMPLETE")
+    if inputs.authoritative_position_quantity != "1" or inputs.exit_quantity != "1":
+        incomplete.append("ONE_SHARE_EXIT_INCOMPLETE")
+    if inputs.exit_reason not in {"profit_target", "time_exit"}:
+        incomplete.append("EXIT_REASON_UNSUPPORTED")
+    if not inputs.stop_cancellation_confirmed:
+        incomplete.append("STOP_CANCELLATION_NOT_CONFIRMED")
+    if inputs.suspension_state != "CLEAR":
+        incomplete.append("SUSPENSION_NOT_CLEAR")
+    if incomplete:
+        return AttendedExitSafetyEvaluation(
+            inputs.source_handoff_id, inputs.source_shadow_decision_id, None, None, None,
+            AttendedExitSafetyState.INCOMPLETE, tuple(dict.fromkeys(incomplete)), inputs.decision_time,
+        )
+    evidence = CommissioningGovernanceEvidence(
+        commissioning_mode=CommissioningMode.ATTENDED,
+        operator_attended=inputs.operator_attended,
+        operator_acknowledgements=inputs.operator_acknowledgements,
+        source_hash_verified=inputs.source_hash_verified,
+        release_sha=inputs.release_sha,
+        implementation_digest=inputs.implementation_digest,
+        account_fingerprint_matched=True,
+        account_fingerprint_reference=inputs.account_fingerprint_reference,
+        suspension_state=inputs.suspension_state,
+    )
+    context = ExecutionSafetyContext(
+        context_version="1", decision_time=inputs.decision_time, run_id=inputs.run_id,
+        action=ExecutionAction.EXIT_PLACE, symbol=inputs.symbol, side="sell",
+        order_type="market", quantity=inputs.exit_quantity,
+        stop_price=None, order_id=None, governance_evidence=evidence,
+    )
+    decision = evaluate_execution_safety(context)
+    outcome = AttendedExitSafetyState.ALLOW if decision.outcome is ExecutionSafetyOutcome.ALLOW else AttendedExitSafetyState.DENY
+    return AttendedExitSafetyEvaluation(
+        inputs.source_handoff_id, inputs.source_shadow_decision_id,
+        context.action_identity(), decision.decision_id, context.action_identity(),
+        outcome, decision.reason_codes, decision.evaluated_at,
+    )
+
+
 __all__ = [
     "ATTENDED_SAFETY_EVALUATION_POLICY_VERSION", "PROTECTIVE_STOP_MUTATION_BOUNDARY", "AttendedSafetyEvaluationResult",
     "AttendedSafetyEvaluationState", "AttendedSafetyInputs",
     "ProtectiveStopSafetyEvaluation", "ProtectiveStopSafetyInputs", "ProtectiveStopSafetyState",
+    "AttendedExitSafetyEvaluation", "AttendedExitSafetyInputs", "AttendedExitSafetyState",
     "build_attended_safety_evaluation_result", "compute_attended_safety_evaluation_digest",
-    "evaluate_protective_stop_safety",
+    "evaluate_protective_stop_safety", "evaluate_attended_exit_safety",
 ]
