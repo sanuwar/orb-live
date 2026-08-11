@@ -152,11 +152,11 @@ def position(*, current="101", high="101", hour=11, minute=0):
     )
 
 
-def test_working_stop_reconciles_but_m13_does_not_ground_protection():
+def test_fixture_stop_reconciles_but_snapshot_without_stop_does_not_ground():
     result = build()
     assert result.rehearsal_state is StopExitRehearsalState.OPEN_PROTECTED
     assert result.stop_reconciliation_state == "STOP_WORKING"
-    assert result.m13_protection_reason == "LIFECYCLE_STATE_CANNOT_ESTABLISH_PROTECTION"
+    assert result.m13_protection_reason == "STOP_NOT_FOUND"
     assert result.protection_grounded is False
     assert result.broker_write_count == 0 and result.execution_authorized is False
 

@@ -35,9 +35,11 @@ module reuses the exported, public version rather than re-deriving it
    it.
 
 `recommendation` may be `ELIGIBLE_FOR_REVIEW` or `REVIEW_REQUIRED`. Neither
-ever means `APPROVED_FOR_ACTIVE_PROTECTION`, and neither ever means
-`protection_grounded=true` — both are explicit fields on this type, hard-
-coded `False` on every instance, independent of what `recommendation` says.
+ever means `APPROVED_FOR_ACTIVE_PROTECTION`, and the historical batch
+assessment remains hard-coded non-grounding. M20 adds a separate function in
+this same reviewed module for one current, validated broker snapshot; only
+that narrower result may report the factual state `protection_grounded=true`.
+It still cannot promote execution authority or mutate runtime state.
 
 ## No mutation, no broker access
 
@@ -51,14 +53,21 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from enum import Enum
-from types import MappingProxyType
-from typing import Mapping, Sequence
+from types import MappingProxyType, SimpleNamespace
+from typing import Any, Mapping, Sequence
 
-from src.live_order_state_model import ProtectiveCoverage
+from src.broker_snapshot import BrokerSnapshot, validate_snapshot
+from src.live_order_state_model import (
+    ProtectiveCoverage,
+    assess_protective_coverage,
+)
 from src.protection_observation_ledger import LedgerObservationSummary
 from src.protection_observation_model import (
     BROKER_AUTHORITATIVE_SOURCE_CLASSES,
+    EvidenceSourceClass,
     HEX_DIGEST_PATTERN,
     ObservationConsistencyStatus,
     ObservationContaminationStatus,
@@ -82,7 +91,22 @@ class ProtectionGroundingAssessmentError(ValueError):
 
 ASSESSMENT_ENGINE_VERSION = "m13-grounding-assessment-v1"
 
+AUTHORITATIVE_GROUNDING_VERSION = "m20-authoritative-working-stop-v1"
+# Deliberately local to factual grounding. This does not populate
+# live_order_state_model.ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES and grants
+# no adapter or automated-action authority. The read-only account reader
+# reports only open orders; of those labels, M19 reconciliation identifies
+# confirmed as STOP_WORKING. Earlier new/unconfirmed and queued/locating
+# acknowledgements remain non-grounding.
+AUTHORITATIVE_GROUNDING_ACTIVE_STATES: frozenset[str] = frozenset(
+    {"confirmed"}
+)
+AUTHORITY_CEILING = "ATTENDED_COMMISSIONING_ONLY"
+
 _DIGEST_DOMAIN = b"orb-live/protection-grounding-assessment/v1"
+_AUTHORITATIVE_DIGEST_DOMAIN = (
+    b"orb-live/authoritative-protection-grounding/v1"
+)
 
 
 # --------------------------------------------------------------------------
@@ -649,6 +673,540 @@ def evaluate_protection_grounding(
     )
 
 
+
+# --------------------------------------------------------------------------
+# M20: broker-authoritative runtime grounding.
+# --------------------------------------------------------------------------
+
+
+class AuthoritativeGroundingOutcome(str, Enum):
+    GROUNDED = "GROUNDED"
+    NOT_GROUNDED = "NOT_GROUNDED"
+    NOT_REQUIRED = "NOT_REQUIRED"
+
+
+class AuthoritativeGroundingReason(str, Enum):
+    GROUNDED = "GROUNDED"
+    POSITION_FLAT = "POSITION_FLAT"
+    SNAPSHOT_INVALID = "SNAPSHOT_INVALID"
+    SNAPSHOT_STALE = "SNAPSHOT_STALE"
+    ACCOUNT_MISMATCH = "ACCOUNT_MISMATCH"
+    SOURCE_MISMATCH = "SOURCE_MISMATCH"
+    IMPLEMENTATION_MISMATCH = "IMPLEMENTATION_MISMATCH"
+    EVIDENCE_SOURCE_INELIGIBLE = "EVIDENCE_SOURCE_INELIGIBLE"
+    POSITION_AMBIGUOUS = "POSITION_AMBIGUOUS"
+    POSITION_IDENTITY_MISMATCH = "POSITION_IDENTITY_MISMATCH"
+    POSITION_QUANTITY_MISMATCH = "POSITION_QUANTITY_MISMATCH"
+    BROKER_ORDER_INVALID = "BROKER_ORDER_INVALID"
+    STOP_NOT_FOUND = "STOP_NOT_FOUND"
+    STOP_IDENTITY_MISMATCH = "STOP_IDENTITY_MISMATCH"
+    STOP_STATE_NOT_ACTIVE = "STOP_STATE_NOT_ACTIVE"
+    STOP_QUANTITY_MISMATCH = "STOP_QUANTITY_MISMATCH"
+    STOP_PRICE_MISMATCH = "STOP_PRICE_MISMATCH"
+    CONFLICTING_ACTIVE_STOPS = "CONFLICTING_ACTIVE_STOPS"
+    UNSUPPORTED_REPLACEMENT_LINEAGE = "UNSUPPORTED_REPLACEMENT_LINEAGE"
+
+
+@dataclass(frozen=True)
+class AuthoritativeProtectionGroundingRequest:
+    source_candidate_id: str
+    source_handoff_id: str
+    source_protection_plan_id: str
+    symbol: str
+    expected_stop_order_id: str
+    expected_position_quantity: Decimal
+    expected_stop_price: Decimal
+    release_identity: str
+    implementation_digest: str
+    account_fingerprint_reference: str
+    evidence_source_class: EvidenceSourceClass
+
+    def __post_init__(self) -> None:
+        for name in (
+            "source_candidate_id",
+            "source_handoff_id",
+            "source_protection_plan_id",
+        ):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or HEX_DIGEST_PATTERN.fullmatch(value) is None
+            ):
+                raise ProtectionGroundingAssessmentError(
+                    f"{name} must be a canonical SHA-256 identity"
+                )
+        if (
+            not isinstance(self.expected_stop_order_id, str)
+            or not self.expected_stop_order_id.strip()
+        ):
+            raise ProtectionGroundingAssessmentError(
+                "expected_stop_order_id must be a non-blank string"
+            )
+        if (
+            not isinstance(self.symbol, str)
+            or not self.symbol.strip()
+            or self.symbol != self.symbol.strip().upper()
+        ):
+            raise ProtectionGroundingAssessmentError(
+                "symbol must be a normalized uppercase symbol"
+            )
+        for name in ("expected_position_quantity", "expected_stop_price"):
+            value = getattr(self, name)
+            if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
+                raise ProtectionGroundingAssessmentError(
+                    f"{name} must be a positive finite Decimal"
+                )
+        if (
+            not isinstance(self.release_identity, str)
+            or len(self.release_identity) != 40
+            or any(ch not in "0123456789abcdef" for ch in self.release_identity)
+        ):
+            raise ProtectionGroundingAssessmentError(
+                "release_identity must be a lowercase 40-character SHA"
+            )
+        for name in (
+            "implementation_digest",
+            "account_fingerprint_reference",
+        ):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or HEX_DIGEST_PATTERN.fullmatch(value) is None
+            ):
+                raise ProtectionGroundingAssessmentError(
+                    f"{name} must be a lowercase SHA-256 digest"
+                )
+        if not isinstance(self.evidence_source_class, EvidenceSourceClass):
+            raise ProtectionGroundingAssessmentError(
+                "evidence_source_class must be an EvidenceSourceClass"
+            )
+
+
+@dataclass(frozen=True)
+class AuthoritativeProtectionGroundingAssessment:
+    assessment_id: str
+    assessment_digest: str
+    assessment_version: str
+    assessed_at: datetime
+    evidence_source_class: EvidenceSourceClass
+    source_candidate_id: str
+    source_handoff_id: str
+    source_protection_plan_id: str
+    release_identity: str
+    implementation_digest: str
+    account_fingerprint_reference: str
+    broker_snapshot_identity: str
+    broker_snapshot_timestamp: datetime | None
+    position_symbol: str
+    authoritative_position_quantity: str
+    protective_stop_reference: str | None
+    stop_state: str | None
+    protective_quantity: str | None
+    stop_price: str | None
+    expected_stop_price: str
+    accepted_stop_states: tuple[str, ...]
+    coverage_assessment: str
+    outcome: AuthoritativeGroundingOutcome
+    reason_codes: tuple[AuthoritativeGroundingReason, ...]
+    promotion_permitted: bool
+    protection_grounded: bool
+    broker_write_count: int
+    execution_authorized: bool
+    activation_approved: bool
+    permits_automated_action: bool
+    live_ready: bool
+    unattended_ready: bool
+    authority_ceiling: str
+
+    def __post_init__(self) -> None:
+        if self.assessment_id != self.assessment_digest:
+            raise ProtectionGroundingAssessmentError(
+                "assessment identity must equal its canonical digest"
+            )
+        if self.assessment_digest != compute_authoritative_grounding_digest(self):
+            raise ProtectionGroundingAssessmentError(
+                "authoritative grounding digest does not reconstruct"
+            )
+        if self.assessed_at.tzinfo is None:
+            raise ProtectionGroundingAssessmentError(
+                "assessed_at must include a timezone"
+            )
+        expected_grounded = (
+            self.outcome is AuthoritativeGroundingOutcome.GROUNDED
+            and self.evidence_source_class
+            in BROKER_AUTHORITATIVE_SOURCE_CLASSES
+            and self.reason_codes == (AuthoritativeGroundingReason.GROUNDED,)
+        )
+        if self.protection_grounded is not expected_grounded:
+            raise ProtectionGroundingAssessmentError(
+                "protection_grounded does not match authoritative evidence"
+            )
+        if (
+            self.promotion_permitted
+            or self.broker_write_count != 0
+            or self.execution_authorized
+            or self.activation_approved
+            or self.permits_automated_action
+            or self.live_ready
+            or self.unattended_ready
+        ):
+            raise ProtectionGroundingAssessmentError(
+                "grounding evidence cannot grant execution authority"
+            )
+        if self.authority_ceiling != AUTHORITY_CEILING:
+            raise ProtectionGroundingAssessmentError("authority ceiling drift")
+
+
+def _authoritative_result_payload(value: Any) -> dict[str, object]:
+    return {
+        "assessment_version": value.assessment_version,
+        "assessed_at": value.assessed_at.isoformat(),
+        "evidence_source_class": value.evidence_source_class.value,
+        "source_candidate_id": value.source_candidate_id,
+        "source_handoff_id": value.source_handoff_id,
+        "source_protection_plan_id": value.source_protection_plan_id,
+        "release_identity": value.release_identity,
+        "implementation_digest": value.implementation_digest,
+        "account_fingerprint_reference": value.account_fingerprint_reference,
+        "broker_snapshot_identity": value.broker_snapshot_identity,
+        "broker_snapshot_timestamp": (
+            None
+            if value.broker_snapshot_timestamp is None
+            else value.broker_snapshot_timestamp.isoformat()
+        ),
+        "position_symbol": value.position_symbol,
+        "authoritative_position_quantity": value.authoritative_position_quantity,
+        "protective_stop_reference": value.protective_stop_reference,
+        "stop_state": value.stop_state,
+        "protective_quantity": value.protective_quantity,
+        "stop_price": value.stop_price,
+        "expected_stop_price": value.expected_stop_price,
+        "accepted_stop_states": list(value.accepted_stop_states),
+        "coverage_assessment": value.coverage_assessment,
+        "outcome": value.outcome.value,
+        "reason_codes": [reason.value for reason in value.reason_codes],
+        "promotion_permitted": value.promotion_permitted,
+        "protection_grounded": value.protection_grounded,
+        "broker_write_count": value.broker_write_count,
+        "execution_authorized": value.execution_authorized,
+        "activation_approved": value.activation_approved,
+        "permits_automated_action": value.permits_automated_action,
+        "live_ready": value.live_ready,
+        "unattended_ready": value.unattended_ready,
+        "authority_ceiling": value.authority_ceiling,
+    }
+
+
+def compute_authoritative_grounding_digest(
+    value: AuthoritativeProtectionGroundingAssessment,
+) -> str:
+    if not isinstance(value, AuthoritativeProtectionGroundingAssessment):
+        raise TypeError(
+            "value must be an AuthoritativeProtectionGroundingAssessment"
+        )
+    return hashlib.sha256(
+        _AUTHORITATIVE_DIGEST_DOMAIN
+        + canonical_bytes(_authoritative_result_payload(value))
+    ).hexdigest()
+
+
+def _safe_order_reference(order_id: str) -> str:
+    return hashlib.sha256(
+        _AUTHORITATIVE_DIGEST_DOMAIN
+        + b"\0protective-order\0"
+        + order_id.encode("utf-8")
+    ).hexdigest()
+
+
+def evaluate_authoritative_working_stop_grounding(
+    request: AuthoritativeProtectionGroundingRequest,
+    *,
+    snapshot: BrokerSnapshot,
+    assessed_at: datetime,
+    expected_release_identity: str,
+    expected_implementation_digest: str,
+    expected_account_fingerprint_reference: str,
+) -> AuthoritativeProtectionGroundingAssessment:
+    """Assess current working-stop coverage from one authoritative snapshot.
+
+    The function is pure over already-read evidence. It performs no broker,
+    network, ledger, or clock access. A result can ground protection only for
+    the explicit live read-only evidence source; fixtures can exercise every
+    branch but remain ineligible.
+    """
+    if not isinstance(request, AuthoritativeProtectionGroundingRequest):
+        raise ProtectionGroundingAssessmentError(
+            "request must be an AuthoritativeProtectionGroundingRequest"
+        )
+    if not isinstance(snapshot, BrokerSnapshot):
+        raise ProtectionGroundingAssessmentError(
+            "snapshot must be a BrokerSnapshot"
+        )
+    if not isinstance(assessed_at, datetime) or assessed_at.tzinfo is None:
+        raise ProtectionGroundingAssessmentError(
+            "assessed_at must include a timezone"
+        )
+
+    reasons: list[AuthoritativeGroundingReason] = []
+    try:
+        validation = validate_snapshot(snapshot, evaluated_at=assessed_at)
+        snapshot_identity = validation.snapshot_digest
+        snapshot_timestamp = snapshot.metadata.completed_at
+    except (AttributeError, InvalidOperation, TypeError, ValueError):
+        validation = None
+        snapshot_timestamp = None
+        snapshot_identity = hashlib.sha256(
+            _AUTHORITATIVE_DIGEST_DOMAIN
+            + canonical_bytes(
+                {
+                    "source_candidate_id": request.source_candidate_id,
+                    "source_protection_plan_id": request.source_protection_plan_id,
+                    "assessed_at": assessed_at.isoformat(),
+                    "invalid_snapshot": True,
+                }
+            )
+        ).hexdigest()
+        reasons.append(AuthoritativeGroundingReason.SNAPSHOT_INVALID)
+
+    if validation is not None and not validation.valid:
+        reasons.append(
+            AuthoritativeGroundingReason.SNAPSHOT_STALE
+            if validation.result_code == "stale_snapshot"
+            else AuthoritativeGroundingReason.SNAPSHOT_INVALID
+        )
+
+    if request.release_identity != expected_release_identity:
+        reasons.append(AuthoritativeGroundingReason.SOURCE_MISMATCH)
+    if request.implementation_digest != expected_implementation_digest:
+        reasons.append(AuthoritativeGroundingReason.IMPLEMENTATION_MISMATCH)
+    if (
+        request.account_fingerprint_reference
+        != expected_account_fingerprint_reference
+        or snapshot.metadata.account_fingerprint
+        != expected_account_fingerprint_reference
+    ):
+        reasons.append(AuthoritativeGroundingReason.ACCOUNT_MISMATCH)
+
+    state = snapshot.account_state
+    positions = tuple(
+        position
+        for position in state.positions
+        if str(position.symbol).upper() == request.symbol
+    )
+    position_quantity = Decimal("0")
+    position_flat = False
+    if len(positions) > 1:
+        reasons.append(AuthoritativeGroundingReason.POSITION_AMBIGUOUS)
+    elif not positions:
+        position_flat = True
+    else:
+        position = positions[0]
+        try:
+            position_quantity = Decimal(str(position.quantity))
+        except (InvalidOperation, TypeError, ValueError):
+            reasons.append(
+                AuthoritativeGroundingReason.POSITION_QUANTITY_MISMATCH
+            )
+        else:
+            if not position_quantity.is_finite():
+                reasons.append(
+                    AuthoritativeGroundingReason.POSITION_QUANTITY_MISMATCH
+                )
+            elif position_quantity == 0:
+                position_flat = True
+            elif (
+                position_quantity < 0
+                or str(position.position_type).lower() != "long"
+            ):
+                reasons.append(
+                    AuthoritativeGroundingReason.POSITION_IDENTITY_MISMATCH
+                )
+            elif position_quantity != request.expected_position_quantity:
+                reasons.append(
+                    AuthoritativeGroundingReason.POSITION_QUANTITY_MISMATCH
+                )
+
+    stop = None
+    stop_reference = None
+    stop_state = None
+    protective_quantity = None
+    stop_price = None
+    coverage_value = "NOT_EVALUATED"
+
+    if position_flat and not reasons:
+        outcome = AuthoritativeGroundingOutcome.NOT_REQUIRED
+        reasons.append(AuthoritativeGroundingReason.POSITION_FLAT)
+    else:
+        orders = tuple(state.open_orders)
+        matching_ids = tuple(
+            order
+            for order in orders
+            if order.order_id == request.expected_stop_order_id
+        )
+        active_protective = tuple(
+            order
+            for order in orders
+            if str(order.symbol).upper() == request.symbol
+            and str(order.side).lower() == "sell"
+            and str(order.trigger).lower() == "stop"
+        )
+        if len(active_protective) > 1:
+            reasons.append(
+                AuthoritativeGroundingReason.CONFLICTING_ACTIVE_STOPS
+            )
+        if len(matching_ids) != 1:
+            reasons.append(AuthoritativeGroundingReason.STOP_NOT_FOUND)
+        else:
+            stop = matching_ids[0]
+            stop_reference = _safe_order_reference(stop.order_id)
+            stop_state = str(stop.state).strip().lower()
+            protective_quantity = (
+                None if stop.quantity is None else format(stop.quantity, "f")
+            )
+            stop_price = (
+                None
+                if stop.stop_price is None
+                else format(stop.stop_price, "f")
+            )
+            if (
+                str(stop.symbol).upper() != request.symbol
+                or str(stop.side).lower() != "sell"
+                or str(stop.trigger).lower() != "stop"
+                or str(stop.order_type).lower() != "stop_market"
+                or str(stop.placed_agent).lower() != "agentic"
+            ):
+                reasons.append(
+                    AuthoritativeGroundingReason.STOP_IDENTITY_MISMATCH
+                )
+            if stop_state == "replaced":
+                reasons.append(
+                    AuthoritativeGroundingReason
+                    .UNSUPPORTED_REPLACEMENT_LINEAGE
+                )
+            elif stop_state not in AUTHORITATIVE_GROUNDING_ACTIVE_STATES:
+                reasons.append(
+                    AuthoritativeGroundingReason.STOP_STATE_NOT_ACTIVE
+                )
+            if (
+                stop.stop_price is None
+                or stop.stop_price != request.expected_stop_price
+            ):
+                reasons.append(
+                    AuthoritativeGroundingReason.STOP_PRICE_MISMATCH
+                )
+            try:
+                coverage = assess_protective_coverage(
+                    state=stop.state,
+                    side=stop.side,
+                    trigger=stop.trigger,
+                    stop_price=stop.stop_price,
+                    stop_submitted_quantity=stop.quantity,
+                    stop_cumulative_quantity=stop.cumulative_quantity,
+                    verified_remaining_long_quantity=position_quantity,
+                    permitted_active_protection_states=(
+                        AUTHORITATIVE_GROUNDING_ACTIVE_STATES
+                    ),
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                coverage = None
+                reasons.append(
+                    AuthoritativeGroundingReason.BROKER_ORDER_INVALID
+                )
+            if coverage is not None:
+                coverage_value = coverage.coverage.value
+            if (
+                coverage is not None
+                and coverage.coverage
+                is not ProtectiveCoverage.VERIFIED_ACTIVE_PROTECTION
+            ):
+                if any(
+                    gap.value
+                    in {
+                        "QUANTITY_DISAGREEMENT",
+                        "MALFORMED_QUANTITY",
+                        "NO_POSITION_TO_PROTECT",
+                    }
+                    for gap in coverage.gaps
+                ):
+                    reasons.append(
+                        AuthoritativeGroundingReason.STOP_QUANTITY_MISMATCH
+                    )
+                elif not any(
+                    reason
+                    in {
+                        AuthoritativeGroundingReason.STOP_IDENTITY_MISMATCH,
+                        AuthoritativeGroundingReason.STOP_STATE_NOT_ACTIVE,
+                        AuthoritativeGroundingReason.STOP_PRICE_MISMATCH,
+                    }
+                    for reason in reasons
+                ):
+                    reasons.append(
+                        AuthoritativeGroundingReason.STOP_STATE_NOT_ACTIVE
+                    )
+
+        if (
+            request.evidence_source_class
+            not in BROKER_AUTHORITATIVE_SOURCE_CLASSES
+        ):
+            reasons.append(
+                AuthoritativeGroundingReason.EVIDENCE_SOURCE_INELIGIBLE
+            )
+
+        unique_reasons = tuple(dict.fromkeys(reasons))
+        if not unique_reasons:
+            outcome = AuthoritativeGroundingOutcome.GROUNDED
+            unique_reasons = (AuthoritativeGroundingReason.GROUNDED,)
+        else:
+            outcome = AuthoritativeGroundingOutcome.NOT_GROUNDED
+        reasons = list(unique_reasons)
+
+    grounded = outcome is AuthoritativeGroundingOutcome.GROUNDED
+    values = {
+        "assessment_version": AUTHORITATIVE_GROUNDING_VERSION,
+        "assessed_at": assessed_at,
+        "evidence_source_class": request.evidence_source_class,
+        "source_candidate_id": request.source_candidate_id,
+        "source_handoff_id": request.source_handoff_id,
+        "source_protection_plan_id": request.source_protection_plan_id,
+        "release_identity": request.release_identity,
+        "implementation_digest": request.implementation_digest,
+        "account_fingerprint_reference": request.account_fingerprint_reference,
+        "broker_snapshot_identity": snapshot_identity,
+        "broker_snapshot_timestamp": snapshot_timestamp,
+        "position_symbol": request.symbol,
+        "authoritative_position_quantity": format(position_quantity, "f"),
+        "protective_stop_reference": stop_reference,
+        "stop_state": stop_state,
+        "protective_quantity": protective_quantity,
+        "stop_price": stop_price,
+        "expected_stop_price": format(request.expected_stop_price, "f"),
+        "accepted_stop_states": tuple(
+            sorted(AUTHORITATIVE_GROUNDING_ACTIVE_STATES)
+        ),
+        "coverage_assessment": coverage_value,
+        "outcome": outcome,
+        "reason_codes": tuple(reasons),
+        "promotion_permitted": False,
+        "protection_grounded": grounded,
+        "broker_write_count": 0,
+        "execution_authorized": False,
+        "activation_approved": False,
+        "permits_automated_action": False,
+        "live_ready": False,
+        "unattended_ready": False,
+        "authority_ceiling": AUTHORITY_CEILING,
+    }
+    placeholder = SimpleNamespace(**values)
+    digest = hashlib.sha256(
+        _AUTHORITATIVE_DIGEST_DOMAIN
+        + canonical_bytes(_authoritative_result_payload(placeholder))
+    ).hexdigest()
+    return AuthoritativeProtectionGroundingAssessment(
+        assessment_id=digest,
+        assessment_digest=digest,
+        **values,
+    )
+
 __all__ = [
     "ProtectionGroundingAssessmentError",
     "ASSESSMENT_ENGINE_VERSION",
@@ -663,4 +1221,12 @@ __all__ = [
     "OperatorReviewContext",
     "ProtectionGroundingAssessment",
     "evaluate_protection_grounding",
+    "AUTHORITATIVE_GROUNDING_VERSION",
+    "AUTHORITATIVE_GROUNDING_ACTIVE_STATES",
+    "AuthoritativeGroundingOutcome",
+    "AuthoritativeGroundingReason",
+    "AuthoritativeProtectionGroundingRequest",
+    "AuthoritativeProtectionGroundingAssessment",
+    "compute_authoritative_grounding_digest",
+    "evaluate_authoritative_working_stop_grounding",
 ]

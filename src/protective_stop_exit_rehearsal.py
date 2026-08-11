@@ -25,7 +25,7 @@ from src.broker_snapshot import BrokerSnapshot, validate_snapshot
 from src.config import load_config
 from src.exit_engine import ExitAction, ExitEngine, PositionState
 from src.live_broker_capabilities import assess_absolute_protection_invariant
-from src.order_lifecycle_model import assess_protection, normalize_label
+from src.order_lifecycle_model import normalize_label
 from src.order_observer import ObservedEquityOrder
 from src.order_state import OrderPhase, interpret_equity_order
 from src.post_entry_protection_rehearsal import (
@@ -33,7 +33,15 @@ from src.post_entry_protection_rehearsal import (
     ProtectionRehearsalState,
     compute_post_entry_protection_rehearsal_digest,
 )
-from src.protection_observation_model import canonical_bytes
+from src.protection_grounding_assessment import (
+    AuthoritativeProtectionGroundingRequest,
+    ProtectionGroundingAssessmentError,
+    evaluate_authoritative_working_stop_grounding,
+)
+from src.protection_observation_model import (
+    EvidenceSourceClass,
+    canonical_bytes,
+)
 from src.protective_stop_lifecycle import (
     ProtectiveStopAction,
     decide_protective_stop_lifecycle,
@@ -109,6 +117,8 @@ class ProtectiveStopExitRehearsal:
     stop_lifecycle_state: str
     stop_reconciliation_state: str
     m13_protection_reason: str
+    m13_grounding_assessment_id: str | None
+    protection_grounding_source_class: str
     exit_intent: str
     exit_reason: str | None
     exit_action_identity: str | None
@@ -139,8 +149,14 @@ class ProtectiveStopExitRehearsal:
             raise ValueError("rehearsal identity must equal digest")
         if self.broker_write_count != 0 or self.execution_authorized:
             raise ValueError("exit rehearsal cannot write or authorize")
-        if self.protection_grounded:
-            raise ValueError("M13 evidence cannot promote protection grounding")
+        if (
+            self.protection_grounded
+            and self.protection_grounding_source_class
+            != EvidenceSourceClass.LIVE_READ_ONLY_BROKER_OBSERVATION.value
+        ):
+            raise ValueError("only live read-only evidence can ground protection")
+        if self.protection_grounded and not self.m13_grounding_assessment_id:
+            raise ValueError("grounded protection requires an M13 assessment")
         if self.authority_ceiling != AUTHORITY_CEILING:
             raise ValueError("authority ceiling drift")
 
@@ -207,6 +223,9 @@ def build_protective_stop_exit_rehearsal(
     safety_decision_time: datetime | None = None,
     trusted_implementation_digest: str | None = None,
     root: Path | None = None,
+    protection_evidence_source_class: EvidenceSourceClass = (
+        EvidenceSourceClass.TEST_FIXTURE
+    ),
 ) -> ProtectiveStopExitRehearsal:
     """Reconcile broker facts and rehearse exits without invoking a write path."""
     trusted = trusted_implementation_digest or checkpoint_implementation_digest(
@@ -248,7 +267,44 @@ def build_protective_stop_exit_rehearsal(
     expected_stop = source.stop_price
     status = None if order is None else interpret_equity_order(order)
     lifecycle = normalize_label(None if order is None else order.state)
-    grounding = assess_protection(lifecycle)
+    try:
+        grounding_assessment = (
+            evaluate_authoritative_working_stop_grounding(
+                AuthoritativeProtectionGroundingRequest(
+                    source_candidate_id=source.source_shadow_decision_id,
+                    source_handoff_id=source.source_handoff_id,
+                    source_protection_plan_id=source.rehearsal_id,
+                    symbol=source.symbol.upper(),
+                    expected_stop_order_id=protective_stop_order_id,
+                    expected_position_quantity=Decimal(
+                        source.protective_quantity
+                    ),
+                    expected_stop_price=Decimal(source.stop_price),
+                    release_identity=source.release_sha,
+                    implementation_digest=source.implementation_digest,
+                    account_fingerprint_reference=(
+                        source.account_fingerprint_reference
+                    ),
+                    evidence_source_class=(
+                        protection_evidence_source_class
+                    ),
+                ),
+                snapshot=snapshot,
+                assessed_at=evaluated_at,
+                expected_release_identity=release_sha,
+                expected_implementation_digest=trusted,
+                expected_account_fingerprint_reference=(
+                    source.account_fingerprint_reference
+                ),
+            )
+        )
+    except (
+        InvalidOperation,
+        ProtectionGroundingAssessmentError,
+        TypeError,
+        ValueError,
+    ):
+        grounding_assessment = None
     stop_key = (
         None
         if stop_observation is None
@@ -589,7 +645,19 @@ def build_protective_stop_exit_rehearsal(
         observed_stop_price=observed_stop,
         stop_lifecycle_state=lifecycle.value,
         stop_reconciliation_state=stop_state,
-        m13_protection_reason=grounding.reason.value,
+        m13_protection_reason=(
+            "GROUNDING_INPUT_INVALID"
+            if grounding_assessment is None
+            else grounding_assessment.reason_codes[0].value
+        ),
+        m13_grounding_assessment_id=(
+            None
+            if grounding_assessment is None
+            else grounding_assessment.assessment_id
+        ),
+        protection_grounding_source_class=(
+            protection_evidence_source_class.value
+        ),
         exit_intent=exit_intent,
         exit_reason=exit_reason,
         exit_action_identity=exit_action_identity,
@@ -624,7 +692,11 @@ def build_protective_stop_exit_rehearsal(
         mutation_boundary=PROTECTIVE_STOP_MUTATION_BOUNDARY,
         broker_write_count=0,
         execution_authorized=False,
-        protection_grounded=False,
+        protection_grounded=(
+            False
+            if grounding_assessment is None
+            else grounding_assessment.protection_grounded
+        ),
         authority_ceiling=AUTHORITY_CEILING,
     )
     digest = compute_protective_stop_exit_rehearsal_digest(
