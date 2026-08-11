@@ -35,7 +35,7 @@ from src.market_data_canonical import (
 from src.market_data_provider import AlpacaCredentials, AlpacaMarketDataProvider, MarketDataProviderError
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
 from src.shadow_trading_decision import ShadowTradingDecision, build_shadow_trading_decision
-from src.signal_engine import LiveData, OpeningData
+from src.signal_engine import LiveData, OpeningData, SignalEngine
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVIDENCE_DIR = REPOSITORY_ROOT / "artifacts" / "live-shadow"
@@ -214,6 +214,7 @@ def _base_evidence(*, mode: RunMode, symbols: Sequence[str], started_at: datetim
         "quality_rejection_counts": {},
         "opening_range_identity": None,
         "strategy_version": None,
+        "strategy_diagnostics": None,
         "shadow_trading_decision": None,
         "proposed_entry": None,
         "proposed_stop": None,
@@ -371,6 +372,31 @@ def _complete_opening_range(bars: Sequence[MarketBar], *, day: date, minutes: in
     return len(actual) == minutes and set(actual) == expected
 
 
+def _strategy_diagnostics(*, opening: OpeningData, live: LiveData, decision: Any, config: Mapping[str, Any]) -> dict[str, Any]:
+    signal = config["signal"]
+    reason_to_rule = {
+        "Opening gap is below the required threshold.": "OPENING_GAP",
+        "Opening relative volume is below the required threshold.": "OPENING_RELATIVE_VOLUME",
+        "SPY is not above its session VWAP.": "SPY_ABOVE_VWAP",
+        "Completed bar has not broken above the opening-range high.": "OPENING_RANGE_BREAKOUT",
+        "Outside the permitted entry window.": "ENTRY_WINDOW",
+    }
+    return {
+        "failed_rule": None if decision.approved else reason_to_rule.get(decision.reason, "OTHER"),
+        "observed_gap_pct": format(decision.gap_percent, "f"),
+        "required_gap_pct": str(signal["minimum_gap_percent"]),
+        "observed_opening_relative_volume": format(decision.relative_volume, "f"),
+        "required_opening_relative_volume": str(signal["minimum_relative_volume"]),
+        "previous_close": format(opening.previous_close, "f"),
+        "current_session_open": format(opening.today_open, "f"),
+        "opening_range_high": format(opening.opening_range_high, "f"),
+        "opening_range_low": format(opening.opening_range_low, "f"),
+        "breakout_reference_price": format(opening.opening_range_high, "f"),
+        "completed_bar_close": format(live.completed_bar_close, "f"),
+        "permitted_entry_window": f"{signal['entry_start']}-{signal['entry_end']}",
+        "signal_timestamp": live.timestamp.isoformat(),
+    }
+
 def _evaluate(symbol: str, bars_by_symbol: Mapping[str, Sequence[MarketBar]], *, now: datetime, evidence: dict[str, Any], shared_spy_quality: tuple[MarketDataQuality, list[str]] | None = None) -> None:
     day = now.astimezone(EASTERN).date()
     candidate_bars = list(bars_by_symbol[symbol])
@@ -413,7 +439,9 @@ def _evaluate(symbol: str, bars_by_symbol: Mapping[str, Sequence[MarketBar]], *,
     digests = [compute_market_data_digest(bar, normalization_version=NORMALIZATION_VERSION) for bar in ordered]
     evidence["market_data_digest"] = compute_market_data_batch_digest(digests)
     opening_identity = hashlib.sha256((symbol + "|" + day.isoformat() + "|" + str(opening.high_price) + "|" + str(opening.low_price)).encode("utf-8")).hexdigest()
-    decision = build_shadow_trading_decision(shadow_run_id=evidence["run_id"], strategy_version=strategy_version, implementation_digest=evidence["implementation_digest"], market_data_digest=evidence["market_data_digest"], opening_range_identity=opening_identity, exchange_session="REGULAR", market_data_quality=MarketDataQuality.VALID, signal_config=evaluation_config, opening=opening_data, live=live_data, created_at=now)
+    signal_decision = SignalEngine(evaluation_config).evaluate(opening_data, live_data)
+    decision = build_shadow_trading_decision(shadow_run_id=evidence["run_id"], strategy_version=strategy_version, implementation_digest=evidence["implementation_digest"], market_data_digest=evidence["market_data_digest"], opening_range_identity=opening_identity, exchange_session="REGULAR", market_data_quality=MarketDataQuality.VALID, signal_config=evaluation_config, opening=opening_data, live=live_data, created_at=now, evaluated_signal_decision=signal_decision)
+    evidence["strategy_diagnostics"] = _strategy_diagnostics(opening=opening_data, live=live_data, decision=signal_decision, config=config)
     evidence.update(quality_outcome=MarketDataQuality.VALID.value, opening_range_identity=opening_identity, strategy_version=strategy_version, shadow_trading_decision=decision, proposed_entry=decision.proposed_entry, proposed_stop=decision.proposed_stop, no_signal_or_rejection_reason=None if decision.is_candidate else decision.reason)
 
 
@@ -443,6 +471,7 @@ def _symbol_evidence(session_evidence: Mapping[str, Any], symbol: str) -> dict[s
         "quality_rejection_counts": {},
         "opening_range_identity": None,
         "strategy_version": None,
+        "strategy_diagnostics": None,
         "shadow_trading_decision": None,
         "proposed_entry": None,
         "proposed_stop": None,
@@ -482,7 +511,7 @@ def _summarize_results(results: Mapping[str, Mapping[str, Any]]) -> dict[str, An
 
 
 def _copy_single_result_to_session(evidence: dict[str, Any], result: Mapping[str, Any]) -> None:
-    for field in ("normalized_bar_count", "market_data_digest", "quality_outcome", "quality_rejection_reasons", "quality_rejection_counts", "opening_range_identity", "strategy_version", "shadow_trading_decision", "proposed_entry", "proposed_stop", "no_signal_or_rejection_reason", "errors"):
+    for field in ("normalized_bar_count", "market_data_digest", "quality_outcome", "quality_rejection_reasons", "quality_rejection_counts", "opening_range_identity", "strategy_version", "strategy_diagnostics", "shadow_trading_decision", "proposed_entry", "proposed_stop", "no_signal_or_rejection_reason", "errors"):
         evidence[field] = result[field]
 
 

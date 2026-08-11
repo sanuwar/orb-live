@@ -205,6 +205,7 @@ def build_shadow_trading_decision(
     live: LiveData,
     created_at: datetime,
     profit_target_r: Decimal | None = None,
+    evaluated_signal_decision: SignalDecision | None = None,
 ) -> ShadowTradingDecision:
     """The one place M15 wraps `SignalEngine.evaluate()`. If market data
     quality is not VALID, the signal engine is never even called -- a
@@ -219,8 +220,7 @@ def build_shadow_trading_decision(
         decision = SignalDecision(approved=False, reason=f"Market data quality is {market_data_quality.value}.")
         decision_type = ShadowDecisionType.DATA_INVALID
     else:
-        engine = SignalEngine(signal_config)
-        decision = engine.evaluate(opening, live)
+        decision = evaluated_signal_decision or SignalEngine(signal_config).evaluate(opening, live)
         decision_type = (
             ShadowDecisionType.LONG_CANDIDATE if decision.approved
             else ShadowDecisionType.REJECTED

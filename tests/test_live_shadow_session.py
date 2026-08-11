@@ -321,3 +321,14 @@ def test_shared_provider_failure_stops_live_watchlist_deterministically(tmp_path
     assert evidence["errors"] == ["PROVIDER_HTTP_ERROR"]
     assert evidence["symbol_results"] == {}
     assert evidence["broker_write_count"] == 0
+
+
+def test_rejection_diagnostics_are_canonical_and_do_not_change_decision(tmp_path):
+    evidence, _ = asyncio.run(run_session(now=NOW, output_dir=tmp_path))
+    diagnostics = evidence["strategy_diagnostics"]
+    decision = evidence["shadow_trading_decision"]
+    assert diagnostics["failed_rule"] is None
+    assert diagnostics["observed_gap_pct"] == "1.500"
+    assert diagnostics["required_gap_pct"] == "1.0"
+    assert diagnostics["opening_range_high"]
+    assert decision.decision_type is ShadowDecisionType.LONG_CANDIDATE
