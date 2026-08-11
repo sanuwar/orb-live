@@ -22,6 +22,7 @@ from src.protection_observation_model import canonical_bytes
 from src.read_only_authorization_manifest import checkpoint_implementation_digest
 
 ATTENDED_SAFETY_EVALUATION_POLICY_VERSION = "attended-safety-evaluation-bridge-v1"
+PROTECTIVE_STOP_MUTATION_BOUNDARY = "RobinhoodCommissioningAdapter._call"
 _DIGEST_DOMAIN = b"orb-live/attended-safety-evaluation-bridge/v1"
 _REQUIRED_ACKNOWLEDGEMENTS = (
     "acknowledges_loss_may_exceed_plan", "operator_present",
@@ -35,6 +36,55 @@ class AttendedSafetyEvaluationState(str, Enum):
     SAFETY_INPUT_INCOMPLETE = "SAFETY_INPUT_INCOMPLETE"
     SOURCE_INVALID = "SOURCE_INVALID"
 
+
+class ProtectiveStopSafetyState(str, Enum):
+    ALLOW = "ALLOW"
+    DENY = "DENY"
+    INCOMPLETE = "INCOMPLETE"
+
+
+@dataclass(frozen=True)
+class ProtectiveStopSafetyInputs:
+    decision_time: datetime
+    run_id: str
+    source_shadow_decision_id: str
+    source_handoff_id: str
+    entry_action_identity: str
+    entry_order_identity: str
+    broker_snapshot_identity: str
+    symbol: str
+    authoritative_filled_quantity: str
+    protective_quantity: str
+    stop_price: str
+    implementation_digest: str
+    release_sha: str
+    account_fingerprint_reference: str
+    suspension_state: str
+    operator_acknowledgements: OperatorAcknowledgements | None
+    operator_attended: bool
+    source_hash_verified: bool
+
+
+@dataclass(frozen=True)
+class ProtectiveStopSafetyEvaluation:
+    source_handoff_id: str
+    source_shadow_decision_id: str
+    safety_context_identity: str | None
+    safety_decision_identity: str | None
+    protective_action_identity: str | None
+    safety_result: ProtectiveStopSafetyState
+    reason_codes: tuple[str, ...]
+    evaluated_at: datetime
+    execution_authorized: bool = False
+    broker_write_count: int = 0
+    protection_grounded: bool = False
+    authority_ceiling: str = AUTHORITY_CEILING
+
+    def __post_init__(self) -> None:
+        if self.execution_authorized or self.broker_write_count != 0 or self.protection_grounded:
+            raise ValueError("protective-stop safety evidence cannot write or authorize")
+        if self.authority_ceiling != AUTHORITY_CEILING:
+            raise ValueError("authority ceiling drift")
 
 @dataclass(frozen=True)
 class AttendedSafetyInputs:
@@ -257,8 +307,55 @@ def build_attended_safety_evaluation_result(
     return AttendedSafetyEvaluationResult(**{**preliminary.__dict__, "evaluation_id": digest, "evaluation_digest": digest})
 
 
+def evaluate_protective_stop_safety(inputs: ProtectiveStopSafetyInputs) -> ProtectiveStopSafetyEvaluation:
+    """Evaluate one explicit stop action through the existing M14 gates only."""
+    if not isinstance(inputs, ProtectiveStopSafetyInputs):
+        raise TypeError("inputs must be ProtectiveStopSafetyInputs")
+    incomplete: list[str] = []
+    if inputs.operator_acknowledgements is None:
+        incomplete.append("OPERATOR_ACK_REQUIRED")
+    if not all((inputs.run_id, inputs.source_shadow_decision_id, inputs.source_handoff_id,
+                inputs.entry_action_identity, inputs.entry_order_identity,
+                inputs.broker_snapshot_identity, inputs.account_fingerprint_reference)):
+        incomplete.append("SOURCE_IDENTITY_INCOMPLETE")
+    if inputs.authoritative_filled_quantity != "1" or inputs.protective_quantity != "1":
+        incomplete.append("ONE_SHARE_PROTECTION_INCOMPLETE")
+    if inputs.suspension_state != "CLEAR":
+        incomplete.append("SUSPENSION_NOT_CLEAR")
+    if incomplete:
+        return ProtectiveStopSafetyEvaluation(
+            inputs.source_handoff_id, inputs.source_shadow_decision_id, None, None, None,
+            ProtectiveStopSafetyState.INCOMPLETE, tuple(dict.fromkeys(incomplete)), inputs.decision_time,
+        )
+    evidence = CommissioningGovernanceEvidence(
+        commissioning_mode=CommissioningMode.ATTENDED,
+        operator_attended=inputs.operator_attended,
+        operator_acknowledgements=inputs.operator_acknowledgements,
+        source_hash_verified=inputs.source_hash_verified,
+        release_sha=inputs.release_sha,
+        implementation_digest=inputs.implementation_digest,
+        account_fingerprint_matched=True,
+        account_fingerprint_reference=inputs.account_fingerprint_reference,
+        suspension_state=inputs.suspension_state,
+    )
+    context = ExecutionSafetyContext(
+        context_version="1", decision_time=inputs.decision_time, run_id=inputs.run_id,
+        action=ExecutionAction.STOP_PLACE, symbol=inputs.symbol, side="sell",
+        order_type="stop_market", quantity=inputs.protective_quantity,
+        stop_price=inputs.stop_price, order_id=None, governance_evidence=evidence,
+    )
+    decision = evaluate_execution_safety(context)
+    outcome = ProtectiveStopSafetyState.ALLOW if decision.outcome is ExecutionSafetyOutcome.ALLOW else ProtectiveStopSafetyState.DENY
+    return ProtectiveStopSafetyEvaluation(
+        inputs.source_handoff_id, inputs.source_shadow_decision_id,
+        context.action_identity(), decision.decision_id, context.action_identity(),
+        outcome, decision.reason_codes, decision.evaluated_at,
+    )
+
 __all__ = [
-    "ATTENDED_SAFETY_EVALUATION_POLICY_VERSION", "AttendedSafetyEvaluationResult",
+    "ATTENDED_SAFETY_EVALUATION_POLICY_VERSION", "PROTECTIVE_STOP_MUTATION_BOUNDARY", "AttendedSafetyEvaluationResult",
     "AttendedSafetyEvaluationState", "AttendedSafetyInputs",
+    "ProtectiveStopSafetyEvaluation", "ProtectiveStopSafetyInputs", "ProtectiveStopSafetyState",
     "build_attended_safety_evaluation_result", "compute_attended_safety_evaluation_digest",
+    "evaluate_protective_stop_safety",
 ]
