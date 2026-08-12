@@ -66,17 +66,14 @@ def test_m15_modules_do_not_import_execution_gates_or_governance():
                         raise AssertionError(f"{relative} imports {alias.name}")
 
 
-def test_pinned_implementation_closure_is_unaffected_by_m15():
-    """M15 is not part of the M14 commissioning checkpoint's reviewed
-    execution closure at all -- confirms the pinned count/digest this
-    session's M14 work left in place is exactly what it was before any
-    M15 file existed."""
+def test_m22_pins_only_market_data_types_reached_by_unattended_runtime():
+    """M22 deliberately brings canonical strategy evidence into the trusted
+    production closure without bringing the provider/network implementation
+    into the broker-write closure."""
     from src.read_only_authorization_manifest import PINNED_IMPLEMENTATION_CLOSURE
 
-    m15_paths = {
-        "src/market_data_canonical.py",
-        "src/market_data_provider.py",
-        "src/shadow_trading_decision.py",
-    }
-    assert not (m15_paths & set(PINNED_IMPLEMENTATION_CLOSURE))
-    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 37
+    pinned = set(PINNED_IMPLEMENTATION_CLOSURE)
+    assert "src/market_data_canonical.py" in pinned
+    assert "src/shadow_trading_decision.py" in pinned
+    assert "src/market_data_provider.py" not in pinned
+    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 51

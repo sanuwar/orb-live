@@ -195,6 +195,24 @@ PINNED_IMPLEMENTATION_CLOSURE: tuple[str, ...] = (
     # not in DEFAULT_COMMISSIONING_GATES -- Issue 2's own conclusion is
     # that no honest kill-switch/realized-daily-loss source exists yet.
     "src/commissioning_risk_state.py",
+    # M22: the complete bounded unattended production runtime closure. The
+    # policy remains disabled by default; pinning covers structural capability,
+    # not activation. These paths are reached from the explicit M22 runtime
+    # closure root independently checked by the manifest guard.
+    "src/attended_safety_evaluation_bridge.py",
+    "src/bounded_unattended_orchestrator.py",
+    "src/exit_engine.py",
+    "src/live_attended_preflight_inputs.py",
+    "src/market_data.py",
+    "src/market_data_canonical.py",
+    "src/shadow_candidate_commissioning_review.py",
+    "src/shadow_execution_simulator.py",
+    "src/shadow_trading_decision.py",
+    "src/signal_engine.py",
+    "src/supervised_micro_live_dry_run.py",
+    "src/supervised_micro_live_preflight.py",
+    "src/unattended_pilot_runtime.py",
+    "src/unattended_pilot_state.py",
 )
 
 #: Domain separation. A digest of this closure must never collide with a digest

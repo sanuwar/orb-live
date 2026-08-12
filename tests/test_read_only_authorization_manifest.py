@@ -1010,6 +1010,7 @@ CLOSURE_ENTRY_POINTS = (
     "src/read_only_observation_runtime.py",
     "src/read_only_broker_state.py",
     "src/live_order_state_model.py",
+    "src/unattended_pilot_runtime.py",
 )
 
 
@@ -1152,6 +1153,8 @@ def test_the_old_five_file_contract_is_gone():
     # commissioning suspension gate and the deferred-gates ecosystem it
     # transitively reaches; +1 in M14 Issue 2 for the commissioning
     # risk-state gate, reached through that same already-pinned
-    # deferred-gates ecosystem (never copy a historical count forward --
-    # this is the current, live closure size).
-    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 37
+    # deferred-gates ecosystem; +14 in M22 for the bounded unattended
+    # production runtime and its exact transitive strategy/evidence/state
+    # dependencies (never copy a historical count forward -- this is the
+    # current, live closure size).
+    assert len(PINNED_IMPLEMENTATION_CLOSURE) == 51

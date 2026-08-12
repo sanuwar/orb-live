@@ -349,7 +349,7 @@ def _transition(run: UnattendedRun, state: UnattendedState, *, reasons: tuple[st
     return _run(**values)
 
 
-def _candidate_authentic(decision: ShadowTradingDecision, policy: UnattendedPilotPolicy) -> tuple[bool, tuple[str, ...]]:
+def validate_unattended_candidate(decision: ShadowTradingDecision, policy: UnattendedPilotPolicy) -> tuple[bool, tuple[str, ...]]:
     reasons: list[str] = []
     try:
         digest = compute_shadow_decision_digest(
@@ -427,8 +427,13 @@ class BoundedUnattendedOrchestrator:
         run = _run(**base)
         if not policy.enabled:
             return _transition(run, UnattendedState.DISABLED, reasons=("POLICY_DISABLED",))
-        if policy.evidence_origin is not PolicyEvidenceOrigin.TEST_FIXTURE:
-            return _transition(run, UnattendedState.POLICY_BLOCKED, reasons=("PRODUCTION_ACTIVATION_NOT_IMPLEMENTED",))
+        if policy.evidence_origin is PolicyEvidenceOrigin.REVIEWED_PRODUCTION and not (
+            policy.activation_approved and policy.permits_automated_action
+        ):
+            return _transition(
+                run, UnattendedState.POLICY_BLOCKED,
+                reasons=("PRODUCTION_ACTIVATION_NOT_APPROVED",),
+            )
         if now.astimezone(EASTERN).date() > policy.deployment_expiry:
             return _transition(run, UnattendedState.POLICY_BLOCKED, reasons=("POLICY_EXPIRED",))
         if not gates.source_hash_verified:
@@ -461,7 +466,7 @@ class BoundedUnattendedOrchestrator:
             return _transition(run, UnattendedState.MARKET_DATA_BLOCKED, reasons=("OUTSIDE_ENTRY_WINDOW",))
         if candidate is None:
             return _transition(run, UnattendedState.WATCHING)
-        authentic, reasons = _candidate_authentic(candidate, policy)
+        authentic, reasons = validate_unattended_candidate(candidate, policy)
         if not authentic:
             return _transition(run, UnattendedState.MARKET_DATA_BLOCKED, reasons=reasons)
         if candidate.trading_date != run.trading_date or candidate.signal_timestamp.astimezone(EASTERN).date() != run.trading_date:
@@ -639,5 +644,5 @@ __all__ = [
     "PolicyEvidenceOrigin", "SafetyResult", "SimulatedAction",
     "SimulatedMutationBoundary", "SimulatedMutationReceipt", "UnattendedPilotPolicy",
     "UnattendedRun", "UnattendedState", "build_unattended_pilot_policy",
-    "compute_policy_digest", "compute_run_digest",
+    "compute_policy_digest", "compute_run_digest", "validate_unattended_candidate",
 ]

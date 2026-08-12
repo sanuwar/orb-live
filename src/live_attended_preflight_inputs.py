@@ -158,7 +158,7 @@ def compute_live_attended_preflight_digest(result: LiveAttendedPreflightResult) 
     return hashlib.sha256(_DIGEST_DOMAIN + b"\x00result\x00" + canonical_bytes(_fields(result))).hexdigest()
 
 
-def _suspension_status(
+def validate_suspension_observation(
     observation: SuspensionObservation | None,
     *, evaluated_at: datetime,
     maximum_age: timedelta,
@@ -231,7 +231,7 @@ def build_live_attended_preflight_result(
     else:
         reasons.append("ACCOUNT_IDENTITY_REQUIRED")
 
-    suspension_status, suspension_id = _suspension_status(
+    suspension_status, suspension_id = validate_suspension_observation(
         suspension_observation,
         evaluated_at=evaluated_at,
         maximum_age=maximum_suspension_observation_age,
@@ -294,4 +294,5 @@ __all__ = [
     "build_live_attended_preflight_result",
     "compute_live_attended_preflight_digest",
     "observe_suspension",
+    "validate_suspension_observation",
 ]

@@ -211,7 +211,7 @@ def test_disabled_invalid_and_production_policies_cannot_trade():
     production = policy(evidence_origin=PolicyEvidenceOrigin.REVIEWED_PRODUCTION)
     _, boundary, run = started(current_policy=production)
     assert run.state is UnattendedState.POLICY_BLOCKED
-    assert run.blocking_reasons == ("PRODUCTION_ACTIVATION_NOT_IMPLEMENTED",)
+    assert run.blocking_reasons == ("PRODUCTION_ACTIVATION_NOT_APPROVED",)
     assert boundary.calls == []
     with pytest.raises(UnattendedOrchestratorError):
         policy(quantity=2)

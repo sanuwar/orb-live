@@ -33,7 +33,7 @@ from tests.snapshot_helpers import make_broker_snapshot
 DAY = date(2026, 8, 11)
 SIGNAL = datetime(2026, 8, 11, 14, 45, tzinfo=timezone.utc)
 NOW = datetime(2026, 8, 11, 14, 50, tzinfo=timezone.utc)
-TRUSTED = "8e544058a0445c8443f3b5089293b0d8e3a5211dd5d7d3790343d0f34b1866c1"
+TRUSTED = "e21040027b326716fe4d08a38f6deda23eb69f03a445325d65b6e63a8dac9513"
 
 
 def candidate() -> ShadowTradingDecision:

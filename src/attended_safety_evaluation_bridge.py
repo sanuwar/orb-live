@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from src.execution_safety_governance import (
-    AUTHORITY_CEILING, CommissioningGovernanceEvidence, CommissioningMode,
+    ACTION_FOR_ROLE, AUTHORITY_CEILING, UNATTENDED_PILOT_GATES,
+    UNATTENDED_POLICY_VERSION, CommissioningGovernanceEvidence, CommissioningMode,
     ExecutionAction, ExecutionSafetyContext, ExecutionSafetyDecision,
     ExecutionSafetyOutcome, OperatorAcknowledgements, compute_decision_digest,
     evaluate_execution_safety,
@@ -453,11 +454,58 @@ def evaluate_attended_exit_safety(inputs: AttendedExitSafetyInputs) -> AttendedE
     )
 
 
+def evaluate_unattended_pilot_safety(
+    *, policy: Any, decision_time: datetime, run_id: str, role: str,
+    symbol: str, stop_price: str | None, order_id: str | None,
+    attempt_id: str, broker_snapshot_identity: str,
+    snapshot_fresh: bool, suspension_fresh: bool,
+    no_conflicting_broker_state: bool,
+    kill_state_clear: bool, risk_bounds_verified: bool,
+    risk_state_allows_new_risk: bool, health_allows_new_risk: bool,
+    source_hash_verified: bool, account_fingerprint_matched: bool,
+    suspension_state: str,
+) -> ExecutionSafetyDecision:
+    """Evaluate one unattended action through the existing M14 engine."""
+    if role not in ACTION_FOR_ROLE:
+        raise ValueError("unattended action role is invalid")
+    side, order_type = {
+        "entry": ("buy", "market"), "stop": ("sell", "stop_market"),
+        "exit": ("sell", "market"), "cancel": ("", ""),
+    }[role]
+    evidence = CommissioningGovernanceEvidence(
+        commissioning_mode=CommissioningMode.UNATTENDED_PILOT,
+        operator_attended=False,
+        operator_acknowledgements=OperatorAcknowledgements(False, False, False, False),
+        source_hash_verified=source_hash_verified,
+        release_sha=getattr(policy, "release_sha", ""),
+        implementation_digest=getattr(policy, "implementation_digest", ""),
+        account_fingerprint_matched=account_fingerprint_matched,
+        account_fingerprint_reference=getattr(policy, "account_fingerprint_reference", ""),
+        suspension_state=suspension_state, unattended_policy=policy,
+        unattended_attempt_id=attempt_id,
+        unattended_broker_snapshot_identity=broker_snapshot_identity,
+        unattended_snapshot_fresh=snapshot_fresh,
+        unattended_suspension_fresh=suspension_fresh,
+        unattended_no_conflicting_broker_state=no_conflicting_broker_state,
+        unattended_kill_state_clear=kill_state_clear,
+        unattended_risk_bounds_verified=risk_bounds_verified,
+        unattended_risk_state_allows_new_risk=risk_state_allows_new_risk,
+        unattended_health_allows_new_risk=health_allows_new_risk,
+    )
+    context = ExecutionSafetyContext(
+        context_version="bounded-unattended-pilot-context-v1",
+        policy_version=UNATTENDED_POLICY_VERSION, decision_time=decision_time,
+        run_id=run_id, action=ACTION_FOR_ROLE[role], symbol=symbol, side=side,
+        order_type=order_type, quantity="1", stop_price=stop_price,
+        order_id=order_id, governance_evidence=evidence,
+    )
+    return evaluate_execution_safety(context, gates=UNATTENDED_PILOT_GATES)
+
 __all__ = [
     "ATTENDED_SAFETY_EVALUATION_POLICY_VERSION", "PROTECTIVE_STOP_MUTATION_BOUNDARY", "AttendedSafetyEvaluationResult",
     "AttendedSafetyEvaluationState", "AttendedSafetyInputs",
     "ProtectiveStopSafetyEvaluation", "ProtectiveStopSafetyInputs", "ProtectiveStopSafetyState",
     "AttendedExitSafetyEvaluation", "AttendedExitSafetyInputs", "AttendedExitSafetyState",
     "build_attended_safety_evaluation_result", "compute_attended_safety_evaluation_digest",
-    "evaluate_protective_stop_safety", "evaluate_attended_exit_safety",
+    "evaluate_protective_stop_safety", "evaluate_attended_exit_safety", "evaluate_unattended_pilot_safety",
 ]

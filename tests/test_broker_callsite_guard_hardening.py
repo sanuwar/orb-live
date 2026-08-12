@@ -426,7 +426,7 @@ def test_existing_commissioning_write_site_remains_detected():
     # role/validate_execution_safety_decision checks) was extended in place
     # immediately before this same single write call, which is still
     # exactly one call site, still SAFE_WRAPPER, still the only one.
-    assert commissioning[0].line == 237
+    assert commissioning[0].line == 268
     assert commissioning[0].kind == SAFE_WRAPPER
 
 
