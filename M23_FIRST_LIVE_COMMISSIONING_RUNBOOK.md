@@ -27,23 +27,28 @@ python scripts/run_live_shadow_session.py --mode LIVE_SHADOW --production --symb
 Preserve the live-shadow evidence. It must contain an authentic
 `LONG_CANDIDATE`; a rejection or no-signal is not a commissioning input.
 
-Build the existing review, dry-run, preflight, safety evaluation, and handoff
-artifacts using their saved evidence. Then run the final non-writing rehearsal:
+Build the existing review, dry-run, preflight, live preflight, safety evaluation,
+and sanitized attended handoff with the candidate-to-handoff command. It requires
+all four explicit acknowledgements and uses only the established read-only account
+and suspension observation path:
 
 ```powershell
-python scripts/run_supervised_micro_live_rehearsal.py --handoff <sanitized-handoff.json>
+python scripts/build_live_candidate_commissioning_handoff.py --live-shadow <live-shadow-evidence.json> --release-sha <current-40-character-sha> --suspension-db <absolute-path-outside-repository> --ack acknowledges_loss_may_exceed_plan --ack operator_present --ack robinhood_ui_open --ack no_second_trade
 ```
 
-The required stopping point is
-`READY_FOR_EXPLICIT_ATTENDED_WRITE_AUTHORIZATION` immediately before
-`RobinhoodCommissioningAdapter._call()`.
-
-For the one bounded production read-only verification, use the existing runner
-with an absolute, operator-managed suspension database path:
+On success it writes `review.json`, `dry_run.json`, `preflight.json`,
+`live_preflight.json`, `safety_evaluation.json`, and `handoff.json` below
+`artifacts/commissioning-handoff/<handoff-id>/`, then prints this exact next
+non-writing command using the saved handoff path:
 
 ```powershell
 python scripts/run_production_read_only_rehearsal.py --production-read-only --live-shadow <live-shadow-evidence.json> --handoff <sanitized-handoff.json> --release-sha <current-40-character-sha> --suspension-db <absolute-path-outside-repository> --ack acknowledges_loss_may_exceed_plan --ack operator_present --ack robinhood_ui_open --ack no_second_trade
 ```
+
+Do not execute the next command automatically. The production read-only
+rehearsal remains the final non-writing gate and its required stopping point is
+`READY_FOR_EXPLICIT_ATTENDED_WRITE_AUTHORIZATION`, immediately before
+`RobinhoodCommissioningAdapter._call()`.
 
 That command may observe only the authoritative account fingerprint and
 suspension state. It stops before `RobinhoodCommissioningAdapter._call()`.
