@@ -15,7 +15,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.bounded_unattended_orchestrator import validate_unattended_candidate
+from src.bounded_unattended_orchestrator import (
+    UnattendedState, compute_unattended_run_id, validate_unattended_candidate,
+)
 from src.exchange_calendar import EASTERN
 from src.offline_path_safety import REPOSITORY_ROOT
 from src.protection_observation_model import canonical_bytes
@@ -238,8 +240,8 @@ class UnattendedPilotStateStore:
             row[0], trading_date, row[1], row[2], row[3], row[4], row[5], fingerprint,
             row[6], row[7], datetime.fromisoformat(row[8]), AttemptOutcome(row[9]))
 
-    def reserve_entry_attempt(self, *, policy: Any, candidate: Any, trading_date: date,
-                              run_id: str, trade_id: str, now: datetime) -> DailyAttemptRecord:
+    def reserve_entry_attempt(self, *, policy: Any, candidate: Any,
+                              unattended_run: Any, now: datetime) -> DailyAttemptRecord:
         origin = getattr(getattr(policy, "evidence_origin", None), "value", None)
         if origin != "REVIEWED_PRODUCTION" or not all((policy.enabled,
                 policy.activation_approved, policy.permits_automated_action)):
@@ -247,15 +249,26 @@ class UnattendedPilotStateStore:
         authentic, reasons = validate_unattended_candidate(candidate, policy)
         if not authentic:
             raise UnattendedPilotStateError("candidate is not authentic: " + ",".join(reasons))
-        if not _sha64(run_id) or trade_id != candidate.decision_id:
-            raise UnattendedPilotStateError("run/trade identity is not canonical")
+        trading_date = getattr(unattended_run, "trading_date", None)
+        run_id = getattr(unattended_run, "run_id", None)
+        if not all((
+            getattr(unattended_run, "state", None) is UnattendedState.ENTRY_PREFLIGHT,
+            getattr(unattended_run, "policy_id", None) == policy.policy_id,
+            getattr(unattended_run, "candidate_id", None) == candidate.decision_id,
+            getattr(unattended_run, "symbol", None) == candidate.symbol,
+            run_id == compute_unattended_run_id(
+                policy_id=policy.policy_id, trading_date=trading_date,
+                candidate_id=candidate.decision_id,
+            ),
+        )):
+            raise UnattendedPilotStateError("M21 run identity/state mismatch")
         timestamp = _aware(now)
         if candidate.trading_date != trading_date or (
             candidate.signal_timestamp.astimezone(EASTERN).date() != trading_date
         ):
             raise UnattendedPilotStateError("candidate trading date mismatch")
         body = {"policy": policy.policy_id, "date": trading_date.isoformat(), "run": run_id,
-                "trade": trade_id, "candidate": candidate.decision_id,
+                "trade": candidate.decision_id, "candidate": candidate.decision_id,
                 "symbol": candidate.symbol, "at": timestamp.isoformat()}
         attempt_id = hashlib.sha256(_DOMAIN + b"\0attempt\0" + canonical_bytes(body)).hexdigest()
         try:
@@ -264,7 +277,7 @@ class UnattendedPilotStateStore:
                 raise UnattendedPilotStateError("kill state blocks entry")
             self._connection.execute("INSERT INTO daily_attempts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
                 policy.account_fingerprint_reference, trading_date.isoformat(), attempt_id,
-                run_id, trade_id, candidate.decision_id, None, candidate.symbol,
+                run_id, candidate.decision_id, candidate.decision_id, None, candidate.symbol,
                 policy.release_sha, policy.implementation_digest, timestamp.isoformat(),
                 AttemptOutcome.RESERVED.value))
             self._connection.execute("COMMIT")

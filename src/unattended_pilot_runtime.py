@@ -6,6 +6,7 @@ durable M22 blocker store, and existing commissioning adapter.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -14,7 +15,8 @@ from typing import Any, Mapping
 
 from src.attended_safety_evaluation_bridge import evaluate_unattended_pilot_safety
 from src.bounded_unattended_orchestrator import (
-    PolicyEvidenceOrigin, UnattendedPilotPolicy, UnattendedState,
+    BoundedUnattendedOrchestrator, PolicyEvidenceOrigin, UnattendedPilotPolicy,
+    UnattendedRun, UnattendedState,
 )
 from src.broker_snapshot import BrokerSnapshot, validate_snapshot
 from src.commissioning_suspension_identity import CommissioningSuspensionIdentity
@@ -51,6 +53,7 @@ class ProductionWriteResult:
     kill_state_entered: bool
     broker_write_count: int
     reason_code: str
+    unattended_run: UnattendedRun
 
 
 @dataclass(frozen=True)
@@ -130,9 +133,39 @@ def _validated_read_only_inputs(
         suspension_fresh_clear, account_matches, broker_state_ok,
     )
 
+def _validate_run_action(
+    *, run: UnattendedRun, policy: UnattendedPilotPolicy,
+    attempt: DailyAttemptRecord | None, role: str, symbol: str,
+) -> DailyAttemptRecord:
+    expected_state = {
+        "entry": UnattendedState.ENTRY_PREFLIGHT,
+        "stop": UnattendedState.PROTECTION_REQUIRED,
+        "cancel": UnattendedState.EXIT_PENDING,
+        "exit": UnattendedState.EXIT_READY,
+    }.get(role)
+    if attempt is None or not all((
+        expected_state is not None, run.state is expected_state,
+        run.policy_id == policy.policy_id, run.run_id == attempt.run_id,
+        run.candidate_id == attempt.candidate_id, run.symbol == symbol,
+        run.trading_date == attempt.trading_date,
+    )):
+        raise UnattendedPilotRuntimeError("M21 run/action binding mismatch")
+    return attempt
+
+
+def _safe_broker_order_identity(value: Any, permit: UnattendedWritePermit) -> str:
+    raw = str(getattr(value, "server_order_id", "") or permit.order_id or "")
+    if not raw:
+        return ""
+    return hashlib.sha256(
+        b"orb-live/unattended-broker-order-identity/v1\0"
+        + permit.permit_id.encode("ascii") + b"\0" + raw.encode("utf-8")
+    ).hexdigest()
+
 def evaluate_production_action_safety(
-    *, policy: UnattendedPilotPolicy, attempt: DailyAttemptRecord,
-    inputs: ProductionSafetyInputs, decision_time: datetime, run_id: str,
+    *, run: UnattendedRun, policy: UnattendedPilotPolicy,
+    attempt: DailyAttemptRecord, inputs: ProductionSafetyInputs,
+    decision_time: datetime,
     role: str, symbol: str, stop_price: str | None = None,
     order_id: str | None = None,
 ) -> ExecutionSafetyDecision:
@@ -140,8 +173,9 @@ def evaluate_production_action_safety(
         raise UnattendedPilotRuntimeError("production unattended policy is disabled")
     if attempt.account_fingerprint_reference != policy.account_fingerprint_reference:
         raise UnattendedPilotRuntimeError("attempt account does not match policy")
-    if run_id != attempt.run_id:
-        raise UnattendedPilotRuntimeError("run identity does not match durable attempt")
+    _validate_run_action(
+        run=run, policy=policy, attempt=attempt, role=role, symbol=symbol,
+    )
     if attempt.release_sha != policy.release_sha or (
         attempt.implementation_digest != policy.implementation_digest
     ):
@@ -154,7 +188,7 @@ def evaluate_production_action_safety(
         symbol=symbol, order_id=order_id,
     )
     return evaluate_unattended_pilot_safety(
-        policy=policy, decision_time=decision_time, run_id=run_id, role=role,
+        policy=policy, decision_time=decision_time, run_id=run.run_id, role=role,
         symbol=symbol, stop_price=stop_price, order_id=order_id,
         attempt_id=attempt.attempt_id,
         broker_snapshot_identity=snapshot_identity,
@@ -198,8 +232,9 @@ def issue_production_write_permit(
 
 
 async def dispatch_production_write(
-    *, adapter: RobinhoodCommissioningAdapter, store: UnattendedPilotStateStore,
-    policy: UnattendedPilotPolicy, permit: UnattendedWritePermit,
+    *, run: UnattendedRun, adapter: RobinhoodCommissioningAdapter,
+    store: UnattendedPilotStateStore, policy: UnattendedPilotPolicy,
+    permit: UnattendedWritePermit,
     safety_decision: ExecutionSafetyDecision, arguments: Mapping[str, Any],
     now: datetime,
 ) -> ProductionWriteResult:
@@ -212,16 +247,36 @@ async def dispatch_production_write(
         raise UnattendedPilotRuntimeError("existing commissioning adapter required")
     if not policy_is_production_active(policy):
         raise UnattendedPilotRuntimeError("production unattended policy is disabled")
+    _validate_run_action(
+        run=run, policy=policy, attempt=store.attempt_for(
+            permit.account_fingerprint_reference, permit.trading_date
+        ), role=permit.role, symbol=permit.symbol,
+    )
     store.mark_dispatching(permit)
+    response: Any = None
+
+    def finish(
+        state: ProductionWriteState, kill: bool, count: int, reason: str,
+    ) -> ProductionWriteResult:
+        updated = BoundedUnattendedOrchestrator.record_production_write_result(
+            run, role=permit.role, state=state.value,
+            action_identity=safety_decision.action_identity,
+            broker_order_identity=_safe_broker_order_identity(response, permit),
+            reason_code=reason,
+        )
+        return ProductionWriteResult(
+            permit.permit_id, permit.role, state, kill, count, reason, updated,
+        )
+
     try:
         if permit.role == "cancel":
-            await adapter.cancel_equity_order(
+            response = await adapter.cancel_equity_order(
                 {"order_id": permit.order_id}, safety_decision=safety_decision,
                 unattended_policy=policy, unattended_write_permit=permit,
                 unattended_state_store=store,
             )
         else:
-            await adapter.place_equity_order(
+            response = await adapter.place_equity_order(
                 arguments, role=permit.role, safety_decision=safety_decision,
                 unattended_policy=policy, unattended_write_permit=permit,
                 unattended_state_store=store,
@@ -230,15 +285,13 @@ async def dispatch_production_write(
         store.mark_write_outcome_unknown(
             permit, reason_code=exc.category, now=now
         )
-        return ProductionWriteResult(
-            permit.permit_id, permit.role,
+        return finish(
             ProductionWriteState.WRITE_OUTCOME_UNKNOWN, True, 0, exc.category,
         )
     except ExecutionSafetyDeniedError as exc:
         store.mark_known_outcome(permit, accepted=False)
-        return ProductionWriteResult(
-            permit.permit_id, permit.role, ProductionWriteState.REJECTED,
-            False, 0, type(exc).__name__,
+        return finish(
+            ProductionWriteState.REJECTED, False, 0, type(exc).__name__,
         )
     except CommissioningError as exc:
         # The durable permit was marked DISPATCHING before entering the adapter.
@@ -246,15 +299,11 @@ async def dispatch_production_write(
         # safe to classify that as a rejection or to retry it.
         reason = "WRITE_RESPONSE_CONTRACT_AMBIGUOUS"
         store.mark_write_outcome_unknown(permit, reason_code=reason, now=now)
-        return ProductionWriteResult(
-            permit.permit_id, permit.role,
+        return finish(
             ProductionWriteState.WRITE_OUTCOME_UNKNOWN, True, 0, reason,
         )
     store.mark_known_outcome(permit, accepted=True)
-    return ProductionWriteResult(
-        permit.permit_id, permit.role, ProductionWriteState.ACCEPTED,
-        False, 1, "OK",
-    )
+    return finish(ProductionWriteState.ACCEPTED, False, 1, "OK")
 
 
 def reconcile_startup(

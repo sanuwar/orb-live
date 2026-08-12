@@ -139,6 +139,6 @@ def test_audit_uses_existing_contracts_and_expected_digest() -> None:
     # reached because execution_safety_governance_deferred_gates.py
     # (already pinned) deferred-imports it. Never copy a historical value
     # forward -- this asserts the current, live-recomputed values.
-    assert report["implementation_digest"] == "e21040027b326716fe4d08a38f6deda23eb69f03a445325d65b6e63a8dac9513"
+    assert report["implementation_digest"] == "c45f7610cde1e491016dccc49029c9df5c3eeb87e1ab504d625bb5f92edad9f6"
     assert report["pinned_file_count"] == 51
     assert report["architecture_audit_reference"] == "scripts/architecture_audit.py:audit_repository"

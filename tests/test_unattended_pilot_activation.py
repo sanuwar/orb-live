@@ -10,10 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.bounded_unattended_orchestrator as m21
 from src.account_state import EquityOrder
 from src.bounded_unattended_orchestrator import (
-    FIXED_WATCHLIST, PolicyEvidenceOrigin, UnattendedOrchestratorError,
-    UnattendedState, build_unattended_pilot_policy,
+    BoundedUnattendedOrchestrator, DailyAttemptEvidence, FIXED_WATCHLIST,
+    MachineGateEvidence, PolicyEvidenceOrigin, SimulatedMutationBoundary,
+    UnattendedOrchestratorError, UnattendedState,
+    build_unattended_pilot_policy,
 )
 from src.broker_snapshot import account_fingerprint
 from src.commissioning_suspension_identity import CommissioningSuspensionIdentity
@@ -32,7 +35,8 @@ from src.shadow_trading_decision import (
     ShadowDecisionType, ShadowTradingDecision, compute_shadow_decision_digest,
 )
 from src.unattended_pilot_runtime import (
-    ProductionSafetyInputs, ProductionWriteState, dispatch_production_write,
+    ProductionSafetyInputs, ProductionWriteState, UnattendedPilotRuntimeError,
+    dispatch_production_write,
     evaluate_production_action_safety, issue_production_write_permit,
     policy_is_production_active, reconcile_startup,
 )
@@ -135,6 +139,25 @@ def safety_inputs(**changes):
     values.update(changes)
     return ProductionSafetyInputs(**values)
 
+def production_run(current_policy, *, symbol="MSFT", role="entry"):
+    item = candidate(symbol=symbol)
+    run = BoundedUnattendedOrchestrator(SimulatedMutationBoundary()).start(
+        policy=current_policy, candidate=item, snapshot=snapshot(),
+        daily_attempt=DailyAttemptEvidence(True, True, False, False, "e" * 64),
+        gates=MachineGateEvidence(
+            "CLEAR", True, True, True, True, True, True,
+        ), now=NOW,
+    )
+    desired = {
+        "entry": UnattendedState.ENTRY_PREFLIGHT,
+        "stop": UnattendedState.PROTECTION_REQUIRED,
+        "cancel": UnattendedState.EXIT_PENDING,
+        "exit": UnattendedState.EXIT_READY,
+    }[role]
+    return run if role == "entry" else m21._transition(
+        run, desired, daily_allowance_consumed=True,
+    )
+
 def entry_arguments(symbol="MSFT"):
     return {"account_number": ACCOUNT_NUMBER, "symbol": symbol, "side": "buy",
             "type": "market", "quantity": "1", "time_in_force": "gfd",
@@ -142,18 +165,20 @@ def entry_arguments(symbol="MSFT"):
 
 
 def reserve(store, current_policy=None, symbol="MSFT"):
+    selected = current_policy or active_policy()
     item = candidate(symbol=symbol)
     return store.reserve_entry_attempt(
-        policy=current_policy or active_policy(), candidate=item,
-        trading_date=NOW.date(), run_id=RUN, trade_id=item.decision_id, now=NOW,
+        policy=selected, candidate=item,
+        unattended_run=production_run(selected, symbol=symbol), now=NOW,
     )
 
 
 def decision(current_policy, attempt, inputs=None, role="entry", symbol="MSFT",
              stop_price=None, order_id=None, now=NOW):
     return evaluate_production_action_safety(
+        run=production_run(current_policy, symbol=symbol, role=role),
         policy=current_policy, attempt=attempt, inputs=inputs or safety_inputs(),
-        decision_time=now, run_id=RUN, role=role, symbol=symbol,
+        decision_time=now, role=role, symbol=symbol,
         stop_price=stop_price, order_id=order_id,
     )
 
@@ -277,7 +302,8 @@ def test_wrong_strategy_digest_symbol_quantity_and_short_block(tmp_path):
     with UnattendedPilotStateStore((tmp_path / "state.sqlite").resolve()) as store:
         current_policy = active_policy()
         attempt = reserve(store, current_policy)
-        assert decision(current_policy, attempt, symbol="IBM").outcome is ExecutionSafetyOutcome.DENY
+        with pytest.raises(Exception):
+            decision(current_policy, attempt, symbol="IBM")
         wrong_digest = active_policy(implementation_digest="f" * 64)
         with pytest.raises(Exception):
             decision(wrong_digest, attempt)
@@ -285,19 +311,31 @@ def test_wrong_strategy_digest_symbol_quantity_and_short_block(tmp_path):
     assert current_policy.quantity == 1 and current_policy.strategy_id == "orb_long_v0"
 
 
+def test_production_safety_requires_exact_m21_run_state(tmp_path):
+    with UnattendedPilotStateStore((tmp_path / "state.sqlite").resolve()) as store:
+        current_policy = active_policy()
+        attempt = reserve(store, current_policy)
+        with pytest.raises(UnattendedPilotRuntimeError, match="run/action binding"):
+            evaluate_production_action_safety(
+                run=production_run(current_policy, role="stop"),
+                policy=current_policy, attempt=attempt, inputs=safety_inputs(),
+                decision_time=NOW, role="entry", symbol="MSFT",
+            )
+
 def test_entry_dispatch_uses_existing_boundary_and_consumes_before_call(tmp_path, monkeypatch):
     values = prepared(tmp_path, monkeypatch)
     current_policy, store, attempt, _, safety, args, permit, session, adapter = values
     result = asyncio.run(dispatch_production_write(
-        adapter=adapter, store=store, policy=current_policy, permit=permit,
+        run=production_run(current_policy), adapter=adapter, store=store, policy=current_policy, permit=permit,
         safety_decision=safety, arguments=args, now=NOW,
     ))
     assert result.state is ProductionWriteState.ACCEPTED
+    assert result.unattended_run.state is UnattendedState.ENTRY_SUBMITTED
     assert len(session.calls) == 1
     assert store.attempt_for(ACCOUNT, NOW.date()).outcome is AttemptOutcome.ACCEPTED
     with pytest.raises(UnattendedPilotStateError):
         asyncio.run(dispatch_production_write(
-            adapter=adapter, store=store, policy=current_policy, permit=permit,
+            run=production_run(current_policy), adapter=adapter, store=store, policy=current_policy, permit=permit,
             safety_decision=safety, arguments=args, now=NOW,
         ))
     assert len(session.calls) == 1
@@ -308,17 +346,18 @@ def test_write_timeout_enters_persistent_kill_and_never_retries(tmp_path, monkey
     values = prepared(tmp_path, monkeypatch, session_error=TimeoutError())
     current_policy, store, _, _, safety, args, permit, session, adapter = values
     result = asyncio.run(dispatch_production_write(
-        adapter=adapter, store=store, policy=current_policy, permit=permit,
+        run=production_run(current_policy), adapter=adapter, store=store, policy=current_policy, permit=permit,
         safety_decision=safety, arguments=args, now=NOW,
     ))
     assert result.state is ProductionWriteState.WRITE_OUTCOME_UNKNOWN
     assert result.kill_state_entered and len(session.calls) == 1
+    assert result.unattended_run.state is UnattendedState.KILL_STATE
     store.close()
     with UnattendedPilotStateStore((tmp_path / "pilot.sqlite").resolve()) as reopened:
         assert reopened.active_kill(ACCOUNT) is not None
         with pytest.raises(UnattendedPilotStateError):
             asyncio.run(dispatch_production_write(
-                adapter=adapter, store=reopened, policy=current_policy,
+                run=production_run(current_policy), adapter=adapter, store=reopened, policy=current_policy,
                 permit=permit, safety_decision=safety, arguments=args, now=NOW,
             ))
     assert len(session.calls) == 1
@@ -403,8 +442,7 @@ def test_candidate_identity_is_bound_before_daily_allowance_is_reserved(tmp_path
         with pytest.raises(UnattendedPilotStateError, match="candidate is not authentic"):
             store.reserve_entry_attempt(
                 policy=current_policy, candidate=tampered,
-                trading_date=NOW.date(), run_id=RUN, trade_id=tampered.decision_id,
-                now=NOW,
+                unattended_run=production_run(current_policy), now=NOW,
             )
         attempt = reserve(store, current_policy)
         assert attempt.candidate_id == candidate().decision_id
@@ -506,7 +544,7 @@ def test_post_dispatch_response_contract_failure_enters_kill(tmp_path, monkeypat
         ),
     )
     result = asyncio.run(dispatch_production_write(
-        adapter=adapter, store=store, policy=current_policy, permit=permit,
+        run=production_run(current_policy), adapter=adapter, store=store, policy=current_policy, permit=permit,
         safety_decision=safety, arguments=args, now=NOW,
     ))
     assert result.state is ProductionWriteState.WRITE_OUTCOME_UNKNOWN
