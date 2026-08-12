@@ -174,6 +174,17 @@ def compute_policy_digest(value: Any) -> str:
     return hashlib.sha256(_DOMAIN + b"\0policy\0" + canonical_bytes(_policy_payload(value))).hexdigest()
 
 
+def compute_unattended_run_id(
+    *, policy_id: str, trading_date: date, candidate_id: str | None,
+) -> str:
+    return hashlib.sha256(
+        _DOMAIN + b"\0run\0" + canonical_bytes({
+            "policy": policy_id, "date": trading_date.isoformat(),
+            "candidate": candidate_id,
+        })
+    ).hexdigest()
+
+
 def build_unattended_pilot_policy(**values: Any) -> UnattendedPilotPolicy:
     values = {
         "activation_approved": False,
@@ -349,7 +360,7 @@ def _transition(run: UnattendedRun, state: UnattendedState, *, reasons: tuple[st
     return _run(**values)
 
 
-def _candidate_authentic(decision: ShadowTradingDecision, policy: UnattendedPilotPolicy) -> tuple[bool, tuple[str, ...]]:
+def validate_unattended_candidate(decision: ShadowTradingDecision, policy: UnattendedPilotPolicy) -> tuple[bool, tuple[str, ...]]:
     reasons: list[str] = []
     try:
         digest = compute_shadow_decision_digest(
@@ -408,7 +419,11 @@ class BoundedUnattendedOrchestrator:
               gates: MachineGateEvidence, now: datetime) -> UnattendedRun:
         if now.tzinfo is None:
             raise UnattendedOrchestratorError("clock must be timezone-aware")
-        run_id = hashlib.sha256(_DOMAIN + b"\0run\0" + canonical_bytes({"policy": policy.policy_id, "date": now.astimezone(EASTERN).date().isoformat(), "candidate": None if candidate is None else candidate.decision_id})).hexdigest()
+        run_id = compute_unattended_run_id(
+            policy_id=policy.policy_id,
+            trading_date=now.astimezone(EASTERN).date(),
+            candidate_id=None if candidate is None else candidate.decision_id,
+        )
         base = dict(
             run_id=run_id, state=UnattendedState.DISABLED, policy_id=policy.policy_id,
             trading_date=now.astimezone(EASTERN).date(), candidate_id=None if candidate is None else candidate.decision_id,
@@ -427,8 +442,13 @@ class BoundedUnattendedOrchestrator:
         run = _run(**base)
         if not policy.enabled:
             return _transition(run, UnattendedState.DISABLED, reasons=("POLICY_DISABLED",))
-        if policy.evidence_origin is not PolicyEvidenceOrigin.TEST_FIXTURE:
-            return _transition(run, UnattendedState.POLICY_BLOCKED, reasons=("PRODUCTION_ACTIVATION_NOT_IMPLEMENTED",))
+        if policy.evidence_origin is PolicyEvidenceOrigin.REVIEWED_PRODUCTION and not (
+            policy.activation_approved and policy.permits_automated_action
+        ):
+            return _transition(
+                run, UnattendedState.POLICY_BLOCKED,
+                reasons=("PRODUCTION_ACTIVATION_NOT_APPROVED",),
+            )
         if now.astimezone(EASTERN).date() > policy.deployment_expiry:
             return _transition(run, UnattendedState.POLICY_BLOCKED, reasons=("POLICY_EXPIRED",))
         if not gates.source_hash_verified:
@@ -461,7 +481,7 @@ class BoundedUnattendedOrchestrator:
             return _transition(run, UnattendedState.MARKET_DATA_BLOCKED, reasons=("OUTSIDE_ENTRY_WINDOW",))
         if candidate is None:
             return _transition(run, UnattendedState.WATCHING)
-        authentic, reasons = _candidate_authentic(candidate, policy)
+        authentic, reasons = validate_unattended_candidate(candidate, policy)
         if not authentic:
             return _transition(run, UnattendedState.MARKET_DATA_BLOCKED, reasons=reasons)
         if candidate.trading_date != run.trading_date or candidate.signal_timestamp.astimezone(EASTERN).date() != run.trading_date:
@@ -528,6 +548,62 @@ class BoundedUnattendedOrchestrator:
             updates["protective_order_identity"] = receipt.broker_order_identity
         return _transition(run, expected[1], **updates)
 
+    @staticmethod
+    def record_production_write_result(
+        run: UnattendedRun, *, role: str, state: str,
+        action_identity: str, broker_order_identity: str | None = None,
+        reason_code: str = "OK",
+    ) -> UnattendedRun:
+        expected = {
+            "entry": (UnattendedState.ENTRY_PREFLIGHT, UnattendedState.ENTRY_SUBMITTED),
+            "stop": (UnattendedState.PROTECTION_REQUIRED, UnattendedState.STOP_SUBMITTED),
+            "cancel": (UnattendedState.EXIT_PENDING, UnattendedState.EXIT_PENDING),
+            "exit": (UnattendedState.EXIT_READY, UnattendedState.EXIT_SUBMITTED),
+        }.get(role)
+        if expected is None or run.state is not expected[0] or not _sha(action_identity, 64):
+            return _transition(run, UnattendedState.KILL_STATE,
+                               reasons=("PRODUCTION_WRITE_OUT_OF_SEQUENCE",))
+        if state == "WRITE_OUTCOME_UNKNOWN":
+            return _transition(
+                run, UnattendedState.KILL_STATE, reasons=(reason_code,),
+                daily_allowance_consumed=True,
+                last_action_identity=action_identity,
+            )
+        if state != "ACCEPTED":
+            blocked = {
+                "entry": UnattendedState.ENTRY_FAILED,
+                "stop": UnattendedState.PROTECTION_FAILED,
+                "cancel": UnattendedState.EXIT_BLOCKED,
+                "exit": UnattendedState.EXIT_BLOCKED,
+            }[role]
+            return _transition(
+                run, blocked, reasons=(reason_code,),
+                daily_allowance_consumed=(
+                    run.daily_allowance_consumed or role == "entry"
+                ), last_action_identity=action_identity,
+            )
+        updates: dict[str, Any] = {
+            "last_action_identity": action_identity,
+            "daily_allowance_consumed": (
+                run.daily_allowance_consumed or role == "entry"
+            ),
+        }
+        if role == "entry":
+            if not _sha(broker_order_identity, 64):
+                return _transition(
+                    run, UnattendedState.KILL_STATE,
+                    reasons=("ENTRY_ORDER_IDENTITY_INVALID",),
+                    daily_allowance_consumed=True,
+                )
+            updates["entry_order_identity"] = broker_order_identity
+        elif role == "stop":
+            if not _sha(broker_order_identity, 64):
+                return _transition(
+                    run, UnattendedState.KILL_STATE,
+                    reasons=("STOP_ORDER_IDENTITY_INVALID",),
+                )
+            updates["protective_order_identity"] = broker_order_identity
+        return _transition(run, expected[1], **updates)
     @staticmethod
     def reconcile_entry(run: UnattendedRun, lifecycle: LifecycleState) -> UnattendedRun:
         if run.state not in {UnattendedState.ENTRY_SUBMITTED, UnattendedState.ENTRY_RECONCILING}:
@@ -639,5 +715,6 @@ __all__ = [
     "PolicyEvidenceOrigin", "SafetyResult", "SimulatedAction",
     "SimulatedMutationBoundary", "SimulatedMutationReceipt", "UnattendedPilotPolicy",
     "UnattendedRun", "UnattendedState", "build_unattended_pilot_policy",
-    "compute_policy_digest", "compute_run_digest",
+    "compute_policy_digest", "compute_run_digest", "compute_unattended_run_id",
+    "validate_unattended_candidate",
 ]

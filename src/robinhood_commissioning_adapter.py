@@ -13,7 +13,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
-from src.execution_safety_governance import validate_execution_safety_decision
+from src.execution_safety_governance import (
+    UNATTENDED_AUTHORITY_CEILING, UNATTENDED_POLICY_VERSION,
+    validate_execution_safety_decision,
+)
+from src.unattended_pilot_state import validate_write_permit
 from src.live_order_contract import (
     classify_place_order_object_violation,
     classify_place_response_shape,
@@ -172,7 +176,7 @@ class RobinhoodCommissioningAdapter:
         if not isinstance(self.commissioned_account_number, str) or not self.commissioned_account_number.strip():
             raise CommissioningError("one commissioned account is required")
 
-    def _validate_order_arguments(self, arguments: Mapping[str, Any], *, role: str) -> None:
+    def _validate_order_arguments(self, arguments: Mapping[str, Any], *, role: str, expected_symbol: str = "AAPL") -> None:
         expected = {
             "entry": ("buy", "market", "gfd"),
             "stop": ("sell", "stop_market", "gtc"),
@@ -191,7 +195,7 @@ class RobinhoodCommissioningAdapter:
         side, order_type, duration = expected[role]
         checks = (
             arguments.get("account_number") == self.commissioned_account_number,
-            arguments.get("symbol") == "AAPL",
+            arguments.get("symbol") == expected_symbol,
             arguments.get("side") == side,
             arguments.get("type") == order_type,
             arguments.get("quantity") == "1",
@@ -208,7 +212,9 @@ class RobinhoodCommissioningAdapter:
 
     async def _call(self, tool_name: str, arguments: Mapping[str, Any],
                     *, write_key: str | None = None, role: str | None = None,
-                    safety_decision: Any = None) -> Mapping[str, Any]:
+                    safety_decision: Any = None, unattended_policy: Any = None,
+                    unattended_write_permit: Any = None,
+                    unattended_state_store: Any = None) -> Mapping[str, Any]:
         allowed = assert_tool_allowed(tool_name)
         if allowed in WRITE_TOOLS:
             if not write_key or write_key in self._write_keys:
@@ -224,12 +230,37 @@ class RobinhoodCommissioningAdapter:
             # (it cannot even ask the question without a role).
             if role is None:
                 raise ExecutionSafetyDeniedError("EXECUTION_SAFETY_ROLE_MISSING")
+            unattended = unattended_write_permit is not None or unattended_policy is not None
             validation = validate_execution_safety_decision(
                 safety_decision, role=role, arguments=arguments,
                 now=self.now_eastern(),
+                expected_policy_version=(
+                    UNATTENDED_POLICY_VERSION if unattended else "commissioning-v1"
+                ),
+                expected_authority_ceiling=(
+                    UNATTENDED_AUTHORITY_CEILING
+                    if unattended else "ATTENDED_COMMISSIONING_ONLY"
+                ),
             )
             if not validation.valid:
                 raise ExecutionSafetyDeniedError(validation.reason_code)
+            if unattended:
+                permit_valid, permit_reason = validate_write_permit(
+                    unattended_write_permit, policy=unattended_policy,
+                    safety_decision=safety_decision, role=role,
+                    arguments=arguments, now=self.now_eastern(),
+                )
+                if not permit_valid:
+                    raise ExecutionSafetyDeniedError(permit_reason)
+                if (
+                    unattended_state_store is None
+                    or not unattended_state_store.dispatch_is_authorized(
+                        unattended_write_permit
+                    )
+                ):
+                    raise ExecutionSafetyDeniedError(
+                        "UNATTENDED_DURABLE_STATE_NOT_DISPATCHING"
+                    )
             self._write_keys.add(write_key)
         self.call_counts[allowed] = self.call_counts.get(allowed, 0) + 1
         async def invoke() -> Mapping[str, Any]:
@@ -375,8 +406,9 @@ class RobinhoodCommissioningAdapter:
             raise CommissioningError("order status contract rejected") from exc
         return tuple(parsed_rows)
 
-    async def review_equity_order(self, arguments: Mapping[str, Any], *, role: str) -> Mapping[str, Any]:
-        self._validate_order_arguments(arguments, role=role)
+    async def review_equity_order(self, arguments: Mapping[str, Any], *, role: str,
+                                  expected_symbol: str = "AAPL") -> Mapping[str, Any]:
+        self._validate_order_arguments(arguments, role=role, expected_symbol=expected_symbol)
         data = await self._call("review_equity_order", arguments)
         expected_side, expected_type, _ = {
             "entry": ("buy", "market", "gfd"),
@@ -384,7 +416,7 @@ class RobinhoodCommissioningAdapter:
             "exit": ("sell", "market", "gfd"),
         }[role]
         if not all((
-            data.get("symbol") == "AAPL", data.get("side") == expected_side,
+            data.get("symbol") == expected_symbol, data.get("side") == expected_side,
             data.get("type") == expected_type, data.get("quantity") == "1",
             isinstance(data.get("order_checks"), Mapping),
             isinstance(data.get("quote_data"), Mapping),
@@ -398,12 +430,22 @@ class RobinhoodCommissioningAdapter:
 
     async def place_equity_order(
         self, arguments: Mapping[str, Any], *, role: str,
-        safety_decision: Any = None,
+        safety_decision: Any = None, unattended_policy: Any = None,
+        unattended_write_permit: Any = None, unattended_state_store: Any = None,
     ) -> Any:
-        self._validate_order_arguments(arguments, role=role)
+        expected_symbol = (
+            getattr(unattended_write_permit, "symbol", "AAPL")
+            if unattended_write_permit is not None else "AAPL"
+        )
+        self._validate_order_arguments(
+            arguments, role=role, expected_symbol=expected_symbol
+        )
         data = await self._call(
             "place_equity_order", arguments, write_key=f"place:{role}",
             role=role, safety_decision=safety_decision,
+            unattended_policy=unattended_policy,
+            unattended_write_permit=unattended_write_permit,
+            unattended_state_store=unattended_state_store,
         )
         try:
             parsed = parse_place_response({"data": data, "guide": "commissioning response"})
@@ -468,14 +510,14 @@ class RobinhoodCommissioningAdapter:
                 response_shape="documented_envelope",
                 call_returned=True,
             )
-        if parsed.symbol.upper() != "AAPL":
+        if parsed.symbol.upper() != expected_symbol:
             # A non-blank symbol naming another instrument. Reconciliation
             # cannot resolve this, so it fails closed at the boundary.
             raise PlacementSymbolMismatchError(
                 f"{role.upper()}_PLACE_SYMBOL_MISMATCH"
             )
         if not all((
-            bool(parsed.server_order_id.strip()), parsed.symbol.upper() == "AAPL",
+            bool(parsed.server_order_id.strip()), parsed.symbol.upper() == expected_symbol,
             parsed.side.lower() == expected_side,
             observed_type.lower() == expected_type,
             parsed.submitted_quantity == Decimal("1"),
@@ -501,6 +543,8 @@ class RobinhoodCommissioningAdapter:
 
     async def cancel_equity_order(
         self, arguments: Mapping[str, Any], *, safety_decision: Any = None,
+        unattended_policy: Any = None, unattended_write_permit: Any = None,
+        unattended_state_store: Any = None,
     ) -> Any:
         if set(arguments) != {"order_id"}:
             raise CommissioningError("cancel payload fields do not match fixed policy")
@@ -522,6 +566,9 @@ class RobinhoodCommissioningAdapter:
         data = await self._call(
             "cancel_equity_order", payload, write_key="cancel:stop",
             role="cancel", safety_decision=safety_decision,
+            unattended_policy=unattended_policy,
+            unattended_write_permit=unattended_write_permit,
+            unattended_state_store=unattended_state_store,
         )
         try:
             return parse_cancel_response({"data": data, "guide": "commissioning response"})

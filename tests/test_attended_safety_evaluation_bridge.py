@@ -34,7 +34,7 @@ EASTERN = ZoneInfo("America/New_York")
 DAY = date(2026, 8, 11)
 SIGNAL = datetime(2026, 8, 11, 14, 45, tzinfo=timezone.utc)
 NOW = datetime(2026, 8, 11, 10, 50, tzinfo=EASTERN)
-TRUSTED = "8e544058a0445c8443f3b5089293b0d8e3a5211dd5d7d3790343d0f34b1866c1"
+TRUSTED = "c45f7610cde1e491016dccc49029c9df5c3eeb87e1ab504d625bb5f92edad9f6"
 
 
 def candidate() -> ShadowTradingDecision:

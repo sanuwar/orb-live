@@ -52,7 +52,7 @@ provenance.
 ## 6. Final implementation digest
 
 ```
-8e544058a0445c8443f3b5089293b0d8e3a5211dd5d7d3790343d0f34b1866c1
+c45f7610cde1e491016dccc49029c9df5c3eeb87e1ab504d625bb5f92edad9f6
 ```
 
 Independently reconstructed (separate hashing routine, separate
@@ -93,7 +93,7 @@ Those reviewed changes moved the live digest to the value above.
 
 ## 7. Pinned file count
 
-**37**, independently confirmed: every path exists, no duplicates, all
+**51**, independently confirmed: every path exists, no duplicates, all
 required M13 runtime files present, no test-only tool improperly pinned,
 and the declared closure equals a fresh AST-based execution-closure walk
 from the checkpoint's entry points exactly (0 discovered-but-not-pinned,

@@ -32,7 +32,7 @@ from src.supervised_micro_live_dry_run import (
 DAY = date(2026, 8, 11)
 SIGNAL = datetime(2026, 8, 11, 14, 45, tzinfo=timezone.utc)
 REVIEWED = datetime(2026, 8, 11, 14, 50, tzinfo=timezone.utc)
-TRUSTED = "8e544058a0445c8443f3b5089293b0d8e3a5211dd5d7d3790343d0f34b1866c1"
+TRUSTED = "c45f7610cde1e491016dccc49029c9df5c3eeb87e1ab504d625bb5f92edad9f6"
 
 
 def decision(*, symbol="AAPL", kind=ShadowDecisionType.LONG_CANDIDATE, entry=Decimal("100"), stop=Decimal("99"), target=Decimal("102")):

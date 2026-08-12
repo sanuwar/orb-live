@@ -30,12 +30,12 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Callable, Mapping, Sequence
 
-from src.exchange_calendar import classify as _classify_calendar_session
+from src.exchange_calendar import EASTERN, classify as _classify_calendar_session
 from src.one_share_commissioning import QUANTITY, SYMBOL
 from src.protection_observation_model import canonical_bytes
 
@@ -58,6 +58,7 @@ class ExecutionSafetyOutcome(str, Enum):
 
 class CommissioningMode(str, Enum):
     ATTENDED = "ATTENDED"
+    UNATTENDED_PILOT = "UNATTENDED_PILOT"
 
 
 class ExecutionAction(str, Enum):
@@ -90,7 +91,9 @@ _EXPECTED_SIDE_AND_TYPE_BY_ROLE: Mapping[str, tuple[str, str]] = {
 }
 
 POLICY_VERSION = "commissioning-v1"
+UNATTENDED_POLICY_VERSION = "bounded-unattended-pilot-v1"
 AUTHORITY_CEILING = "ATTENDED_COMMISSIONING_ONLY"
+UNATTENDED_AUTHORITY_CEILING = "BOUNDED_UNATTENDED_PILOT"
 MAX_DECISION_AGE_SECONDS = 30.0
 
 _DIGEST_DOMAIN = b"orb-live/execution-safety-governance/v1"
@@ -161,6 +164,16 @@ class CommissioningGovernanceEvidence:
     account_fingerprint_matched: bool = False
     account_fingerprint_reference: str = ""
     suspension_state: str = "NOT_EVALUATED"
+    unattended_policy: Any = None
+    unattended_attempt_id: str = ""
+    unattended_broker_snapshot_identity: str = ""
+    unattended_snapshot_fresh: bool = False
+    unattended_suspension_fresh: bool = False
+    unattended_no_conflicting_broker_state: bool = False
+    unattended_kill_state_clear: bool = False
+    unattended_risk_bounds_verified: bool = False
+    unattended_risk_state_allows_new_risk: bool = False
+    unattended_health_allows_new_risk: bool = False
 
 
 @dataclass(frozen=True)
@@ -216,6 +229,14 @@ class ExecutionSafetyContext:
             "account_fingerprint_reference": (
                 self.governance_evidence.account_fingerprint_reference
             ),
+            "commissioning_mode": self.governance_evidence.commissioning_mode.value,
+            "unattended_policy_id": getattr(
+                self.governance_evidence.unattended_policy, "policy_id", None
+            ),
+            "unattended_attempt_id": self.governance_evidence.unattended_attempt_id,
+            "unattended_broker_snapshot_identity": (
+                self.governance_evidence.unattended_broker_snapshot_identity
+            ),
         }
         return hashlib.sha256(
             _DIGEST_DOMAIN + b"\x00action\x00" + canonical_bytes(payload)
@@ -265,6 +286,71 @@ def gate_operator_acknowledgements(context: ExecutionSafetyContext) -> GateResul
     return _satisfied(name)
 
 
+def gate_unattended_pilot_mode(context: ExecutionSafetyContext) -> GateResult:
+    name = "unattended_pilot_mode"
+    evidence = context.governance_evidence
+    if evidence.commissioning_mode is not CommissioningMode.UNATTENDED_PILOT:
+        return _failed(name, "DENY_MODE_NOT_UNATTENDED_PILOT")
+    acknowledgements = evidence.operator_acknowledgements
+    if evidence.operator_attended is not False or not isinstance(
+        acknowledgements, OperatorAcknowledgements
+    ):
+        return _failed(name, "DENY_UNATTENDED_HUMAN_FACT_MALFORMED")
+    if any((acknowledgements.acknowledges_loss_may_exceed_plan,
+            acknowledgements.operator_present, acknowledgements.robinhood_ui_open,
+            acknowledgements.no_second_trade)):
+        return _failed(name, "DENY_UNATTENDED_ACKNOWLEDGEMENT_SYNTHESIZED")
+    return _satisfied(name)
+
+
+def gate_unattended_pilot_policy(context: ExecutionSafetyContext) -> GateResult:
+    name = "unattended_pilot_policy"
+    policy = context.governance_evidence.unattended_policy
+    try:
+        from src.bounded_unattended_orchestrator import (
+            PolicyEvidenceOrigin, compute_policy_digest,
+        )
+        valid = all((
+            policy.policy_id == policy.policy_digest == compute_policy_digest(policy),
+            policy.evidence_origin is PolicyEvidenceOrigin.REVIEWED_PRODUCTION,
+            policy.enabled is True, policy.activation_approved is True,
+            policy.permits_automated_action is True,
+            policy.strategy_id == "orb_long_v0", policy.quantity == 1,
+            context.decision_time.astimezone(EASTERN).date()
+            <= policy.deployment_expiry,
+            context.symbol in policy.symbol_allowlist,
+            context.governance_evidence.account_fingerprint_reference
+            == policy.account_fingerprint_reference,
+            context.governance_evidence.release_sha == policy.release_sha,
+            context.governance_evidence.implementation_digest
+            == policy.implementation_digest,
+        ))
+    except Exception:
+        valid = False
+    return _satisfied(name) if valid else _failed(
+        name, "DENY_UNATTENDED_POLICY_INVALID"
+    )
+
+
+def gate_unattended_machine_evidence(context: ExecutionSafetyContext) -> GateResult:
+    name = "unattended_machine_evidence"
+    evidence = context.governance_evidence
+    checks = (
+        _is_sha256_hex(evidence.unattended_attempt_id),
+        _is_sha256_hex(evidence.unattended_broker_snapshot_identity),
+        evidence.unattended_snapshot_fresh is True,
+        evidence.unattended_suspension_fresh is True,
+        evidence.unattended_no_conflicting_broker_state is True,
+        evidence.unattended_kill_state_clear is True,
+        evidence.unattended_risk_bounds_verified is True,
+        evidence.unattended_risk_state_allows_new_risk is True,
+        evidence.unattended_health_allows_new_risk is True,
+    )
+    return _satisfied(name) if all(checks) else _failed(
+        name, "DENY_UNATTENDED_MACHINE_EVIDENCE_INCOMPLETE"
+    )
+
+
 def gate_source_hash_verified(context: ExecutionSafetyContext) -> GateResult:
     name = "source_hash_verified"
     if context.governance_evidence.source_hash_verified is not True:
@@ -295,7 +381,13 @@ def gate_commissioning_bounds(context: ExecutionSafetyContext) -> GateResult:
 
 def gate_action_identity_valid(context: ExecutionSafetyContext) -> GateResult:
     name = "action_identity_valid"
-    if context.symbol != SYMBOL:
+    if context.governance_evidence.commissioning_mode is CommissioningMode.ATTENDED:
+        symbol_allowed = context.symbol == SYMBOL
+    else:
+        symbol_allowed = context.symbol in getattr(
+            context.governance_evidence.unattended_policy, "symbol_allowlist", ()
+        )
+    if not symbol_allowed:
         return _failed(name, "DENY_SYMBOL_MISMATCH")
     role = context.role
     if role == "cancel":
@@ -324,6 +416,20 @@ def gate_exchange_calendar(context: ExecutionSafetyContext) -> GateResult:
         return _failed(name, "DENY_CALENDAR_EVALUATION_FAILED")
     if not classification.is_regular_session:
         return _failed(name, f"DENY_CALENDAR_{classification.reason.value}")
+    if (
+        context.governance_evidence.commissioning_mode
+        is CommissioningMode.UNATTENDED_PILOT
+        and context.role == "entry"
+    ):
+        policy = context.governance_evidence.unattended_policy
+        try:
+            current = context.decision_time.astimezone(EASTERN).time()
+            start = time.fromisoformat(policy.entry_start)
+            end = time.fromisoformat(policy.entry_end)
+        except Exception:
+            return _failed(name, "DENY_ENTRY_WINDOW_POLICY_INVALID")
+        if current < start or current > end:
+            return _failed(name, "DENY_OUTSIDE_ENTRY_WINDOW")
     return _satisfied(name)
 
 
@@ -367,6 +473,19 @@ DEFAULT_COMMISSIONING_GATES: tuple[GateEvaluator, ...] = (
     gate_action_identity_valid,
     gate_exchange_calendar,
     gate_commissioning_suspension_clear,
+)
+
+
+UNATTENDED_PILOT_GATES: tuple[GateEvaluator, ...] = (
+    gate_unattended_pilot_mode,
+    gate_unattended_pilot_policy,
+    gate_source_hash_verified,
+    gate_account_fingerprint_matched,
+    gate_commissioning_bounds,
+    gate_action_identity_valid,
+    gate_exchange_calendar,
+    gate_commissioning_suspension_clear,
+    gate_unattended_machine_evidence,
 )
 
 
@@ -550,6 +669,12 @@ def evaluate_execution_safety(
     )
     action_identity = context.action_identity()
     role = context.role
+    authority_ceiling = (
+        UNATTENDED_AUTHORITY_CEILING
+        if context.governance_evidence.commissioning_mode
+        is CommissioningMode.UNATTENDED_PILOT
+        else AUTHORITY_CEILING
+    )
     digest = compute_decision_digest(
         policy_version=context.policy_version,
         action_identity=action_identity,
@@ -557,7 +682,7 @@ def evaluate_execution_safety(
         satisfied=satisfied_t,
         failed=failed_t,
         reasons=reasons_t,
-        authority_ceiling=AUTHORITY_CEILING,
+        authority_ceiling=authority_ceiling,
         bound_role=role,
         bound_symbol=context.symbol,
         bound_side=context.side,
@@ -576,7 +701,7 @@ def evaluate_execution_safety(
         reason_codes=reasons_t,
         decision_digest=digest,
         evaluated_at=context.decision_time,
-        authority_ceiling=AUTHORITY_CEILING,
+        authority_ceiling=authority_ceiling,
         bound_role=role,
         bound_symbol=context.symbol,
         bound_side=context.side,
@@ -674,6 +799,8 @@ def validate_execution_safety_decision(
     arguments: Mapping[str, Any],
     now: datetime,
     max_age_seconds: float = MAX_DECISION_AGE_SECONDS,
+    expected_policy_version: str = POLICY_VERSION,
+    expected_authority_ceiling: str = AUTHORITY_CEILING,
 ) -> DecisionValidationResult:
     """Independent, write-boundary-time authenticity check for an already-
     computed `ExecutionSafetyDecision` (M14 Issue 6).
@@ -718,9 +845,9 @@ def validate_execution_safety_decision(
         return _invalid("EXECUTION_SAFETY_DECISION_MISSING")
     if decision.outcome is not ExecutionSafetyOutcome.ALLOW:
         return _invalid("EXECUTION_SAFETY_DENIED")
-    if decision.policy_version != POLICY_VERSION:
+    if decision.policy_version != expected_policy_version:
         return _invalid("EXECUTION_SAFETY_POLICY_VERSION_MISMATCH")
-    if decision.authority_ceiling != AUTHORITY_CEILING:
+    if decision.authority_ceiling != expected_authority_ceiling:
         return _invalid("EXECUTION_SAFETY_AUTHORITY_CEILING_MISMATCH")
     if not isinstance(decision.decision_digest, str) or not decision.decision_digest:
         return _invalid("EXECUTION_SAFETY_DECISION_DIGEST_MALFORMED")
@@ -759,7 +886,9 @@ __all__ = [
     "ROLE_FOR_ACTION",
     "ACTION_FOR_ROLE",
     "POLICY_VERSION",
+    "UNATTENDED_POLICY_VERSION",
     "AUTHORITY_CEILING",
+    "UNATTENDED_AUTHORITY_CEILING",
     "MAX_DECISION_AGE_SECONDS",
     "OperatorAcknowledgements",
     "CommissioningGovernanceEvidence",
@@ -769,6 +898,9 @@ __all__ = [
     "GateEvaluator",
     "gate_commissioning_mode_attended",
     "gate_operator_acknowledgements",
+    "gate_unattended_pilot_mode",
+    "gate_unattended_pilot_policy",
+    "gate_unattended_machine_evidence",
     "gate_source_hash_verified",
     "gate_account_fingerprint_matched",
     "gate_commissioning_bounds",
@@ -777,6 +909,7 @@ __all__ = [
     "KNOWN_SUSPENSION_STATES",
     "gate_commissioning_suspension_clear",
     "DEFAULT_COMMISSIONING_GATES",
+    "UNATTENDED_PILOT_GATES",
     "ExecutionSafetyDecision",
     "evaluate_execution_safety",
     "reviewed_manifest_digest",

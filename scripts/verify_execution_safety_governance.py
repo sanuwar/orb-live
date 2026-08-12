@@ -626,7 +626,7 @@ def check_decision_construction_single_point(root: Path) -> list[CheckResult]:
         ))
 
     supplier_files = sorted({p for p, _ in safety_decision_suppliers})
-    expected_suppliers = {"src/one_share_commissioning_orchestrator.py", "src/robinhood_commissioning_adapter.py"}
+    expected_suppliers = {"src/one_share_commissioning_orchestrator.py", "src/unattended_pilot_runtime.py", "src/robinhood_commissioning_adapter.py"}
     # robinhood_commissioning_adapter.py's own place_equity_order/cancel_equity_order
     # signatures declare a `safety_decision` parameter and forward it into `_call`
     # via a keyword of the same name -- this is expected self-forwarding, not an
@@ -1855,6 +1855,7 @@ _EXPECTED_GOVERNANCE_REACHERS = frozenset({
     "src/one_share_commissioning.py",
     "src/attended_safety_evaluation_bridge.py",
     "src/attended_commissioning_handoff.py",
+    "src/unattended_pilot_runtime.py",
 })
 
 _GOVERNANCE_NAMES = frozenset({
@@ -1986,7 +1987,8 @@ def check_authority_ceiling_and_fields(root: Path) -> list[CheckResult]:
         "src/one_share_commissioning_orchestrator.py",
         "src/one_share_commissioning.py",
         "src/attended_safety_evaluation_bridge.py",
-    "src/attended_commissioning_handoff.py",
+        "src/attended_commissioning_handoff.py",
+        "src/unattended_pilot_runtime.py",
     )
     offending: list[str] = []
     for relative in write_path_files:

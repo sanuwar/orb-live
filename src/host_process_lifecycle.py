@@ -309,7 +309,7 @@ class HostProcessLifecycleContract:
         # unwired. This is a deliberate manual re-pin gate, not a live
         # comparison: a closure-size change must be consciously reviewed
         # and this literal bumped, exactly as it was here.
-        if len(PINNED_IMPLEMENTATION_CLOSURE) != 37:
+        if len(PINNED_IMPLEMENTATION_CLOSURE) != 51:
             raise LifecycleIdentityError("pinned implementation closure is invalid")
 
     def to_dict(self) -> dict[str, object]:

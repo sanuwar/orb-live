@@ -158,6 +158,7 @@ _CLOSURE_ENTRY_POINTS = (
     "src/read_only_observation_runtime.py",
     "src/read_only_broker_state.py",
     "src/live_order_state_model.py",
+    "src/unattended_pilot_runtime.py",
 )
 
 

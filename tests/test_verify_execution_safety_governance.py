@@ -101,7 +101,7 @@ def test_pinned_implementation_closure_count_matches_live_manifest():
     # 37 as of M14 Issue 2 (commissioning risk-state gate reaches through
     # the already-pinned deferred-gates ecosystem -- see src/read_only_
     # authorization_manifest.py). Never copy a historical count forward.
-    assert report["pinned_file_count"] == len(PINNED_IMPLEMENTATION_CLOSURE) == 37
+    assert report["pinned_file_count"] == len(PINNED_IMPLEMENTATION_CLOSURE) == 51
     assert "scripts/verify_execution_safety_governance.py" not in PINNED_IMPLEMENTATION_CLOSURE
 
 
