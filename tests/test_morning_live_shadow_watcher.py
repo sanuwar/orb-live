@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -78,11 +78,116 @@ def test_before_and_after_window_make_zero_evaluations(tmp_path):
     before, _ = asyncio.run(run_morning_watch(now=datetime(2026, 8, 11, 13, 35, tzinfo=timezone.utc), output_dir=tmp_path / "before", production_confirmed=True))
     after, _ = asyncio.run(run_morning_watch(now=datetime(2026, 8, 11, 15, 1, tzinfo=timezone.utc), output_dir=tmp_path / "after", production_confirmed=True))
     assert before["final_state"] == "BEFORE_ENTRY_WINDOW"
-    assert after["final_state"] == "OUTSIDE_ENTRY_WINDOW"
+    assert after["final_state"] == "WINDOW_COMPLETE_NO_CANDIDATE"
     assert before["evaluation_count"] == after["evaluation_count"] == 0
     assert before["total_http_request_count"] == after["total_http_request_count"] == 0
 
 
+class AdvancingClock:
+    def __init__(self, moment: datetime):
+        self.moment = moment
+
+    def __call__(self) -> datetime:
+        return self.moment
+
+    async def sleep(self, seconds: float) -> None:
+        self.moment += timedelta(seconds=seconds)
+
+
+@pytest.mark.parametrize("started_at", [
+    datetime(2026, 8, 11, 13, 52, tzinfo=timezone.utc),  # 09:52 ET
+    datetime(2026, 8, 11, 13, 55, tzinfo=timezone.utc),  # 09:55 ET
+])
+def test_late_start_evaluates_every_remaining_valid_slot_then_exits_at_window_end(tmp_path, started_at):
+    clock = AdvancingClock(started_at)
+    values = [evidence(run_id=f"run-{index}") for index in range(MAX_EVALUATIONS)]
+    calls, evaluate = evaluator_for(values)
+
+    summary, _ = asyncio.run(run_morning_watch(
+        now=started_at,
+        clock=clock,
+        output_dir=tmp_path,
+        production_confirmed=True,
+        evaluator=evaluate,
+        sleeper=clock.sleep,
+    ))
+
+    expected = tuple(WINDOW_START + timedelta(minutes=5 * index) for index in range(3, 16))
+    assert tuple(calls) == expected
+    assert summary["evaluation_count"] == len(expected) == 13
+    assert all(right - left == timedelta(minutes=5) for left, right in zip(calls, calls[1:]))
+    assert calls[-1] == datetime(2026, 8, 11, 14, 55, tzinfo=timezone.utc)  # 10:55 ET
+    assert all(moment < datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc) for moment in calls)
+    assert summary["completed_at"] == datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc)
+    assert summary["final_state"] == "WINDOW_COMPLETE_NO_CANDIDATE"
+    assert summary["stop_reason"] == "ENTRY_WINDOW_COMPLETE"
+    assert summary["broker_write_count"] == 0
+    assert summary["execution_authorized"] is False
+    assert summary["protection_grounded"] is False
+
+
+@pytest.mark.parametrize("started_at, expected_sleep", [
+    (datetime(2026, 8, 11, 14, 58, tzinfo=timezone.utc), 120.0),  # 10:58 ET
+    (datetime(2026, 8, 11, 14, 59, 59, tzinfo=timezone.utc), 1.0),  # 10:59:59 ET
+])
+def test_sleep_is_clamped_to_window_end_and_never_evaluates_at_or_after_boundary(tmp_path, started_at, expected_sleep):
+    clock = AdvancingClock(started_at)
+    calls, evaluate = evaluator_for([evidence(run_id="unexpected")])
+    sleeps: list[float] = []
+
+    async def recording_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await clock.sleep(seconds)
+
+    summary, _ = asyncio.run(run_morning_watch(
+        now=started_at,
+        clock=clock,
+        output_dir=tmp_path,
+        production_confirmed=True,
+        evaluator=evaluate,
+        sleeper=recording_sleep,
+    ))
+
+    assert sleeps == [expected_sleep]
+    assert calls == []
+    assert summary["evaluation_count"] == summary["total_http_request_count"] == 0
+    assert summary["completed_at"] == datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc)
+    assert summary["final_state"] == "WINDOW_COMPLETE_NO_CANDIDATE"
+
+
+def test_exact_window_end_exits_without_evaluation_or_http_request(tmp_path):
+    window_end = datetime(2026, 8, 11, 15, 0, tzinfo=timezone.utc)
+    calls, evaluate = evaluator_for([evidence(run_id="unexpected", requests=99)])
+    summary, _ = asyncio.run(run_morning_watch(
+        now=window_end,
+        output_dir=tmp_path,
+        production_confirmed=True,
+        evaluator=evaluate,
+        sleeper=no_sleep,
+    ))
+
+    assert calls == []
+    assert summary["evaluation_count"] == summary["total_http_request_count"] == 0
+    assert summary["final_state"] == "WINDOW_COMPLETE_NO_CANDIDATE"
+    assert summary["stop_reason"] == "ENTRY_WINDOW_COMPLETE"
+
+
+def test_schedule_exhaustion_before_window_end_exits_instead_of_waiting(tmp_path):
+    started_at = datetime(2026, 8, 11, 14, 58, tzinfo=timezone.utc)  # 10:58 ET
+    calls, evaluate = evaluator_for([evidence(run_id="unexpected")])
+    summary, _ = asyncio.run(run_morning_watch(
+        now=started_at,
+        output_dir=tmp_path,
+        production_confirmed=True,
+        limits=WatchLimits(interval_minutes=7),
+        evaluator=evaluate,
+        sleeper=no_sleep,
+    ))
+
+    assert calls == []
+    assert summary["evaluation_count"] == summary["total_http_request_count"] == 0
+    assert summary["final_state"] == "WINDOW_COMPLETE_NO_CANDIDATE"
+    assert summary["stop_reason"] == "ENTRY_WINDOW_SCHEDULE_EXHAUSTED"
 def test_explicit_production_confirmation_is_required_before_evaluation(tmp_path):
     summary, _ = asyncio.run(run_morning_watch(now=WINDOW_START, output_dir=tmp_path, production_confirmed=False))
     assert summary["final_state"] == "PRODUCTION_CONFIRMATION_REQUIRED"

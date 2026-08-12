@@ -48,6 +48,7 @@ class WatchLimits:
 
 Evaluator = Callable[[datetime], Awaitable[tuple[Mapping[str, Any], Path]]]
 Sleeper = Callable[[float], Awaitable[None]]
+Clock = Callable[[], datetime]
 
 
 def _entry_window(day: date) -> tuple[datetime, datetime]:
@@ -142,6 +143,10 @@ async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+def _system_clock() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _default_evaluator(*, symbols: Sequence[str], output_dir: Path, environment: Mapping[str, str] | None) -> Evaluator:
     async def evaluate(moment: datetime) -> tuple[Mapping[str, Any], Path]:
         return await run_session(
@@ -167,10 +172,14 @@ async def run_morning_watch(
     environment: Mapping[str, str] | None = None,
     evaluator: Evaluator | None = None,
     sleeper: Sleeper = _sleep,
+    clock: Clock | None = None,
     root: Path = REPOSITORY_ROOT,
 ) -> tuple[dict[str, Any], Path]:
     """Run at most one bounded entry-window schedule of canonical evaluations."""
-    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    # ``now`` remains a deterministic test seam. Production always re-reads
+    # the clock before scheduling, sleeping, and evaluating.
+    current_clock = clock or ((lambda: now) if now is not None else _system_clock)
+    moment = current_clock().astimezone(timezone.utc)
     watchlist = _watchlist("AAPL", symbols, max_symbols=10)
     summary = _base_summary(symbols=watchlist, started_at=moment, limits=limits, root=root)
     day = moment.astimezone(EASTERN).date()
@@ -181,23 +190,70 @@ async def run_morning_watch(
     if classification.session is not CalendarSession.REGULAR or not classification.is_regular_session:
         summary.update(final_state="OUTSIDE_ENTRY_WINDOW", stop_reason="NOT_REGULAR_SESSION", completed_at=moment)
         return summary, persist_evidence(summary, output_dir=output_dir)
-    schedule = scheduled_evaluations(day=day, interval_minutes=limits.interval_minutes)
     start, end = _entry_window(day)
     if moment < start:
         summary.update(final_state="BEFORE_ENTRY_WINDOW", stop_reason="BEFORE_ENTRY_WINDOW", completed_at=moment)
         return summary, persist_evidence(summary, output_dir=output_dir)
-    if moment > end:
-        summary.update(final_state="OUTSIDE_ENTRY_WINDOW", stop_reason="AFTER_ENTRY_WINDOW", completed_at=moment)
+    moment = current_clock().astimezone(timezone.utc)
+    if moment >= end:
+        summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="ENTRY_WINDOW_COMPLETE", completed_at=moment)
         return summary, persist_evidence(summary, output_dir=output_dir)
     schedule = scheduled_evaluations(day=day, interval_minutes=limits.interval_minutes)
     evaluate = evaluator or _default_evaluator(symbols=watchlist, output_dir=live_shadow_output_dir, environment=environment)
-    points = tuple(point for point in schedule if point >= moment)[:limits.max_evaluations]
+    last_scheduled: datetime | None = None
+    completed_at = moment
     try:
-        for point in points:
-            delay = max(0.0, (point - moment).total_seconds())
-            if delay:
-                await sleeper(delay)
+        while True:
+            # A schedule is only meaningful relative to the current
+            # authoritative time, never the time at which this process began.
+            current = current_clock().astimezone(timezone.utc)
+            completed_at = current
+            if current >= end:
+                summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="ENTRY_WINDOW_COMPLETE")
+                break
+            if summary["evaluation_count"] >= limits.max_evaluations:
+                summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="ENTRY_WINDOW_SCHEDULE_EXHAUSTED")
+                break
+
+            remaining_points = tuple(
+                point for point in schedule
+                if point >= current and (last_scheduled is None or point > last_scheduled)
+            )
+            if not remaining_points:
+                summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="ENTRY_WINDOW_SCHEDULE_EXHAUSTED")
+                break
+            point = remaining_points[0]
+
+            # Re-check immediately before sleeping; the end may have elapsed
+            # while calculating the next valid schedule point.
+            current = current_clock().astimezone(timezone.utc)
+            completed_at = current
+            if current >= end:
+                summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="ENTRY_WINDOW_COMPLETE")
+                break
+            configured_wait = max(0.0, (point - current).total_seconds())
+            remaining_window = max(0.0, (end - current).total_seconds())
+            actual_sleep = min(configured_wait, remaining_window)
+            if actual_sleep:
+                await sleeper(actual_sleep)
+
+            # A wake-up at or beyond the endpoint persists and exits before
+            # the evaluator can issue another market-data request.
+            current = current_clock().astimezone(timezone.utc)
+            completed_at = current
+            if current >= end:
+                summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="ENTRY_WINDOW_COMPLETE")
+                break
+
+            # This is deliberately a separate pre-evaluation clock check.
+            # It closes the interval between waking and invoking the evaluator.
+            current = current_clock().astimezone(timezone.utc)
+            completed_at = current
+            if current >= end:
+                summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="ENTRY_WINDOW_COMPLETE")
+                break
             evidence, artifact = await evaluate(point)
+            last_scheduled = point
             reference = _evaluation_reference(scheduled_at=point, evidence=evidence, path=artifact)
             summary["evaluations"].append(reference)
             summary["evaluation_count"] += 1
@@ -208,15 +264,12 @@ async def run_morning_watch(
             if reference["candidate_count"]:
                 summary.update(final_state="CANDIDATE_CAPTURED", stop_reason="FIRST_GENUINE_LONG_CANDIDATE", first_candidate_timestamp=point)
                 break
-        else:
-            summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="ENTRY_WINDOW_COMPLETE")
     except (KeyboardInterrupt, asyncio.CancelledError):
         summary.update(final_state="OPERATOR_STOPPED", stop_reason="OPERATOR_INTERRUPTION")
     except BaseException:
         summary.update(final_state="PROVIDER_FAILURE", stop_reason="WATCHER_FAILURE")
-    summary["completed_at"] = (
-        summary["evaluations"][-1]["scheduled_at"] if now is not None and summary["evaluations"] else datetime.now(timezone.utc)
-    )
+    summary["completed_at"] = completed_at
+
     summary["broker_write_count"] = 0
     summary["execution_authorized"] = False
     summary["protection_grounded"] = False
