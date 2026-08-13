@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import App from '../App'
 
 const destinations = [
-  ['operations', /local process/i],
+  ['operations', /read-only runtime dashboard/i],
   ['performance', /sanitized journal/i],
   ['strategy-system', /one strategy, bounded/i],
   ['build-journey', /one bounded system/i],

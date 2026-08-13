@@ -28,7 +28,7 @@ const pages = {
 function routeState() {
   const raw = window.location.hash.replace(/^#\/?/, '')
   if (raw.startsWith('journal-detail/')) return { route: 'journal-detail', detailKey: raw.slice('journal-detail/'.length) }
-  return { route: pages[raw] ? raw : 'overview', detailKey: null }
+  return { route: pages[raw] ? raw : 'operations', detailKey: null }
 }
 function RoutedApp() {
   const [state, setState] = useState(routeState)

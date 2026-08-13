@@ -14,6 +14,6 @@ describe('M25.1 parent routes and compatibility', () => {
   it('keeps the operations surface static and non-actionable', () => {
     render(<App />); navigate('operations')
     expect(screen.queryByRole('button', { name: /start|stop|trade|broker/i })).not.toBeInTheDocument()
-    expect(screen.getByText(/no runtime control, broker connection, market-data request/i)).toBeVisible()
+    expect(screen.getByText(/never contacts runtime, market data, or broker services/i)).toBeVisible()
   })
 })
