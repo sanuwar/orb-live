@@ -16,6 +16,12 @@ cookies.json
 config/local.yaml
 config/local.*.yaml
 
+# Runtime-generated operational evidence (fixtures are not stored here).
+artifacts/live-shadow/
+artifacts/live-shadow-watch/
+artifacts/commissioning-handoff/
+artifacts/commissioning-rehearsal/
+
 # Local trading data
 data/*.sqlite
 data/*.sqlite-shm
