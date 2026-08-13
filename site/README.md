@@ -6,9 +6,10 @@ A local operator and documentation frontend for ORB-LIVE. Runtime truth still co
 
 ```powershell
 npm install
-python ../scripts/run_local_watcher_control.py
-npm run dev -- --host 127.0.0.1
+python ../scripts/start_orb_live_operator.py
 ```
+
+Run the launcher from the repository root. It starts only the fixed loopback control service and Vite frontend, then opens Operations.
 
 ## Quality gates
 

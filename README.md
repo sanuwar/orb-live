@@ -29,15 +29,15 @@ identifiers, or tokens in commands, evidence, or chat.
 
 ### Before market
 
-For the browser-based local morning flow, start the fixed loopback service and the existing frontend in separate local terminals:
+For the browser-based local morning flow, use the fixed launcher:
 
 ```powershell
-python scripts/run_local_watcher_control.py
-cd site
-npm run dev -- --host 127.0.0.1
+python scripts/start_orb_live_operator.py
 ```
 
-Open the Operations page and use **Check readiness**. The service is bound to 127.0.0.1:8766 and exposes only readiness, watcher start, watcher stop, and owned-watcher status. It cannot accept commands, scripts, arguments, or PIDs. The canonical CLI remains available for diagnostics:
+It starts or safely reuses only the local control service at 127.0.0.1:8766 and the frontend at 127.0.0.1:5173, then opens `http://127.0.0.1:5173/#/operations`. It never terminates an existing process. If a service is already listening but is not compatible, startup fails clearly. `Start ORB-LIVE.cmd` is an equivalent double-click launcher. To create a desktop shortcut, create a shortcut to that `.cmd` file; it does not add startup or registry entries.
+
+Open the Operations page and use **Check readiness**. The service exposes only readiness, watcher start, watcher stop, and owned-watcher status. It cannot accept commands, scripts, arguments, or PIDs. The canonical CLI remains available for diagnostics:
 
 ```powershell
 python scripts/check_morning_watch_readiness.py
