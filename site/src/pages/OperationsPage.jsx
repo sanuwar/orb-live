@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import MorningControl from '../components/MorningControl'
+import AutomaticEventFeed from '../components/AutomaticEventFeed'
 import PageHeader from '../components/PageHeader'
 import { parseOperatorSnapshot } from '../operations/operatorSnapshot'
 
@@ -27,6 +28,7 @@ export default function OperationsPage() {
   }
   return <div className="page operations-page"><PageHeader eyebrow="Operations" title="Read-only runtime dashboard." lead="Use the fixed local morning controls and load sanitized operator-snapshot.json evidence. The browser never contacts market-data or broker services." />
     <MorningControl />
+    <AutomaticEventFeed />
     <section className="operations-loader" aria-labelledby="load-title"><div><span className="section-label">Sanitized projection</span><h2 id="load-title">Load operator snapshot</h2><p>Generated locally by `python scripts/export_operator_dashboard.py --include-json ...`. The file remains in this browser only.</p></div><label className="secondary-button">Choose operator-snapshot.json<input type="file" accept="application/json,.json" onChange={load}/></label></section>
     {result.status === 'empty' && <section className="operations-unavailable"><h2>NO EVIDENCE</h2><p>No sanitized operator snapshot has been loaded. This does not establish readiness, safety, grounded protection, no trade, or session state.</p></section>}
     {result.status === 'rejected' && <section className="operations-unavailable"><h2>BLOCKED</h2><p>Snapshot rejected: {result.code}. No data is displayed.</p></section>}

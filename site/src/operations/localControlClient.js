@@ -19,4 +19,5 @@ export function readLocalControlStatus() { return request('/status') }
 export function checkLocalReadiness() { return request('/readiness', 'POST') }
 export function startLocalMorningWatch() { return request('/start', 'POST') }
 export function stopLocalMorningWatch() { return request('/stop', 'POST') }
+export function readAutomaticRuntimeProjection() { return request('/runtime-projection') }
 export { CONTROL_ROOT }
