@@ -1,24 +1,9 @@
 export const navigation = [
-  { slug: 'overview', label: 'Overview', shortLabel: '01' },
-  { slug: 'strategy', label: 'Strategy', shortLabel: '02' },
-  { slug: 'system-flow', label: 'System Flow', shortLabel: '03' },
-  { slug: 'safety', label: 'Safety', shortLabel: '04' },
-  {
-    slug: 'build-journey',
-    label: 'Build Journey',
-    shortLabel: '05',
-  },
-  {
-    slug: 'architecture-glossary',
-    label: 'Architecture & Glossary',
-    shortLabel: '06',
-  },
-  { slug: 'journal', label: 'Trade Journal', shortLabel: '07' },
-  { slug: 'journal-records', label: 'Trades & Events', shortLabel: '08' },
-  { slug: 'manual-record', label: 'Add Manual Record', shortLabel: '09' },
-  { slug: 'evidence-import', label: 'Import Evidence', shortLabel: '10' },
+  { slug: 'operations', label: 'Operations', shortLabel: '01' },
+  { slug: 'performance', label: 'Performance', shortLabel: '02' },
+  { slug: 'strategy-system', label: 'Strategy & System', shortLabel: '03' },
+  { slug: 'build-journey', label: 'Build Journey', shortLabel: '04' },
 ]
-
 export const journeyStages = [
   {
     slug: 'observe',
@@ -26,7 +11,7 @@ export const journeyStages = [
     title: 'Observe',
     question: 'What is happening?',
     metrics: [
-      { value: '15', label: 'symbols' },
+      { value: '10', label: 'symbols' },
       { value: '5m', label: 'opening range' },
       { value: '20d', label: 'volume baseline' },
     ],
@@ -78,7 +63,7 @@ export const journeyStages = [
 ]
 
 export const strategyMeasurements = [
-  { stage: 'Observe', value: '15', unit: 'symbols', measure: 'Fixed universe', capture: 'Configuration before the session', operation: 'Ignore every symbol outside the basket' },
+  { stage: 'Observe', value: '10', unit: 'symbols', measure: 'Fixed universe', capture: 'Configuration before the session', operation: 'Ignore every symbol outside the basket' },
   { stage: 'Observe', value: '5', unit: 'minutes', measure: 'Opening range', capture: 'High and low from 09:30–09:35 ET', operation: 'Create the breakout and stop references' },
   { stage: 'Observe', value: '20', unit: 'sessions', measure: 'Volume baseline', capture: 'Historical relative-volume lookback', operation: 'Establish expected participation' },
   { stage: 'Narrow', value: '≥1.0', unit: '% gap', measure: 'Gap threshold', capture: 'Opening price versus prior close', operation: 'Reject smaller opening moves' },

@@ -3,6 +3,9 @@ import AppShell from './components/AppShell'
 import { navigation } from './data/content'
 import { JournalProvider } from './journal/JournalProvider'
 import OverviewPage from './pages/OverviewPage'
+import OperationsPage from './pages/OperationsPage'
+import PerformancePage from './pages/PerformancePage'
+import StrategySystemPage from './pages/StrategySystemPage'
 import StrategyPage from './pages/StrategyPage'
 import SystemFlowPage from './pages/SystemFlowPage'
 import SafetyPage from './pages/SafetyPage'
@@ -15,11 +18,11 @@ import ManualRecordPage from './pages/ManualRecordPage'
 import EvidenceImportPage from './pages/EvidenceImportPage'
 
 const pages = {
-  overview: OverviewPage, strategy: StrategyPage, 'system-flow': SystemFlowPage,
-  safety: SafetyPage, 'build-journey': DevelopmentJourneyPage,
-  'development-journey': DevelopmentJourneyPage,
-  'architecture-glossary': ArchitectureGlossaryPage, journal: JournalOverviewPage,
-  'journal-records': JournalRecordsPage, 'manual-record': ManualRecordPage,
+  operations: OperationsPage, performance: PerformancePage, 'strategy-system': StrategySystemPage,
+  'build-journey': DevelopmentJourneyPage,
+  overview: OverviewPage, strategy: StrategyPage, 'system-flow': SystemFlowPage, safety: SafetyPage,
+  'development-journey': DevelopmentJourneyPage, 'architecture-glossary': ArchitectureGlossaryPage,
+  journal: JournalOverviewPage, 'journal-records': JournalRecordsPage, 'manual-record': ManualRecordPage,
   'evidence-import': EvidenceImportPage,
 }
 function routeState() {
