@@ -21,6 +21,7 @@ from scripts.check_morning_watch_readiness import (
     MorningReadiness,
     assess_morning_readiness,
 )
+from src.runtime_journal_projection import RuntimeProjectionError, append_watch_artifact, read_history
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
@@ -145,6 +146,7 @@ class MorningWatcherController:
         self._terminal_state: str | None = None
         self._stop_reason: str | None = None
         self._artifact_reference: str | None = None
+        self._projection_status = 'NO_AUTOMATIC_EVIDENCE'
 
     def check_readiness(self) -> dict[str, Any]:
         try:
@@ -182,6 +184,7 @@ class MorningWatcherController:
                 "terminal_state": self._terminal_state,
                 "stop_reason": self._stop_reason,
                 "artifact_reference": self._artifact_reference,
+                "projection_status": self._projection_status,
                 "readiness": self._readiness,
                 "authority": AUTHORITY_CEILING,
                 "activation_approved": False,
@@ -275,6 +278,12 @@ class MorningWatcherController:
             self._terminal_state = summary.get("final_state")
             self._stop_reason = summary.get("stop_reason")
             self._artifact_reference = summary.get("artifact_reference")
+            artifact_path = summary.get("artifact_path")
+            if isinstance(artifact_path, str):
+                try:
+                    self._projection_status = str(append_watch_artifact(Path(artifact_path)).get("status"))
+                except (OSError, RuntimeProjectionError, ValueError):
+                    self._projection_status = "PROJECTION_FAILED"
             if self._terminal_state == "WINDOW_COMPLETE_NO_CANDIDATE":
                 self._state, self._result = "COMPLETE", "NO_CANDIDATE"
             elif self._terminal_state == "CANDIDATE_CAPTURED":
@@ -311,6 +320,7 @@ class MorningWatcherController:
             "final_state": final_state,
             "stop_reason": stop_reason,
             "artifact_reference": resolved.name,
+            "artifact_path": str(resolved),
         }
 
 
@@ -333,6 +343,7 @@ class LocalWatcherControlApp:
                 "/api/local-control/readiness",
                 "/api/local-control/start",
                 "/api/local-control/stop",
+                "/api/runtime-projection",
             }:
                 return self._response(
                     start_response,
@@ -345,6 +356,12 @@ class LocalWatcherControlApp:
             return self._response(start_response, "400 Bad Request", {"status": "REQUEST_INPUT_REJECTED"}, origin=origin)
         if method == "GET" and path == "/api/local-control/status":
             return self._response(start_response, "200 OK", self.controller.status(), origin=origin)
+        if method == "GET" and path == "/api/runtime-projection":
+            try:
+                payload = read_history()
+            except RuntimeProjectionError:
+                payload = {"schemaVersion": 1, "status": "AUTOMATIC_EVIDENCE_UNAVAILABLE", "sessions": [], "records": [], "events": []}
+            return self._response(start_response, "200 OK", payload, origin=origin)
         if method == "POST" and environ.get(CSRF_HEADER) == CSRF_TOKEN:
             if path == "/api/local-control/readiness":
                 self.controller.check_readiness()
