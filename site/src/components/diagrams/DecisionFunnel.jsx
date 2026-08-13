@@ -1,5 +1,5 @@
-﻿const levels = [
-  { label: 'Fixed watchlist', count: '15 symbols' },
+const levels = [
+  { label: 'Fixed watchlist', count: '10 symbols' },
   { label: 'Opening move', count: '≥1.0% gap' },
   { label: 'Signal evidence', count: '5m · ≥3× · SPY>VWAP · 1m' },
   { label: 'Risk envelope', count: '$15 · $3k · 1 position' },
@@ -11,7 +11,7 @@ export default function DecisionFunnel() {
     <figure className="decision-funnel diagram-card" aria-labelledby="decision-funnel-title">
       <figcaption>
         <span className="section-label">Numeric decision funnel</span>
-        <h2 id="decision-funnel-title">15 symbols → 0–1 authorized opportunity</h2>
+        <h2 id="decision-funnel-title">10 symbols → 0–1 authorized opportunity</h2>
         <p>Any failed threshold produces zero.</p>
       </figcaption>
       <ol>

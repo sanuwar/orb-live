@@ -1,4 +1,4 @@
-﻿import Callout from '../components/Callout'
+import Callout from '../components/Callout'
 import PageHeader from '../components/PageHeader'
 import DecisionFunnel from '../components/diagrams/DecisionFunnel'
 import SystemFlowDiagram from '../components/diagrams/SystemFlowDiagram'
@@ -8,7 +8,7 @@ export default function SystemFlowPage() {
     <div className="page">
       <PageHeader
         eyebrow="Quantified system flow"
-        title="15 → 0–1 → 15s → 1R → evidence"
+        title="55 → 0–5 → 55s → 5R → evidence"
         lead="Each stage transforms measured input into a smaller, bounded, durable output."
       />
 

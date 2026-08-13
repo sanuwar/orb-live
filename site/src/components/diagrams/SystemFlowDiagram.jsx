@@ -1,8 +1,8 @@
-﻿const equations = [
+const equations = [
   {
     stage: 'Observe',
     slug: 'observe',
-    formula: '15 → 5m + 20d',
+    formula: '10 → 5m + 20d',
     input: 'Fixed symbols',
     output: 'Range + volume baseline',
   },
@@ -45,7 +45,7 @@ export default function SystemFlowDiagram() {
     >
       <figcaption>
         <span className="section-label">Operational equation</span>
-        <h2 id="system-flow-title">15 symbols → bounded evidence</h2>
+        <h2 id="system-flow-title">10 symbols → bounded evidence</h2>
         <p id="system-flow-description">
           Numbers drive each gate; durable state carries the result forward.
         </p>
