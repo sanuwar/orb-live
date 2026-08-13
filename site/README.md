@@ -1,16 +1,12 @@
 # ORB-LIVE documentation dashboard
 
-A static, internal explainer for the ORB-LIVE architecture, strategy,
-safety model, and development journey.
-
-This React application is intentionally isolated from the Python trading
-runtime. It has no backend connection, broker integration, live data, or
-trading controls. All content is sanitized and bundled locally.
+A local operator and documentation frontend for ORB-LIVE. Runtime truth still comes only from sanitized operator snapshots. M25.3 adds four fixed morning-watcher operations through a separate loopback-only Python service; the browser has no broker integration or market-data access.
 
 ## Run locally
 
 ```powershell
 npm install
+python ../scripts/run_local_watcher_control.py
 npm run dev -- --host 127.0.0.1
 ```
 
@@ -31,7 +27,7 @@ The dashboard now includes a browser-local, append-oriented trade journal for sa
 
 The evidence importer accepts only the documented sanitized JSON envelope (`schemaVersion`, `environment`, `runId`, and normalized `events`). It hashes the selected file locally, rejects private or broker-shaped fields, and deduplicates by evidence SHA-256 plus sanitized event key. Re-importing the same file adds no duplicate records. Missing values and unproven attribution remain explicit.
 
-Manual records use the same normalized model and decimal strings for quantities and money. Form submission adds a journal entry only; it cannot place, review, cancel, reconcile, or flatten an order. The application has no backend endpoint, so server CSRF is not applicable. A per-form submission key prevents duplicate local submission, and the shared domain validator is applied before persistence.
+Manual records use the same normalized model and decimal strings for quantities and money. Form submission adds a journal entry only; it cannot place, review, cancel, reconcile, or flatten an order. Journal operations remain browser-local. The separate morning-control service rejects unexpected origins and requires its fixed local request header for POST operations. A per-form submission key prevents duplicate local submission, and the shared domain validator is applied before persistence.
 
 The trade journal is not a broker execution interface.
 

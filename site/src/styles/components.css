@@ -2497,3 +2497,21 @@
 .operations-unavailable p { margin-bottom: 0; }
 @media (max-width: 760px) { .operations-loader { display: grid; align-items: start; } .operations-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 480px) { .operations-facts { grid-template-columns: 1fr; } }
+
+/* M25.3 local allowlisted watcher control */
+.morning-control { padding: var(--space-5); border: 1px solid var(--color-border); border-top: 4px solid var(--color-teal-700); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-sm); }
+.morning-control > header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-5); }
+.morning-control > header p { max-width: 58rem; margin-bottom: 0; }
+.control-state { display: inline-flex; flex: 0 0 auto; padding: 0.25rem 0.65rem; border-radius: 999px; background: var(--color-surface-soft); color: var(--color-slate-700); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 850; }
+.control-state-running { background: var(--color-green-100); color: var(--color-green-800); }
+.control-state-blocked, .control-state-failed, .control-state-ownership-unknown, .control-state-control-service-unavailable { background: var(--color-red-100); color: var(--color-red-800); }
+.control-state-complete, .control-state-not-running { background: var(--color-blue-100); color: var(--color-blue-700); }
+.control-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); margin: var(--space-5) 0; }
+.control-facts > div { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-soft); }
+.control-facts dt { color: var(--color-slate-500); font-size: var(--text-xs); font-weight: 800; text-transform: uppercase; }
+.control-facts dd { margin: var(--space-1) 0 0; overflow-wrap: anywhere; color: var(--color-navy-900); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 750; }
+.control-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.control-actions button:disabled { cursor: not-allowed; opacity: 0.48; }
+.control-blockers { padding: var(--space-3); border-radius: var(--radius-sm); background: var(--color-red-100); color: var(--color-red-800); font-family: var(--font-mono); font-size: var(--text-xs); }
+@media (max-width: 760px) { .morning-control > header { display: grid; } .control-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 480px) { .control-facts { grid-template-columns: 1fr; } .control-actions { display: grid; } }
