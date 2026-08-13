@@ -1,79 +1,69 @@
-﻿import JourneySpine from '../components/JourneySpine'
 import PageHeader from '../components/PageHeader'
 import DevelopmentTimeline from '../components/diagrams/DevelopmentTimeline'
 
-const developmentLoop = [
-  {
-    title: 'Proposal',
-    detail: 'Define a narrow milestone, constraints, and stop conditions.',
-  },
-  {
-    title: 'Offline implementation',
-    detail: 'Build without live broker calls or production data.',
-  },
-  {
-    title: 'Fixture testing',
-    detail: 'Exercise success, failure, ambiguity, crash, and replay cases.',
-  },
-  {
-    title: 'Pull request & CI',
-    detail: 'Review a focused diff and rerun the complete automated suite.',
-  },
-  {
-    title: 'Attended checkpoint',
-    detail: 'Only separately authorized, bounded validation can touch live context.',
-  },
-  {
-    title: 'Evidence',
-    detail: 'Record sanitized proof of what was and was not established.',
-  },
-  {
-    title: 'Handoff',
-    detail: 'State the exact baseline, remaining risks, and unresolved facts.',
-  },
-  {
-    title: 'Next safety gate',
-    detail: 'Advance only after prerequisites are directly grounded.',
-  },
+const frontier = [
+  'Genuine LONG_CANDIDATE',
+  'Candidate commissioning handoff',
+  'Production read-only rehearsal',
+  'READY_FOR_EXPLICIT_ATTENDED_WRITE_AUTHORIZATION',
+  'First explicitly authorized supervised one-share lifecycle',
+  'Protection grounding',
+  'Exit, reconciliation, and P&L evidence',
+  'Activation evidence',
+  'Bounded unattended pilot',
+  'ORB-LIVE v1',
 ]
 
 export default function DevelopmentJourneyPage() {
   return (
-    <div className="page">
+    <div className="page build-journey-page">
       <PageHeader
-        eyebrow="Development journey"
-        title="Maturity comes from closing one uncertainty at a time."
-        lead="ORB-LIVE has progressed from strategy rules to durable state, deterministic simulation, reconciliation, and carefully bounded commissioning work. Unfinished validation stays visibly unfinished."
+        eyebrow="Build journey"
+        title="One bounded system, built one verified boundary at a time."
+        lead="ORB-LIVE is in live commissioning: a genuine candidate can reach attended review and read-only rehearsal, but no unattended activation or broker write authority is active."
       />
 
-      <JourneySpine
-        compact
-        title="The same thread matured one boundary at a time"
-        description="The milestones below strengthened Observe, Narrow, Authorize, Protect, and Prove rather than creating separate product stories."
-      />
+      <section aria-labelledby="current-status-title">
+        <div className="section-heading">
+          <span className="section-label">Current status</span>
+          <h2 id="current-status-title">LIVE COMMISSIONING</h2>
+          <p>Engineering-stage estimate: approximately 98%. This is a delivery estimate, not trading-performance or financial-success probability.</p>
+        </div>
+        <dl className="build-status-grid">
+          <div><dt>Current frontier</dt><dd>First supervised one-share live lifecycle</dd></div>
+          <div><dt>Authority</dt><dd>ATTENDED_COMMISSIONING_ONLY</dd></div>
+          <div><dt>Automated / unattended activation</dt><dd>NOT ACTIVATED</dd></div>
+          <div><dt>Strategy</dt><dd>orb_long_v0</dd></div>
+          <div><dt>Commissioning universe</dt><dd>10 symbols</dd></div>
+        </dl>
+      </section>
 
       <DevelopmentTimeline />
 
-      <section aria-labelledby="method-title">
+      <section aria-labelledby="frontier-title">
         <div className="section-heading">
-          <span className="section-label">Working method</span>
-          <h2 id="method-title">How the project is developed</h2>
-          <p>
-            Each milestone is deliberately small enough to review, test, and
-            stop without granting authority to the next one.
-          </p>
+          <span className="section-label">Current frontier</span>
+          <h2 id="frontier-title">What remains before the v1 deliverable</h2>
+          <p>Only the first four steps are current commissioning flow. The remaining steps are future work and are not represented as complete.</p>
         </div>
-        <ol className="development-loop">
-          {developmentLoop.map((step, index) => (
-            <li key={step.title}>
-              <span>{String(index + 1).padStart(2, '0')}</span>
-              <div>
-                <strong>{step.title}</strong>
-                <p>{step.detail}</p>
-              </div>
+        <ol className="frontier-flow">
+          {frontier.map((step, index) => (
+            <li className={index < 4 ? 'frontier-current' : 'frontier-future'} key={step}>
+              <span>{String(index + 1).padStart(2, '0')}</span><strong>{step}</strong>
             </li>
           ))}
         </ol>
+      </section>
+
+      <section className="v1-boundary" aria-labelledby="v1-boundary-title">
+        <div className="section-heading">
+          <span className="section-label">ORB-LIVE v1 boundary</span>
+          <h2 id="v1-boundary-title">One deliberate lifecycle, not a portfolio system</h2>
+        </div>
+        <ul>
+          <li>ONE strategy</li><li>ONE account</li><li>ONE selected equity position lifecycle</li><li>ONE bounded daily trade attempt</li>
+        </ul>
+        <p>Future evolution: after successful ORB-LIVE v1 validation, multi-entry and portfolio-level risk management can be developed separately. They are not part of this deliverable.</p>
       </section>
     </div>
   )

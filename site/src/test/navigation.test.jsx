@@ -1,4 +1,4 @@
-﻿import { act, render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import App from '../App'
 
@@ -7,7 +7,7 @@ const destinations = [
   ['strategy', /15 symbols/i],
   ['system-flow', /15 → 0–1/i],
   ['safety', /risk/i],
-  ['development-journey', /closing one uncertainty/i],
+  ['build-journey', /one bounded system/i],
   ['architecture-glossary', /narrow layers/i],
 ]
 
