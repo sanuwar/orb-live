@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { createElement } from 'react'
@@ -18,17 +18,18 @@ function productionFiles(directory) {
     .filter((path) => /\.(js|jsx|css)$/.test(path))
 }
 
-function productionSource() {
+function productionSource(excluded = []) {
   return productionFiles(sourceRoot)
+    .filter((path) => !excluded.includes(basename(path)))
     .map((path) => readFileSync(path, 'utf8'))
     .join('\n')
 }
 
 describe('safety isolation', () => {
-  it('keeps network and broker clients unreachable from production source', () => {
-    const source = productionSource()
-    const prohibited = [
-      /\bfetch\s*\(/,
+  it('keeps broker clients and all non-allowlisted network calls unreachable', () => {
+    const sourceWithoutLocalClient = productionSource(['localControlClient.js'])
+    const allSource = productionSource()
+    const prohibitedEverywhere = [
       /\bXMLHttpRequest\b/,
       /\bWebSocket\b/,
       /\baxios\b/i,
@@ -41,7 +42,18 @@ describe('safety isolation', () => {
       /\b(?:exec|execFile|spawn|fork)\s*\(/,
     ]
 
-    prohibited.forEach((pattern) => expect(source).not.toMatch(pattern))
+    expect(sourceWithoutLocalClient).not.toMatch(/\bfetch\s*\(/)
+    prohibitedEverywhere.forEach((pattern) => expect(allSource).not.toMatch(pattern))
+  })
+
+  it('limits the network exception to four fixed loopback operations', () => {
+    const source = readFileSync(join(sourceRoot, 'operations', 'localControlClient.js'), 'utf8')
+    expect(source).toContain("http://127.0.0.1:8766/api/local-control")
+    expect(source).toContain("request('/status')")
+    expect(source).toContain("request('/readiness', 'POST')")
+    expect(source).toContain("request('/start', 'POST')")
+    expect(source).toContain("request('/stop', 'POST')")
+    expect(source).not.toMatch(/0\.0\.0\.0|execute|run-command|shell|script|pid/i)
   })
 
   it('contains no credential paths or fingerprint-like values', () => {
@@ -60,23 +72,17 @@ describe('safety isolation', () => {
     render(createElement(App))
 
     expect(screen.getByText(/Checkpoint 7C remains blocked/)).toBeVisible()
-    expect(
-      screen.getByText(/active protective-stop verification is unresolved/i),
-    ).toBeVisible()
+    expect(screen.getByText(/active protective-stop verification is unresolved/i)).toBeVisible()
     expect(screen.getByText('No grounded mapping yet')).toBeVisible()
-    expect(
-      screen.getByRole('heading', { name: /0 grounded active-state mappings/i }),
-    ).toBeVisible()
+    expect(screen.getByRole('heading', { name: /0 grounded active-state mappings/i })).toBeVisible()
   })
 
   it('labels the dashboard as documentation rather than a trading console', () => {
     render(createElement(App))
 
-    expect(screen.getByRole('heading', { name: /documentation—not a trading console/i })).toBeVisible()
+    expect(screen.getByRole('heading', { name: /documentation.not a trading console/i })).toBeVisible()
     expect(screen.getByText(/Not financial advice/)).toBeVisible()
-    expect(
-      screen.queryByRole('button', { name: /buy|sell|place|cancel/i }),
-    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /buy|sell|place|cancel/i })).not.toBeInTheDocument()
   })
 
   it('filters the glossary entirely in local component state', () => {
@@ -92,10 +98,7 @@ describe('safety isolation', () => {
   })
 
   it('includes a reduced-motion override', () => {
-    const css = readFileSync(
-      join(sourceRoot, 'styles', 'global.css'),
-      'utf8',
-    )
+    const css = readFileSync(join(sourceRoot, 'styles', 'global.css'), 'utf8')
     expect(css).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/)
   })
 })

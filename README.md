@@ -29,6 +29,16 @@ identifiers, or tokens in commands, evidence, or chat.
 
 ### Before market
 
+For the browser-based local morning flow, start the fixed loopback service and the existing frontend in separate local terminals:
+
+```powershell
+python scripts/run_local_watcher_control.py
+cd site
+npm run dev -- --host 127.0.0.1
+```
+
+Open the Operations page and use **Check readiness**. The service is bound to 127.0.0.1:8766 and exposes only readiness, watcher start, watcher stop, and owned-watcher status. It cannot accept commands, scripts, arguments, or PIDs. The canonical CLI remains available for diagnostics:
+
 ```powershell
 python scripts/check_morning_watch_readiness.py
 ```
@@ -192,8 +202,9 @@ ahead of its milestone:
   broker. *(Milestone 11.)*
 - **No persistent strategy activation.** `strategy.enabled` stays `false` until
   a milestone explicitly authorizes changing it. *(Milestone 12.)*
-- **No runtime-connected operator dashboard, kill switch, or alerting.**
-  *(Milestone 10.)*
+- **No remote runtime control, broker-write control, recovery daemon, or alerting.**
+  M25.3 adds only a loopback-bound controller for the observational morning
+  watcher; remote access remains read-only. *(M25.)*
 - **Active-protection state mapping is ungrounded.**
   `ADAPTER_PERMITTED_ACTIVE_PROTECTION_STATES` is empty, so
   `VERIFIED_ACTIVE_PROTECTION` is not available from that adapter mapping.
@@ -204,9 +215,9 @@ ahead of its milestone:
   no protective order, so it recorded `NOT_OBSERVED` and promoted nothing — the
   mapping is still empty and grounding is still incomplete. *(Milestone 9 — the
   first automation milestone.)*
-- **`site/` is documentation and journal only.** The React dashboard is
-  statically bundled, has no backend connection, no broker integration, no live
-  data, and no trading controls.
+- **`site/` has no broker or market-data connection.** Its only runtime-bound
+  surface is the M25.3 loopback service with four fixed observational watcher
+  operations; journal/evidence data remains browser-local. *(M25.)*
 
 ## Repository layout
 

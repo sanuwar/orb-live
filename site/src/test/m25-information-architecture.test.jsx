@@ -11,9 +11,11 @@ describe('M25.1 parent routes and compatibility', () => {
     render(<App />); navigate('development-journey')
     expect(screen.getByRole('heading', { level: 1, name: /one bounded system/i })).toBeVisible()
   })
-  it('keeps the operations surface static and non-actionable', () => {
+  it('keeps Operations bounded to local watcher controls', () => {
     render(<App />); navigate('operations')
-    expect(screen.queryByRole('button', { name: /start|stop|trade|broker/i })).not.toBeInTheDocument()
-    expect(screen.getByText(/never contacts runtime, market data, or broker services/i)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Start morning watch' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Stop watch' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /trade|broker/i })).not.toBeInTheDocument()
+    expect(screen.getByText(/never contacts market-data or broker services/i)).toBeVisible()
   })
 })
