@@ -12,7 +12,7 @@ describe('documentation dashboard', () => {
       'Strategy',
       'System Flow',
       'Safety',
-      'Development Journey',
+      'Build Journey',
       'Architecture & Glossary',
       'Trade Journal',
       'Trades & Events',

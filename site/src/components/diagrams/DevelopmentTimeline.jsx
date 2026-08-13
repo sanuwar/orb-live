@@ -1,40 +1,35 @@
-import { milestones } from '../../data/content'
-
-function statusClass(status) {
-  return status.toLowerCase().replaceAll(' ', '-')
-}
+import { buildJourneyPhases } from '../../data/content'
 
 export default function DevelopmentTimeline() {
   return (
-    <figure
-      className="development-timeline diagram-card"
-      aria-labelledby="development-timeline-title"
-    >
-      <figcaption>
-        <span className="section-label">Milestone history</span>
-        <h2 id="development-timeline-title">Built in deliberate safety layers</h2>
-        <p>
-          Status describes engineering readiness—not authorization to trade.
-        </p>
-      </figcaption>
-      <ol>
-        {milestones.map((milestone, index) => (
-          <li key={milestone.title}>
-            <span className="milestone-number" aria-hidden="true">
-              {String(index + 1).padStart(2, '0')}
-            </span>
-            <article>
-              <span
-                className={`status-pill status-${statusClass(milestone.status)}`}
-              >
-                {milestone.status}
-              </span>
-              <h3>{milestone.title}</h3>
-              <p>{milestone.detail}</p>
-            </article>
+    <section className="build-journey-timeline" aria-labelledby="build-journey-timeline-title">
+      <div className="section-heading">
+        <span className="section-label">Product flow</span>
+        <h2 id="build-journey-timeline-title">Built through bounded, reviewable milestones</h2>
+        <p>Completed engineering work is distinct from the attended commissioning frontier and future product work.</p>
+      </div>
+      <ol className="build-phase-list">
+        {buildJourneyPhases.map((phase) => (
+          <li className={`build-phase build-phase-${phase.status.toLowerCase()}`} key={phase.title}>
+            <header>
+              <span className="phase-marker" aria-hidden="true">{phase.status === 'CURRENT' ? '●' : '✓'}</span>
+              <div><span className="section-label">{phase.status}</span><h3>{phase.title}</h3></div>
+            </header>
+            <ol className="build-milestone-grid">
+              {phase.milestones.map((milestone) => (
+                <li key={milestone.id}>
+                  <article>
+                    <span className="milestone-id">{milestone.id}</span>
+                    <h4>{milestone.title}</h4>
+                    <p>{milestone.description}</p>
+                    <small>{milestone.validation}</small>
+                  </article>
+                </li>
+              ))}
+            </ol>
           </li>
         ))}
       </ol>
-    </figure>
+    </section>
   )
 }

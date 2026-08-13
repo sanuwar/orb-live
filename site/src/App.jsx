@@ -16,7 +16,8 @@ import EvidenceImportPage from './pages/EvidenceImportPage'
 
 const pages = {
   overview: OverviewPage, strategy: StrategyPage, 'system-flow': SystemFlowPage,
-  safety: SafetyPage, 'development-journey': DevelopmentJourneyPage,
+  safety: SafetyPage, 'build-journey': DevelopmentJourneyPage,
+  'development-journey': DevelopmentJourneyPage,
   'architecture-glossary': ArchitectureGlossaryPage, journal: JournalOverviewPage,
   'journal-records': JournalRecordsPage, 'manual-record': ManualRecordPage,
   'evidence-import': EvidenceImportPage,

@@ -4,8 +4,8 @@ export const navigation = [
   { slug: 'system-flow', label: 'System Flow', shortLabel: '03' },
   { slug: 'safety', label: 'Safety', shortLabel: '04' },
   {
-    slug: 'development-journey',
-    label: 'Development Journey',
+    slug: 'build-journey',
+    label: 'Build Journey',
     shortLabel: '05',
   },
   {
@@ -257,74 +257,46 @@ export const safetyLayers = [
   },
 ]
 
-export const milestones = [
+export const buildJourneyPhases = [
   {
-    title: 'Strategy specification and signal engine',
-    status: 'Completed',
-    detail: 'Codified opening-range inputs, filters, and exit intent.',
+    title: 'Foundation', status: 'COMPLETE',
+    milestones: [
+      { id: 'M13', title: 'Protection-state infrastructure', description: 'Added the evidence, ledger, and assessment foundation needed to ground protection from eligible live evidence.', validation: 'Accepted infrastructure; eligible live evidence remains required.' },
+      { id: 'M14', title: 'Safety-governed broker control', description: 'Bound broker execution integration to attended safety, commissioned identity, and fail-closed suspension controls.', validation: 'Attended commissioning boundary established.' },
+    ],
   },
   {
-    title: 'Persistent trade state',
-    status: 'Tested',
-    detail: 'Added durable lifecycle state, migrations, and event history.',
+    title: 'Real market observation', status: 'COMPLETE',
+    milestones: [
+      { id: 'M15', title: 'Production market data and live shadow', description: 'Introduced the production market-data boundary and non-writing live-shadow evidence.', validation: 'Strategy decisions remain observational.' },
+      { id: 'M16', title: 'Bounded multi-symbol shadow and simulation bridge', description: 'Bounded the watchlist, simulated execution consequences, and connected candidate review inputs without an order path.', validation: 'Commissioning universe fixed at 10 symbols.' },
+    ],
   },
   {
-    title: 'Broker action sagas',
-    status: 'Tested',
-    detail: 'Modeled claims, attempts, dependencies, uncertainty, and recovery.',
+    title: 'Safety and broker control', status: 'COMPLETE',
+    milestones: [
+      { id: 'M17', title: 'Supervised preflight, safety bridge, and handoff', description: 'Built the reviewed preflight and attended-handoff chain for a one-share supervised lifecycle.', validation: 'Explicit acknowledgements and fail-closed review required.' },
+      { id: 'M18', title: 'Supervised and production read-only rehearsal', description: 'Added rehearsals that validate readiness and stop before broker mutation.', validation: 'Read-only boundary preserved.' },
+      { id: 'M19', title: 'Morning watcher and protection/exit rehearsal', description: 'Added the canonical 09:40–11:00 ET watcher and deterministic window-end termination.', validation: 'No-candidate sessions stop automatically at window end.' },
+      { id: 'M20', title: 'Authoritative protection grounding', description: 'Added authoritative observation and assessment plumbing for protection-state evidence.', validation: 'No active protection state is promoted without evidence.' },
+    ],
   },
   {
-    title: 'Fake transport and simulation',
-    status: 'Tested',
-    detail: 'Exercised broker-like outcomes without a real broker connection.',
+    title: 'Unattended architecture', status: 'COMPLETE',
+    milestones: [
+      { id: 'M21', title: 'Bounded unattended orchestrator', description: 'Defined a bounded, fail-closed orchestrator while keeping activation inert.', validation: 'No automated action permitted.' },
+      { id: 'M22', title: 'Durable bounded pilot runtime and state', description: 'Added durable pilot runtime state and restart controls behind inactive policy.', validation: 'Unattended runtime remains disabled.' },
+      { id: 'M23', title: 'Activation evidence and first-live path', description: 'Added activation-readiness evidence and the attended first-live commissioning runbook.', validation: 'Activation evidence is not activation.' },
+    ],
   },
   {
-    title: 'Lifecycle orchestration',
-    status: 'Tested',
-    detail: 'Coordinated entry, protection, and exit state transitions offline.',
-  },
-  {
-    title: 'Simulation and soak testing',
-    status: 'Tested',
-    detail: 'Repeated deterministic scenarios to expose restart and replay defects.',
-  },
-  {
-    title: 'Read-only broker reconciliation',
-    status: 'Prepared',
-    detail: 'Built fail-closed comparison of expected and observed state.',
-  },
-  {
-    title: 'Gateway hardening',
-    status: 'Completed',
-    detail: 'Constrained capability surfaces and protected composition boundaries.',
-  },
-  {
-    title: 'Live-market shadow mode',
-    status: 'Prepared',
-    detail: 'Separated hypothetical decisions from any executable path.',
-  },
-  {
-    title: 'Attended identity and read-only checks',
-    status: 'Completed',
-    detail: 'Commissioned bounded observation checkpoints under operator control.',
-  },
-  {
-    title: 'Schema-grounded response parsing',
-    status: 'Tested',
-    detail: 'Classified advertised lifecycle responses without inventing semantics.',
-  },
-  {
-    title: 'Initialization-only live adapter',
-    status: 'Awaiting attended validation',
-    detail: 'Offline implementation exists but is not bound to execution.',
-  },
-  {
-    title: 'Current commissioning blockers',
-    status: 'Blocked',
-    detail: 'Checkpoint 7C and active protective-stop verification remain unresolved.',
+    title: 'Live commissioning', status: 'CURRENT',
+    milestones: [
+      { id: 'M24', title: 'Candidate-to-handoff commissioning CLI', description: 'Made the authentic live-shadow candidate-to-sanitized-handoff chain executable before the read-only rehearsal.', validation: 'Stops at production read-only rehearsal; it does not authorize a write.' },
+      { id: 'Operator flow', title: 'Pre-market readiness and daily flow', description: 'Added local-only readiness checks and documented the canonical morning-to-handoff operator path.', validation: 'No broker or market-data connectivity required.' },
+    ],
   },
 ]
-
 export const architectureLayers = [
   {
     title: 'Strategy and signals',
