@@ -18,10 +18,16 @@ not authorization to submit an order.
 
 ## Candidate and final non-writing gate
 
-During the regular-session ORB window, capture a genuine candidate:
+Before 09:40 ET, run the local-only readiness check:
 
 ```powershell
-python scripts/run_live_shadow_session.py --mode LIVE_SHADOW --production --symbols AAPL,MSFT,NVDA,AMD,AMZN,META,GOOGL,TSLA,AVGO,NFLX
+python scripts/check_morning_watch_readiness.py
+```
+
+During the regular-session ORB entry window, run the canonical bounded watcher:
+
+```powershell
+python scripts/run_morning_live_shadow_watch.py --production
 ```
 
 Preserve the live-shadow evidence. It must contain an authentic

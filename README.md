@@ -6,8 +6,7 @@ platform for a single opening-range-breakout equity strategy.
 **ORB-LIVE does not trade by itself today.** Every live broker write that this
 repository can currently perform requires a human operator present at a
 terminal, answering explicit authorization prompts, for a single one-share
-trade. There is no unattended mode, no scheduler, and no automated strategy
-execution in the current code.
+trade. There is no unattended broker-write scheduler or automated strategy execution in the current code.
 
 The approved destination **is** fully unattended automated ORB strategy
 execution, reached through the ordered milestones in
@@ -17,12 +16,70 @@ be built ahead of its milestone.
 
 ## Status
 
-Milestone 7 — attended tiny-risk live-write commissioning — is **complete** and
-validated against a real broker. See
-[`MILESTONE_7_COMPLETION_RECORD.md`](MILESTONE_7_COMPLETION_RECORD.md) for the
-formal record and [`ROADMAP.md`](ROADMAP.md) for the approved destination, the
-authorized capital ceiling, and the ordered milestones that lead there.
+The current production operator path is bounded LIVE_SHADOW observation followed
+by attended commissioning only after a genuine candidate. M24 produces a saved,
+sanitized handoff for the final read-only rehearsal; it does not authorize a
+broker write. See [`ROADMAP.md`](ROADMAP.md) for milestone history and planned
+automation work.
 
+## Daily ORB-LIVE Operator Flow
+
+All commands run from the repository root. Never put secret values, raw account
+identifiers, or tokens in commands, evidence, or chat.
+
+### Before market
+
+```powershell
+python scripts/check_morning_watch_readiness.py
+```
+
+This is local-only: it checks source/configuration/calendar facts, reports only
+whether Alpaca credentials are present, and confirms that broker writes remain
+disabled. Optionally validate the shape of the external suspension path:
+
+```powershell
+python scripts/check_morning_watch_readiness.py --suspension-db <absolute-path-outside-repository>
+```
+
+Required local configuration is `ALPACA_API_KEY_ID`,
+`ALPACA_API_SECRET_KEY`, and either `broker.expected_account_fingerprint` in
+gitignored `config/local.yaml` or `ORB_EXPECTED_ACCOUNT_FINGERPRINT`. The
+fingerprint is a SHA-256 digest, never a raw account number. The M22 unattended
+pilot state store is separate, external, and **not activated** today.
+
+### During the entry window
+
+```powershell
+python scripts/run_morning_live_shadow_watch.py --production
+```
+
+The canonical watcher evaluates the fixed 10-symbol watchlist every five minutes
+from 09:40 through 11:00 ET and writes its session summary under
+`artifacts/live-shadow-watch/` plus individual evidence under
+`artifacts/live-shadow/`.
+
+### If no candidate
+
+`WINDOW_COMPLETE_NO_CANDIDATE` means no trade. Stop for the day.
+
+### If a candidate is captured
+
+`CANDIDATE_CAPTURED` is still non-writing. Use its authentic saved LIVE_SHADOW
+candidate artifact to build the existing commissioning chain:
+
+```powershell
+python scripts/build_live_candidate_commissioning_handoff.py --live-shadow <live-shadow-evidence.json> --release-sha <current-40-character-sha> --suspension-db <absolute-path-outside-repository> --ack acknowledges_loss_may_exceed_plan --ack operator_present --ack robinhood_ui_open --ack no_second_trade
+```
+
+The command writes a sanitized handoff below `artifacts/commissioning-handoff/`
+and prints the exact production read-only rehearsal command. Run that printed
+command explicitly; it writes rehearsal evidence under
+`artifacts/commissioning-rehearsal/`.
+
+### Mandatory pre-write stop
+
+`READY_FOR_EXPLICIT_ATTENDED_WRITE_AUTHORIZATION` is the final stop. **DO NOT
+CONTINUE PAST THIS POINT WITHOUT EXPLICIT REVIEW/AUTHORIZATION.**
 ## Architecture: two intentionally disconnected stacks
 
 The repository contains two halves that **do not connect to each other**. There
@@ -129,7 +186,7 @@ Each of these is a current boundary scheduled into a specific milestone in
 [`ROADMAP.md`](ROADMAP.md) — none is an accidental gap, and none may be built
 ahead of its milestone:
 
-- **No unattended scheduler.** Every live action is operator-initiated.
+- **No unattended broker-write scheduler.** Every live action is operator-initiated.
   *(Milestone 10.)*
 - **No live signal-to-execution bridge.** The strategy stack cannot reach a
   broker. *(Milestone 11.)*
