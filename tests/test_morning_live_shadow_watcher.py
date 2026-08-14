@@ -56,6 +56,30 @@ def evaluator_for(values: list[dict]):
     return calls, evaluate
 
 
+def funnel_evidence(*, run_id: str, rules: dict[str, str | None]) -> dict:
+    reasons = {
+        "OPENING_GAP": "Opening gap is below the required threshold.",
+        "OPENING_RELATIVE_VOLUME": "Opening relative volume is below the required threshold.",
+        "SPY_ABOVE_VWAP": "SPY is not above its session VWAP.",
+        "OPENING_RANGE_BREAKOUT": "Completed bar has not broken above the opening-range high.",
+    }
+    return {
+        "run_id": run_id,
+        "request_count": 21,
+        "quality_outcome": "VALID",
+        "errors": [],
+        "symbol_results": {
+            symbol: {
+                "evaluation_state": "REJECTED",
+                "no_signal_or_rejection_reason": reasons.get(rule),
+                "shadow_trading_decision": {"decision_type": "REJECTED", "decision_id": f"decision-{symbol}"},
+                "strategy_diagnostics": {"failed_rule": rule, "spy_vwap_filter_enabled": True},
+            }
+            for symbol, rule in rules.items()
+        },
+    }
+
+
 def test_default_watchlist_and_exact_five_minute_schedule():
     points = scheduled_evaluations(day=date(2026, 8, 11), interval_minutes=DEFAULT_INTERVAL_MINUTES)
     assert DEFAULT_WATCHLIST == ("AAPL", "MSFT", "NVDA", "AMD", "AMZN", "META", "GOOGL", "TSLA", "AVGO", "NFLX")
@@ -221,6 +245,52 @@ def test_rejected_and_no_signal_decisions_never_become_candidates(tmp_path):
     summary, _ = asyncio.run(run_morning_watch(now=WINDOW_START, output_dir=tmp_path, production_confirmed=True, evaluator=evaluate, sleeper=no_sleep))
     assert len(calls) == MAX_EVALUATIONS
     assert summary["final_state"] == "WINDOW_COMPLETE_NO_CANDIDATE"
+
+
+def test_all_symbols_failing_gap_terminate_after_one_authentic_evaluation(tmp_path):
+    first = funnel_evidence(run_id="all-gap", rules={symbol: "OPENING_GAP" for symbol in DEFAULT_WATCHLIST})
+    calls, evaluate = evaluator_for([first])
+    summary, _ = asyncio.run(run_morning_watch(now=WINDOW_START, output_dir=tmp_path, production_confirmed=True, evaluator=evaluate, sleeper=no_sleep))
+
+    assert calls == [WINDOW_START]
+    assert summary["evaluation_count"] == 1
+    assert summary["final_state"] == "WINDOW_COMPLETE_NO_CANDIDATE"
+    assert summary["stop_reason"] == "NO_SURVIVORS_AFTER_STATIC_FILTERS"
+    assert summary["broker_write_count"] == 0
+    assert summary["execution_authorized"] is False
+
+
+def test_mixed_gap_survivors_all_failing_opening_rvol_terminate_safely(tmp_path):
+    rules = {symbol: "OPENING_GAP" for symbol in DEFAULT_WATCHLIST}
+    rules["AAPL"] = rules["NVDA"] = "OPENING_RELATIVE_VOLUME"
+    calls, evaluate = evaluator_for([funnel_evidence(run_id="mixed-static", rules=rules)])
+    summary, _ = asyncio.run(run_morning_watch(now=WINDOW_START, output_dir=tmp_path, production_confirmed=True, evaluator=evaluate, sleeper=no_sleep))
+
+    assert len(calls) == 1
+    assert summary["stop_reason"] == "NO_SURVIVORS_AFTER_STATIC_FILTERS"
+
+
+@pytest.mark.parametrize("dynamic_rule", ["SPY_ABOVE_VWAP", "OPENING_RANGE_BREAKOUT"])
+def test_dynamic_gate_waits_never_trigger_static_early_termination(tmp_path, dynamic_rule):
+    rules = {symbol: "OPENING_GAP" for symbol in DEFAULT_WATCHLIST}
+    rules["AAPL"] = dynamic_rule
+    values = [funnel_evidence(run_id=f"dynamic-{index}", rules=rules) for index in range(MAX_EVALUATIONS)]
+    calls, evaluate = evaluator_for(values)
+    summary, _ = asyncio.run(run_morning_watch(now=WINDOW_START, output_dir=tmp_path, production_confirmed=True, evaluator=evaluate, sleeper=no_sleep))
+
+    assert len(calls) == MAX_EVALUATIONS
+    assert summary["stop_reason"] == "ENTRY_WINDOW_SCHEDULE_EXHAUSTED"
+
+
+def test_static_failed_rule_without_exact_authentic_reason_cannot_terminate(tmp_path):
+    evidence_value = funnel_evidence(run_id="contradictory", rules={symbol: "OPENING_GAP" for symbol in DEFAULT_WATCHLIST})
+    evidence_value["symbol_results"]["AAPL"]["no_signal_or_rejection_reason"] = "OTHER"
+    values = [evidence_value, *[evidence(run_id=f"continue-{index}") for index in range(MAX_EVALUATIONS - 1)]]
+    calls, evaluate = evaluator_for(values)
+    summary, _ = asyncio.run(run_morning_watch(now=WINDOW_START, output_dir=tmp_path, production_confirmed=True, evaluator=evaluate, sleeper=no_sleep))
+
+    assert len(calls) == MAX_EVALUATIONS
+    assert summary["stop_reason"] == "ENTRY_WINDOW_SCHEDULE_EXHAUSTED"
 
 
 def test_shared_provider_failure_stops_fail_closed(tmp_path):

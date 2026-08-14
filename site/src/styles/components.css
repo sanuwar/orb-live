@@ -1,4 +1,4 @@
-/* Application chrome */
+﻿/* Application chrome */
 .sidebar {
   position: fixed;
   z-index: 20;
@@ -2522,6 +2522,26 @@
 .candidate-attention-active { border: 2px solid var(--color-teal-700); border-top-width: 6px; background: #edf9f7; box-shadow: var(--shadow-md); }
 .candidate-attention-active .candidate-symbol { margin: 0; color: var(--color-teal-700); font-family: var(--font-mono); font-size: var(--text-2xl); font-weight: 850; }
 .candidate-attention-active > strong { display: inline-block; color: var(--color-teal-700); font-family: var(--font-mono); font-size: var(--text-sm); }
+
+.morning-funnel { padding: var(--space-5); border: 1px solid var(--color-border); border-top: 4px solid var(--color-blue-600); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-sm); }
+.funnel-counts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-5); }
+.funnel-counts > div, .funnel-symbol-summary > div { padding: var(--space-4); border-radius: var(--radius-md); background: var(--color-surface-soft); }
+.funnel-counts dt { min-height: 2.5rem; color: var(--color-slate-600); font-size: var(--text-xs); font-weight: 800; }
+.funnel-counts dd { margin: var(--space-2) 0 0; color: var(--color-navy-900); font-family: var(--font-mono); font-size: var(--text-xl); font-weight: 900; }
+.funnel-symbol-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-4); }
+.funnel-symbol-summary h3, .funnel-rejections h3 { margin-bottom: var(--space-2); font-size: var(--text-sm); }
+.funnel-symbol-summary p { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 750; }
+.funnel-table-wrap { margin-top: var(--space-5); overflow-x: auto; }
+.funnel-table { width: 100%; border-collapse: collapse; font-size: var(--text-xs); }
+.funnel-table th, .funnel-table td { padding: var(--space-3); border-bottom: 1px solid var(--color-border); text-align: left; vertical-align: top; }
+.funnel-table thead th { color: var(--color-slate-600); font-weight: 850; }
+.funnel-table tbody th { color: var(--color-navy-900); font-family: var(--font-mono); }
+.funnel-rejections { margin-top: var(--space-5); }
+.funnel-rejections ul { display: grid; gap: var(--space-2); list-style: none; }
+.funnel-rejections li { display: grid; grid-template-columns: 5rem 1fr; gap: var(--space-3); padding: var(--space-3); border-left: 3px solid var(--color-red-800); background: var(--color-red-100); }
+.funnel-rejections strong { font-family: var(--font-mono); }
+@media (max-width: 900px) { .funnel-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .funnel-counts, .funnel-symbol-summary { grid-template-columns: 1fr; } }
 
 /* Authenticated remote read-only surface */
 .remote-login { min-height: 100vh; display: grid; place-items: center; padding: var(--space-6); background: var(--color-canvas); }

@@ -16,6 +16,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_HISTORY_PATH = REPOSITORY_ROOT / "artifacts" / "operator-projection" / "runtime-journal.json"
 SCHEMA_VERSION = 1
 _DENIED = ("account", "token", "credential", "cookie", "authorization", "header", "request", "response", "path")
+_SAFE_COUNT_KEYS = frozenset({"requestcount", "totalhttprequestcount"})
 _FINAL_STATES = frozenset({"WINDOW_COMPLETE_NO_CANDIDATE", "CANDIDATE_CAPTURED", "OPERATOR_STOPPED", "PROVIDER_FAILURE"})
 
 
@@ -41,7 +42,13 @@ def _timestamp(value: Any) -> str:
 
 def _contains_private(value: Any) -> bool:
     if isinstance(value, Mapping):
-        return any(any(part in key.casefold().replace("_", "") for part in _DENIED) or _contains_private(child) for key, child in value.items())
+        for key, child in value.items():
+            normalized = key.casefold().replace("_", "")
+            if normalized not in _SAFE_COUNT_KEYS and any(part in normalized for part in _DENIED):
+                return True
+            if _contains_private(child):
+                return True
+        return False
     if isinstance(value, list):
         return any(_contains_private(item) for item in value)
     return False
@@ -61,6 +68,53 @@ def _event(*, projection_key: str, event_type: str, occurred_at: str, severity: 
         "eventId": "runtime-event-" + _digest(projection_key + ":" + event_type)[:16], "eventType": event_type,
         "occurredAt": occurred_at, "severity": severity, "component": component, "detailCode": detail_code,
         "source": "AUTOMATIC_RUNTIME",
+    }
+
+
+def _single_value(facts: list[dict[str, Any]], field: str) -> str | None:
+    values = {fact[field] for fact in facts if fact.get(field) is not None}
+    return values.pop() if len(values) == 1 else None
+
+
+def _funnel_summary(facts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Summarize evaluator-owned gates without converting unknowns to passes."""
+    if not facts:
+        return None
+    gap_known = all(fact["gates"]["openingGap"] in {"PASSED", "REJECTED"} for fact in facts)
+    gap_survivors = [fact for fact in facts if fact["gates"]["openingGap"] == "PASSED"]
+    rvol_known = gap_known and all(fact["gates"]["openingRvol"] in {"PASSED", "REJECTED"} for fact in gap_survivors)
+    rvol_survivors = [fact for fact in gap_survivors if fact["gates"]["openingRvol"] == "PASSED"]
+    enabled_values = {fact["spyVwapEnabled"] for fact in rvol_survivors}
+    spy_enabled = enabled_values.pop() if len(enabled_values) == 1 else None
+    spy_known = rvol_known and spy_enabled is not None and all(
+        fact["gates"]["spyVwap"] in ({"PASSED", "WAITING"} if spy_enabled else {"NOT_EVALUATED"})
+        for fact in rvol_survivors
+    )
+    spy_passes = [fact for fact in rvol_survivors if fact["gates"]["spyVwap"] == "PASSED"]
+    breakout_known = rvol_known and all(fact["gates"]["orbBreakout"] in {"PASSED", "WAITING", "NOT_EVALUATED"} for fact in rvol_survivors)
+    breakout_passes = [fact for fact in rvol_survivors if fact["gates"]["orbBreakout"] == "PASSED"]
+    rejected = [
+        {"symbol": fact["symbol"], "reason": fact["terminalRejectionReason"], "failedRule": fact["failedRule"]}
+        for fact in facts if fact["terminalRejectionReason"] is not None
+    ]
+    alive = [fact["symbol"] for fact in rvol_survivors]
+    unavailable = [
+        fact["symbol"] for fact in facts
+        if fact["terminalRejectionReason"] is None and fact["symbol"] not in alive
+    ]
+    return {
+        "status": "AVAILABLE" if gap_known and rvol_known and not unavailable else "INCOMPLETE",
+        "startingSymbolCount": len(facts),
+        "survivorsAfterGap": len(gap_survivors) if gap_known else None,
+        "survivorsAfterOpeningRvol": len(rvol_survivors) if rvol_known else None,
+        "survivorsAfterSpyVwap": len(spy_passes) if spy_known and spy_enabled else len(rvol_survivors) if spy_known else None,
+        "survivorsAfterBreakout": len(breakout_passes) if breakout_known else None,
+        "spyVwapEnabled": spy_enabled,
+        "gapMinimumPct": _single_value(facts, "requiredGapPct"),
+        "openingRvolMinimum": _single_value(facts, "requiredOpeningRvol"),
+        "aliveSymbols": alive,
+        "rejectedSymbols": rejected,
+        "unavailableSymbols": unavailable,
     }
 
 
@@ -93,7 +147,7 @@ def project_watch_summary(summary: Mapping[str, Any], *, artifact_name: str) -> 
             filter_facts = project_filter_facts(evaluation.get("evidence_artifact"))
         except FilterProjectionError:
             filter_facts = []
-        evaluation_facts.append({"scheduledAt": when, "filterEvidence": "AVAILABLE" if filter_facts else "UNAVAILABLE", "filterFacts": filter_facts})
+        evaluation_facts.append({"scheduledAt": when, "filterEvidence": "AVAILABLE" if filter_facts else "UNAVAILABLE", "filterFacts": filter_facts, "funnel": _funnel_summary(filter_facts)})
         records.append(_record(projection_key=key, status="EVALUATED", stage="RUN_STARTED", occurred_at=when, reason=_safe_code(str(evaluation.get("quality_outcome", "UNKNOWN")), field="quality outcome")))
         events.append(_event(projection_key=key, event_type="SCANNER_EVALUATED", occurred_at=when, severity="INFO", component="morning_watcher", detail_code="SCANNER_EVALUATED"))
         if candidates:

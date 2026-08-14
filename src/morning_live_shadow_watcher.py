@@ -21,6 +21,7 @@ from src.live_shadow_session import (
     run_session,
 )
 from src.read_only_authorization_manifest import checkpoint_implementation_digest, resolve_head_sha
+from src.runtime_filter_projection import static_filter_eliminations
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WATCH_EVIDENCE_DIR = REPOSITORY_ROOT / "artifacts" / "live-shadow-watch"
@@ -201,6 +202,7 @@ async def run_morning_watch(
     schedule = scheduled_evaluations(day=day, interval_minutes=limits.interval_minutes)
     evaluate = evaluator or _default_evaluator(symbols=watchlist, output_dir=live_shadow_output_dir, environment=environment)
     last_scheduled: datetime | None = None
+    statically_eliminated: set[str] = set()
     completed_at = moment
     try:
         while True:
@@ -263,6 +265,10 @@ async def run_morning_watch(
                 break
             if reference["candidate_count"]:
                 summary.update(final_state="CANDIDATE_CAPTURED", stop_reason="FIRST_GENUINE_LONG_CANDIDATE", first_candidate_timestamp=point)
+                break
+            statically_eliminated.update(static_filter_eliminations(evidence, symbols=watchlist))
+            if statically_eliminated == set(watchlist):
+                summary.update(final_state="WINDOW_COMPLETE_NO_CANDIDATE", stop_reason="NO_SURVIVORS_AFTER_STATIC_FILTERS")
                 break
     except (KeyboardInterrupt, asyncio.CancelledError):
         summary.update(final_state="OPERATOR_STOPPED", stop_reason="OPERATOR_INTERRUPTION")

@@ -330,5 +330,6 @@ def test_rejection_diagnostics_are_canonical_and_do_not_change_decision(tmp_path
     assert diagnostics["failed_rule"] is None
     assert diagnostics["observed_gap_pct"] == "1.500"
     assert diagnostics["required_gap_pct"] == "1.0"
+    assert diagnostics["spy_vwap_filter_enabled"] is True
     assert diagnostics["opening_range_high"]
     assert decision.decision_type is ShadowDecisionType.LONG_CANDIDATE
