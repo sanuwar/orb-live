@@ -387,6 +387,7 @@ def _strategy_diagnostics(*, opening: OpeningData, live: LiveData, decision: Any
         "required_gap_pct": str(signal["minimum_gap_percent"]),
         "observed_opening_relative_volume": format(decision.relative_volume, "f"),
         "required_opening_relative_volume": str(signal["minimum_relative_volume"]),
+        "spy_vwap_filter_enabled": signal.get("require_spy_above_vwap") is True,
         "previous_close": format(opening.previous_close, "f"),
         "current_session_open": format(opening.today_open, "f"),
         "opening_range_high": format(opening.opening_range_high, "f"),
