@@ -34,3 +34,7 @@ logs/
 .DS_Store
 Thumbs.db
 artifacts/operator-projection/
+
+# Research tooling: cached historical bars and generated study output
+# (Issue #298) -- never commit raw market-data dumps.
+artifacts/research-universe-expansion/
