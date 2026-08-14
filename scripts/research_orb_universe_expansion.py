@@ -42,20 +42,27 @@ from src.orb_universe_expansion_research import (
     CachingHttpClient,
     DEFAULT_CACHE_DIR,
     DEFAULT_FEED,
+    DEFAULT_LIQUIDITY_THRESHOLDS,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_RVOL_WARMUP_MULTIPLIER,
     INVALID_INSUFFICIENT_COVERAGE,
     SUPPORTED_FEEDS,
     all_pool_symbols_with_production,
+    build_liquidity_tiers,
     build_study_report,
+    compute_symbol_liquidity_profile,
     csv_summary_rows,
     eligible_minute_bars,
     evaluate_symbol_session,
     fetch_full_minute_history,
     historical_fetch_start,
+    production_universe,
+    rank_liquidity_qualified_symbols,
     trading_sessions_before,
     validate_cache_integrity,
 )
+
+DEFAULT_LIQUIDITY_TIER_SIZES = (25, 40, 50)
 
 
 def _credentials_from_environment() -> AlpacaCredentials:
@@ -170,6 +177,155 @@ async def _run(
     return report
 
 
+async def _run_liquidity_qualified(
+    *, session_count: int, output_dir: Path, cache_dir: Path,
+    feed: str = DEFAULT_FEED, warmup_multiplier: int = DEFAULT_RVOL_WARMUP_MULTIPLIER,
+    tier_sizes: tuple[int, ...] = DEFAULT_LIQUIDITY_TIER_SIZES,
+) -> dict:
+    """Pivot from a fixed-size universe expansion to an objectively
+    liquidity-qualified one (see docs/research/ORB_UNIVERSE_EXPANSION_STUDY.
+    md, "Liquidity-qualified universe methodology"): rank the research pool
+    by real historical data quality, keep only symbols that clear the
+    documented floor, then run the canonical study on nested tiers of that
+    qualified pool -- never padding a short tier with a lower-quality name.
+
+    Two-phase to stay fast: phase 1 liquidity-profiles every pool symbol
+    using `compute_symbol_liquidity_profile`'s O(bars) scan (no full
+    90-session `evaluate_symbol_session` pass needed just to rank
+    candidates); phase 2 only runs the full canonical study for symbols
+    that actually end up in `current_production` or a liquidity tier, not
+    the entire pool."""
+    config = load_config()
+    lookback_days = int(config["signal"]["relative_volume_lookback_days"])
+    today = datetime.now(EASTERN).date()
+    session_dates = trading_sessions_before(today, count=session_count)
+    fetch_from = historical_fetch_start(
+        session_dates[0], lookback_days=lookback_days, warmup_multiplier=warmup_multiplier,
+    )
+
+    integrity = validate_cache_integrity(cache_dir)
+    if integrity["removed"]:
+        print(f"cache integrity: removed {len(integrity['removed'])} corrupt entr(y/ies)")
+    print(f"cache integrity: {len(integrity['kept'])} usable cached response(s) reused")
+
+    credentials = _credentials_from_environment()
+    transport = CachingHttpClient(
+        UrllibMarketDataHttpClient(timeout_seconds=8.0), cache_dir=cache_dir,
+    )
+    now = lambda: datetime.now(timezone.utc)  # noqa: E731
+    start = datetime.combine(fetch_from, time.min, tzinfo=EASTERN).astimezone(timezone.utc)
+    end = datetime.combine(
+        session_dates[-1], session_open_for(session_dates[-1]), tzinfo=EASTERN,
+    ).astimezone(timezone.utc) + timedelta(hours=8)
+
+    pool_symbols = list(all_pool_symbols_with_production())
+    print(
+        f"Phase 1/2: liquidity-qualifying {len(pool_symbols)} pool symbols "
+        f"(feed={feed}, {len(session_dates)} sessions {session_dates[0].isoformat()}-"
+        f"{session_dates[-1].isoformat()})"
+    )
+    bars_cache: dict[str, list] = {}
+    profiles = {}
+    for index, symbol in enumerate(pool_symbols, start=1):
+        raw_bars = await fetch_full_minute_history(
+            transport, credentials=credentials, symbol=symbol, start=start, end=end, now=now, feed=feed,
+        )
+        bars = eligible_minute_bars(raw_bars, symbol=symbol, now=now())
+        bars_cache[symbol] = bars
+        profiles[symbol] = compute_symbol_liquidity_profile(
+            symbol=symbol, bars=bars, session_dates=session_dates, lookback_days=lookback_days,
+        )
+        status = "ELIGIBLE" if profiles[symbol].eligible else f"excluded: {profiles[symbol].exclusion_reasons}"
+        print(f"  {index}/{len(pool_symbols)} {symbol}: {status}")
+
+    ranked = rank_liquidity_qualified_symbols(profiles)
+    print(f"liquidity-qualified: {len(ranked)} of {len(pool_symbols)} pool symbols -> {ranked}")
+    tiers = build_liquidity_tiers(ranked, tier_sizes)
+    for tier in tiers:
+        note = " -- SHORTFALL: fewer symbols qualified than requested, NOT padded" if tier.size_shortfall else ""
+        print(f"  {tier.label}: requested={tier.requested_size} achieved={tier.achieved_size}{note}")
+
+    production = production_universe()
+    study_symbols = sorted(set(production) | set(ranked))
+    print(
+        f"Phase 2/2: full canonical study for {len(study_symbols)} symbols "
+        f"(current production + every liquidity-qualified symbol; not the full "
+        f"{len(pool_symbols)}-symbol pool)"
+    )
+
+    spy_raw = await fetch_full_minute_history(
+        transport, credentials=credentials, symbol="SPY", start=start, end=end, now=now, feed=feed,
+    )
+    spy_bars = eligible_minute_bars(spy_raw, symbol="SPY", now=now())
+
+    evaluations = {}
+    for index, symbol in enumerate(study_symbols, start=1):
+        # Reuse phase 1's bars where already fetched (production symbols
+        # that are also pool members); fetch fresh only for a production
+        # symbol the pool does not already cover.
+        bars = bars_cache.get(symbol)
+        if bars is None:
+            raw_bars = await fetch_full_minute_history(
+                transport, credentials=credentials, symbol=symbol, start=start, end=end, now=now, feed=feed,
+            )
+            bars = eligible_minute_bars(raw_bars, symbol=symbol, now=now())
+        for session_date in session_dates:
+            evaluations[(symbol, session_date)] = evaluate_symbol_session(
+                symbol=symbol, session_date=session_date, candidate_bars=bars,
+                spy_bars=spy_bars, config=config,
+            )
+        print(f"  evaluated {index}/{len(study_symbols)} {symbol}")
+
+    report = build_study_report(
+        session_dates=session_dates, evaluations=evaluations, universe_sizes=(), include_production=True,
+        named_universes={tier.label: tier.symbols for tier in tiers},
+    )
+    report["feed"] = feed
+    report["liquidity_thresholds"] = {
+        "min_median_price": str(DEFAULT_LIQUIDITY_THRESHOLDS.min_median_price),
+        "min_avg_daily_dollar_volume": str(DEFAULT_LIQUIDITY_THRESHOLDS.min_avg_daily_dollar_volume),
+        "min_avg_daily_share_volume": str(DEFAULT_LIQUIDITY_THRESHOLDS.min_avg_daily_share_volume),
+        "min_session_opening_range_complete_pct": DEFAULT_LIQUIDITY_THRESHOLDS.min_session_opening_range_complete_pct,
+        "min_rvol_history_satisfiable_pct": DEFAULT_LIQUIDITY_THRESHOLDS.min_rvol_history_satisfiable_pct,
+    }
+    report["liquidity_profiles"] = {symbol: profile.as_dict() for symbol, profile in profiles.items()}
+    report["liquidity_tiers"] = [tier.as_dict() for tier in tiers]
+
+    print("coverage by universe:")
+    for universe_report in report["universe_reports"]:
+        coverage = universe_report["coverage"]
+        print(
+            f"  {universe_report['label']}: {coverage['completeness']:.1%} complete "
+            f"({coverage['complete_symbol_days']}/{coverage['possible_symbol_days']} symbol-days) "
+            f"-> {coverage['status']}"
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "" if feed == DEFAULT_FEED else f"_{feed}"
+    json_path = output_dir / f"orb_liquidity_qualified_study{suffix}.json"
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+    profile_csv_path = output_dir / f"orb_liquidity_quality_table{suffix}.csv"
+    with profile_csv_path.open("w", newline="", encoding="utf-8") as handle:
+        fieldnames = list(next(iter(profiles.values())).as_dict().keys()) if profiles else []
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for symbol in sorted(profiles):
+            writer.writerow(profiles[symbol].as_dict())
+
+    summary_csv_path = output_dir / f"orb_liquidity_qualified_summary{suffix}.csv"
+    rows = csv_summary_rows(report)
+    with summary_csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"JSON report: {json_path}")
+    print(f"Liquidity quality table: {profile_csv_path}")
+    print(f"Summary CSV: {summary_csv_path}")
+    return report
+
+
 async def _run_feed_comparison(*, symbols: list[str], session_dates: list, cache_dir: Path) -> None:
     """A small, bounded IEX-vs-SIP raw-response comparison for the
     09:30-09:35 ET opening range only -- NOT the full study. Prints, per
@@ -234,6 +390,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--compare-symbols", help="comma-separated symbols for --compare-feeds")
     parser.add_argument("--compare-dates", help="comma-separated ISO dates (YYYY-MM-DD) for --compare-feeds")
+    parser.add_argument(
+        "--liquidity-qualify", action="store_true",
+        help="build an objectively liquidity-qualified universe from the research pool "
+             "(see docs/research/ORB_UNIVERSE_EXPANSION_STUDY.md) and run the canonical "
+             "study on its nested tiers, instead of the fixed-size 15/25/50/75/100 study",
+    )
+    parser.add_argument(
+        "--liquidity-tier-sizes", default=",".join(str(size) for size in DEFAULT_LIQUIDITY_TIER_SIZES),
+        help="comma-separated ascending tier sizes for --liquidity-qualify (default 25,40,50)",
+    )
     args = parser.parse_args(argv)
 
     if args.compare_feeds:
@@ -249,6 +415,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.sessions < 60:
         print("refusing to run below the 60-session minimum sample size", file=sys.stderr)
         return 2
+
+    if args.liquidity_qualify:
+        tier_sizes = tuple(int(size.strip()) for size in args.liquidity_tier_sizes.split(",") if size.strip())
+        asyncio.run(_run_liquidity_qualified(
+            session_count=args.sessions, output_dir=args.output_dir, cache_dir=args.cache_dir,
+            feed=args.feed, warmup_multiplier=args.warmup_multiplier, tier_sizes=tier_sizes,
+        ))
+        return 0
 
     asyncio.run(_run(
         session_count=args.sessions, output_dir=args.output_dir, cache_dir=args.cache_dir,

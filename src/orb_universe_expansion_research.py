@@ -606,10 +606,16 @@ def build_study_report(
     evaluations: Mapping[tuple[str, date], SessionEvaluation],
     universe_sizes: Sequence[int] = UNIVERSE_SIZES,
     include_production: bool = True,
+    named_universes: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Build the full structured report from a completed set of per
     symbol/session evaluations. Pure and deterministic -- no I/O, no
-    randomness -- so it can be exercised in tests without network access."""
+    randomness -- so it can be exercised in tests without network access.
+
+    `named_universes` lets a caller (e.g. the liquidity-qualified tiers)
+    fold an arbitrary label -> symbol-list mapping into the same report
+    structure -- e.g. `{"liquidity_top_25": (...)}` -- without hand-rolling
+    a second `UniverseSizeReport` assembly path."""
     reports: list[UniverseSizeReport] = []
     if include_production:
         reports.append(
@@ -627,6 +633,12 @@ def build_study_report(
                 universe=liquid_universe(size),
                 session_dates=session_dates,
                 evaluations=evaluations,
+            )
+        )
+    for label, universe in (named_universes or {}).items():
+        reports.append(
+            _report_for_universe(
+                label=label, universe=universe, session_dates=session_dates, evaluations=evaluations,
             )
         )
 
@@ -667,6 +679,275 @@ def csv_summary_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
             "data_incomplete": funnel["data_incomplete"],
         })
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Liquidity qualification.
+#
+# The naive fixed-size universes (15/25/50/75/100, a straight prefix of
+# UNIVERSE_POOL) expand into increasingly less-liquid names with no
+# data-quality floor -- exactly what produced the IEX-sparsity-dominated
+# incompleteness diagnosed above. This section builds a research universe
+# from objective, historical-data-derived liquidity/data-quality measures
+# instead of the pool's reputation-based ordering, so a "tier" is a claim
+# about *measured* opening-range reliability, not an assumption about which
+# large-cap names are liquid enough.
+# ---------------------------------------------------------------------------
+
+BELOW_MINIMUM_PRICE = "BELOW_MINIMUM_PRICE"
+BELOW_MINIMUM_DOLLAR_VOLUME = "BELOW_MINIMUM_DOLLAR_VOLUME"
+BELOW_MINIMUM_SHARE_VOLUME = "BELOW_MINIMUM_SHARE_VOLUME"
+INSUFFICIENT_OPENING_RANGE_COVERAGE = "INSUFFICIENT_OPENING_RANGE_COVERAGE"
+INSUFFICIENT_RVOL_HISTORY_COVERAGE = "INSUFFICIENT_RVOL_HISTORY_COVERAGE"
+NO_HISTORICAL_DATA = "NO_HISTORICAL_DATA"
+
+
+@dataclass(frozen=True)
+class LiquidityThresholds:
+    """Explicit, evidence-based qualification floor. The two opening-window
+    thresholds are weighted heaviest on purpose (a 5-minute ORB strategy
+    lives or dies on 09:30-09:35 coverage) and are pinned to the same
+    `MINIMUM_COVERAGE` (95%) the study-level fail-closed gate already uses,
+    so a "qualified" symbol is, by construction, one whose own data quality
+    could support that gate rather than an independently-chosen number. The
+    price/dollar-volume/share-volume floors are conservative sanity guards
+    against a penny-stock or illiquid name slipping into a research pool
+    that is otherwise curated to mega/large caps -- they are not expected to
+    bind for most `UNIVERSE_POOL` symbols and are not the primary
+    discriminator (see `docs/research/ORB_UNIVERSE_EXPANSION_STUDY.md`)."""
+
+    min_median_price: Decimal = Decimal("5")
+    min_avg_daily_dollar_volume: Decimal = Decimal("1000000")
+    min_avg_daily_share_volume: Decimal = Decimal("10000")
+    min_session_opening_range_complete_pct: float = MINIMUM_COVERAGE
+    min_rvol_history_satisfiable_pct: float = MINIMUM_COVERAGE
+
+    def __post_init__(self) -> None:
+        if self.min_median_price <= 0:
+            raise UniverseResearchError("min_median_price must be positive")
+        if self.min_avg_daily_dollar_volume <= 0:
+            raise UniverseResearchError("min_avg_daily_dollar_volume must be positive")
+        if self.min_avg_daily_share_volume <= 0:
+            raise UniverseResearchError("min_avg_daily_share_volume must be positive")
+        if not (0 < self.min_session_opening_range_complete_pct <= 1):
+            raise UniverseResearchError("min_session_opening_range_complete_pct must be in (0, 1]")
+        if not (0 < self.min_rvol_history_satisfiable_pct <= 1):
+            raise UniverseResearchError("min_rvol_history_satisfiable_pct must be in (0, 1]")
+
+
+DEFAULT_LIQUIDITY_THRESHOLDS = LiquidityThresholds()
+
+
+@dataclass(frozen=True)
+class SymbolLiquidityProfile:
+    symbol: str
+    trading_days_observed: int
+    avg_daily_dollar_volume: Decimal
+    avg_daily_share_volume: Decimal
+    median_price: Decimal
+    opening_window_minute_coverage_pct: float
+    session_opening_range_complete_pct: float
+    rvol_history_satisfiable_pct: float
+    eligible: bool
+    exclusion_reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.eligible and self.exclusion_reasons:
+            raise UniverseResearchError("an eligible profile cannot carry exclusion reasons")
+        if not self.eligible and not self.exclusion_reasons:
+            raise UniverseResearchError("an ineligible profile must record at least one reason")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "trading_days_observed": self.trading_days_observed,
+            "avg_daily_dollar_volume": str(self.avg_daily_dollar_volume.quantize(Decimal("1"))),
+            "avg_daily_share_volume": str(self.avg_daily_share_volume.quantize(Decimal("1"))),
+            "median_price": str(self.median_price),
+            "opening_window_minute_coverage_pct": round(self.opening_window_minute_coverage_pct, 4),
+            "session_opening_range_complete_pct": round(self.session_opening_range_complete_pct, 4),
+            "rvol_history_satisfiable_pct": round(self.rvol_history_satisfiable_pct, 4),
+            "eligible": self.eligible,
+            "exclusion_reasons": list(self.exclusion_reasons),
+        }
+
+
+def compute_symbol_liquidity_profile(
+    *,
+    symbol: str,
+    bars: Sequence[MinuteBar],
+    session_dates: Sequence[date],
+    lookback_days: int,
+    opening_range_minutes: int = 5,
+    thresholds: LiquidityThresholds = DEFAULT_LIQUIDITY_THRESHOLDS,
+) -> SymbolLiquidityProfile:
+    """Derive one symbol's objective liquidity/data-quality profile
+    directly from its real historical bars. Pure and deterministic given
+    its inputs -- no I/O, no network, no randomness -- so it is fully
+    unit-testable against synthetic fixtures.
+
+    Runs in O(bars + sessions), not O(sessions x bars): bars are bucketed by
+    date once, and each date's opening-range completeness is determined by
+    calling the unmodified `calculate_opening_range` on just that date's own
+    bucket (a few hundred bars) rather than re-scanning the symbol's entire
+    multi-month history on every one of the 90 study sessions. Running this
+    per-symbol scan across a 100-symbol candidate pool the slow way (calling
+    `evaluate_symbol_session`, and therefore rescanning the whole bar list,
+    90 times per symbol just to RANK candidates before any study has even
+    selected them) is what made the first version of this qualification
+    pass impractically slow; only the symbols that make it into a final
+    tier need the full `evaluate_symbol_session` pipeline.
+
+    `rvol_history_satisfiable_pct` mirrors -- without recomputing the
+    median volume itself -- exactly the precondition `calculate_
+    median_opening_volume` (`src/market_data.py`, unmodified) already
+    enforces: walk backward through dates with a complete opening range
+    and stop once `lookback_days` have been found."""
+    by_date: dict[date, list[MinuteBar]] = {}
+    for bar in bars:
+        if bar.interpolated:
+            continue
+        by_date.setdefault(bar.begins_at.astimezone(EASTERN).date(), []).append(bar)
+
+    trading_days_observed = len(by_date)
+    if trading_days_observed == 0:
+        return SymbolLiquidityProfile(
+            symbol=symbol, trading_days_observed=0,
+            avg_daily_dollar_volume=Decimal("0"), avg_daily_share_volume=Decimal("0"),
+            median_price=Decimal("0"), opening_window_minute_coverage_pct=0.0,
+            session_opening_range_complete_pct=0.0, rvol_history_satisfiable_pct=0.0,
+            eligible=False, exclusion_reasons=(NO_HISTORICAL_DATA,),
+        )
+
+    daily_dollar_volumes: list[Decimal] = []
+    daily_share_volumes: list[Decimal] = []
+    all_closes: list[Decimal] = []
+    opening_minutes_present = 0
+    opening_range_complete: dict[date, bool] = {}
+    for day, day_bars in by_date.items():
+        daily_dollar_volumes.append(sum((bar.volume * bar.close_price for bar in day_bars), Decimal("0")))
+        daily_share_volumes.append(Decimal(sum(bar.volume for bar in day_bars)))
+        all_closes.extend(bar.close_price for bar in day_bars)
+        opening_minutes_present += sum(
+            1 for bar in day_bars
+            if time(9, 30) <= bar.begins_at.astimezone(EASTERN).time() < time(9, 35)
+        )
+        try:
+            calculate_opening_range(
+                day_bars, session_date=day, opening_range_minutes=opening_range_minutes,
+                session_open=session_open_for(day),
+            )
+            opening_range_complete[day] = True
+        except ValueError:
+            opening_range_complete[day] = False
+
+    avg_daily_dollar_volume = sum(daily_dollar_volumes) / len(daily_dollar_volumes)
+    avg_daily_share_volume = sum(daily_share_volumes) / len(daily_share_volumes)
+    median_price = Decimal(str(median(all_closes)))
+    opening_window_minute_coverage_pct = opening_minutes_present / (trading_days_observed * 5)
+
+    sorted_dates_desc = sorted(by_date, reverse=True)
+
+    def _rvol_satisfiable(before: date) -> bool:
+        found = 0
+        for day in sorted_dates_desc:
+            if day >= before:
+                continue
+            if opening_range_complete.get(day, False):
+                found += 1
+                if found >= lookback_days:
+                    return True
+        return False
+
+    session_opening_range_ok = [day for day in session_dates if opening_range_complete.get(day, False)]
+    session_opening_range_complete_pct = (
+        len(session_opening_range_ok) / len(session_dates) if session_dates else 0.0
+    )
+    rvol_ok_count = sum(1 for day in session_opening_range_ok if _rvol_satisfiable(day))
+    rvol_history_satisfiable_pct = (
+        (rvol_ok_count / len(session_opening_range_ok)) if session_opening_range_ok else 0.0
+    )
+
+    exclusion_reasons: list[str] = []
+    if median_price < thresholds.min_median_price:
+        exclusion_reasons.append(BELOW_MINIMUM_PRICE)
+    if avg_daily_dollar_volume < thresholds.min_avg_daily_dollar_volume:
+        exclusion_reasons.append(BELOW_MINIMUM_DOLLAR_VOLUME)
+    if avg_daily_share_volume < thresholds.min_avg_daily_share_volume:
+        exclusion_reasons.append(BELOW_MINIMUM_SHARE_VOLUME)
+    if session_opening_range_complete_pct < thresholds.min_session_opening_range_complete_pct:
+        exclusion_reasons.append(INSUFFICIENT_OPENING_RANGE_COVERAGE)
+    if rvol_history_satisfiable_pct < thresholds.min_rvol_history_satisfiable_pct:
+        exclusion_reasons.append(INSUFFICIENT_RVOL_HISTORY_COVERAGE)
+
+    return SymbolLiquidityProfile(
+        symbol=symbol, trading_days_observed=trading_days_observed,
+        avg_daily_dollar_volume=avg_daily_dollar_volume, avg_daily_share_volume=avg_daily_share_volume,
+        median_price=median_price, opening_window_minute_coverage_pct=opening_window_minute_coverage_pct,
+        session_opening_range_complete_pct=session_opening_range_complete_pct,
+        rvol_history_satisfiable_pct=rvol_history_satisfiable_pct,
+        eligible=not exclusion_reasons, exclusion_reasons=tuple(exclusion_reasons),
+    )
+
+
+def rank_liquidity_qualified_symbols(
+    profiles: Mapping[str, SymbolLiquidityProfile],
+) -> tuple[str, ...]:
+    """Every eligible symbol, ranked descending by `avg_daily_dollar_volume`
+    -- the standard objective liquidity ranking measure -- with ties broken
+    alphabetically by symbol for a fully deterministic, reproducible order."""
+    eligible = [profile for profile in profiles.values() if profile.eligible]
+    ranked = sorted(eligible, key=lambda profile: (-profile.avg_daily_dollar_volume, profile.symbol))
+    return tuple(profile.symbol for profile in ranked)
+
+
+@dataclass(frozen=True)
+class LiquidityTier:
+    label: str
+    requested_size: int
+    symbols: tuple[str, ...]
+
+    @property
+    def achieved_size(self) -> int:
+        return len(self.symbols)
+
+    @property
+    def size_shortfall(self) -> bool:
+        """True when fewer symbols qualified than requested -- this tier was
+        NOT padded to `requested_size` with a lower-quality symbol; report
+        the shortfall rather than hide it."""
+        return self.achieved_size < self.requested_size
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "requested_size": self.requested_size,
+            "achieved_size": self.achieved_size,
+            "size_shortfall": self.size_shortfall,
+            "symbols": list(self.symbols),
+        }
+
+
+def build_liquidity_tiers(ranked_symbols: Sequence[str], sizes: Sequence[int]) -> tuple[LiquidityTier, ...]:
+    """Nested tiers over the same ranked, qualified list -- `sizes` must be
+    ascending, so `build_liquidity_tiers(..., (25, 40, 50))[1].symbols` is
+    guaranteed to be a superset of `[0].symbols` (both are prefixes of the
+    same ordering). Never pads a short tier: if fewer than `size` symbols
+    qualified, the tier's `symbols` is the full qualified list and
+    `size_shortfall` is `True`."""
+    if list(sizes) != sorted(sizes):
+        raise UniverseResearchError("sizes must be strictly ascending")
+    if len(set(sizes)) != len(sizes):
+        raise UniverseResearchError("sizes must not repeat")
+    tiers = []
+    for size in sizes:
+        if size < 1:
+            raise UniverseResearchError("tier size must be positive")
+        tiers.append(LiquidityTier(
+            label=f"liquidity_top_{size}", requested_size=size,
+            symbols=tuple(ranked_symbols[:size]),
+        ))
+    return tuple(tiers)
 
 
 def cache_key(symbol: str, start: datetime, end: datetime) -> str:
@@ -946,6 +1227,19 @@ __all__ = [
     "UniverseSizeReport",
     "build_study_report",
     "csv_summary_rows",
+    "BELOW_MINIMUM_PRICE",
+    "BELOW_MINIMUM_DOLLAR_VOLUME",
+    "BELOW_MINIMUM_SHARE_VOLUME",
+    "INSUFFICIENT_OPENING_RANGE_COVERAGE",
+    "INSUFFICIENT_RVOL_HISTORY_COVERAGE",
+    "NO_HISTORICAL_DATA",
+    "LiquidityThresholds",
+    "DEFAULT_LIQUIDITY_THRESHOLDS",
+    "SymbolLiquidityProfile",
+    "compute_symbol_liquidity_profile",
+    "rank_liquidity_qualified_symbols",
+    "LiquidityTier",
+    "build_liquidity_tiers",
     "cache_key",
     "CachingHttpClient",
     "MAX_PAGES_PER_SYMBOL",

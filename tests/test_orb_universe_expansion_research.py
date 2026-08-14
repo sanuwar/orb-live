@@ -10,21 +10,33 @@ from src.market_data import MinuteBar
 from src.market_data_canonical import session_open_for
 from src.market_data_provider import ALPACA_IEX_SOURCE, AlpacaCredentials
 from src.orb_universe_expansion_research import (
+    BELOW_MINIMUM_DOLLAR_VOLUME,
+    BELOW_MINIMUM_PRICE,
+    BELOW_MINIMUM_SHARE_VOLUME,
     BREAKOUT_ELIMINATED,
     CANDIDATE,
     DATA_INCOMPLETE,
+    DEFAULT_LIQUIDITY_THRESHOLDS,
     DEFAULT_RVOL_WARMUP_MULTIPLIER,
     GAP_ELIMINATED,
+    INSUFFICIENT_OPENING_RANGE_COVERAGE,
+    INSUFFICIENT_RVOL_HISTORY_COVERAGE,
     INVALID_INSUFFICIENT_COVERAGE,
     MINIMUM_COVERAGE,
+    NO_HISTORICAL_DATA,
     RVOL_ELIMINATED,
     SPY_VWAP_ELIMINATED,
     UNIVERSE_POOL,
     VALID_COVERAGE,
+    LiquidityThresholds,
+    LiquidityTier,
     SessionEvaluation,
+    SymbolLiquidityProfile,
     UniverseResearchError,
+    build_liquidity_tiers,
     build_study_report,
     cache_key,
+    compute_symbol_liquidity_profile,
     csv_summary_rows,
     eligible_minute_bars,
     evaluate_symbol_session,
@@ -33,6 +45,7 @@ from src.orb_universe_expansion_research import (
     incremental_symbols,
     liquid_universe,
     production_universe,
+    rank_liquidity_qualified_symbols,
     trading_sessions_before,
     validate_cache_integrity,
 )
@@ -322,6 +335,18 @@ def test_csv_summary_rows_matches_report_labels():
     labels = {row["label"] for row in rows}
     assert labels == {"current_production", "top_15"}
     assert all(row["sessions"] == 1 for row in rows)
+
+
+def test_build_study_report_accepts_named_universes():
+    day = date(2026, 8, 10)
+    report = build_study_report(
+        session_dates=(day,), evaluations={}, universe_sizes=(), include_production=False,
+        named_universes={"liquidity_top_23": ("AAPL", "MSFT")},
+    )
+    labels = {item["label"] for item in report["universe_reports"]}
+    assert labels == {"liquidity_top_23"}
+    tier = next(item for item in report["universe_reports"] if item["label"] == "liquidity_top_23")
+    assert tier["universe"] == ["AAPL", "MSFT"]
 
 
 def test_cache_key_is_stable_and_distinguishes_requests():
@@ -693,3 +718,234 @@ def test_larger_warmup_buffer_lets_median_volume_find_enough_complete_sessions()
         _build_bars(back_to=warmed_start), before_date=study_date, lookback_days=lookback_days,
     )
     assert result == Decimal("5000")
+
+
+# ---------------------------------------------------------------------------
+# Liquidity-qualified universe construction (pivot from fixed-size tiers,
+# per the operator's IEX-sparsity finding). All offline, synthetic fixtures.
+# ---------------------------------------------------------------------------
+
+
+def _liquidity_day_bars(symbol, day, *, minutes_present=(0, 1, 2, 3, 4), close="500", volume=10000):
+    start = datetime.combine(day, time(9, 30), tzinfo=ET)
+    return [
+        _bar(symbol, start + timedelta(minutes=offset), open_=close, high=close, low=close, close=close, volume=volume)
+        for offset in minutes_present
+    ]
+
+
+def _liquidity_bars_over_days(symbol, days, *, incomplete_days=(), close="500", volume=10000):
+    incomplete = set(incomplete_days)
+    bars = []
+    for day in days:
+        minutes = (0, 1, 2) if day in incomplete else (0, 1, 2, 3, 4)
+        bars.extend(_liquidity_day_bars(symbol, day, minutes_present=minutes, close=close, volume=volume))
+    return bars
+
+
+LIQ_STUDY_DATE = date(2026, 6, 10)
+
+
+def test_compute_symbol_liquidity_profile_fully_eligible_symbol():
+    days = trading_sessions_before(LIQ_STUDY_DATE, count=60) + (LIQ_STUDY_DATE,)
+    session_dates = days[-10:]
+    bars = _liquidity_bars_over_days("AAPL", days, close="500", volume=10000)
+
+    profile = compute_symbol_liquidity_profile(
+        symbol="AAPL", bars=bars, session_dates=session_dates, lookback_days=20,
+    )
+
+    assert profile.eligible is True
+    assert profile.exclusion_reasons == ()
+    assert profile.session_opening_range_complete_pct == 1.0
+    assert profile.rvol_history_satisfiable_pct == 1.0
+    assert profile.avg_daily_dollar_volume == Decimal("500") * 10000 * 5
+    assert profile.avg_daily_share_volume == Decimal(10000 * 5)
+    assert profile.median_price == Decimal("500")
+    assert profile.trading_days_observed == len(days)
+
+
+def test_compute_symbol_liquidity_profile_excludes_below_minimum_price():
+    days = trading_sessions_before(LIQ_STUDY_DATE, count=30) + (LIQ_STUDY_DATE,)
+    bars = _liquidity_bars_over_days("PENNY", days, close="1", volume=1_000_000)
+
+    profile = compute_symbol_liquidity_profile(
+        symbol="PENNY", bars=bars, session_dates=days[-10:], lookback_days=20,
+    )
+
+    assert profile.eligible is False
+    assert BELOW_MINIMUM_PRICE in profile.exclusion_reasons
+
+
+def test_compute_symbol_liquidity_profile_excludes_below_minimum_dollar_volume():
+    days = trading_sessions_before(LIQ_STUDY_DATE, count=30) + (LIQ_STUDY_DATE,)
+    # price=$50 (passes price floor), volume=3000/bar -> share vol 15,000/day
+    # (passes share floor) but dollar vol $750,000/day (fails the $1M floor).
+    bars = _liquidity_bars_over_days("THIN", days, close="50", volume=3000)
+
+    profile = compute_symbol_liquidity_profile(
+        symbol="THIN", bars=bars, session_dates=days[-10:], lookback_days=20,
+    )
+
+    assert profile.eligible is False
+    assert profile.exclusion_reasons == (BELOW_MINIMUM_DOLLAR_VOLUME,)
+
+
+def test_compute_symbol_liquidity_profile_excludes_below_minimum_share_volume():
+    # price=$250 (passes price floor), volume=1000/bar -> share vol 5,000/day
+    # (fails the 10,000 floor) but dollar vol $1,250,000/day (passes).
+    days = trading_sessions_before(LIQ_STUDY_DATE, count=30) + (LIQ_STUDY_DATE,)
+    bars = _liquidity_bars_over_days("LOWSHARE", days, close="250", volume=1000)
+
+    profile = compute_symbol_liquidity_profile(
+        symbol="LOWSHARE", bars=bars, session_dates=days[-10:], lookback_days=20,
+    )
+
+    assert profile.eligible is False
+    assert profile.exclusion_reasons == (BELOW_MINIMUM_SHARE_VOLUME,)
+
+
+def test_compute_symbol_liquidity_profile_excludes_insufficient_opening_range_coverage():
+    # 80 days of ample, fully-complete lookback history, then the 20 STUDY
+    # session dates themselves have 2 incomplete opening ranges (18/20 =
+    # 90% < 95%) while the deep lookback history stays fully complete, so
+    # RVOL satisfiability is unaffected -- isolates opening-range coverage.
+    days = trading_sessions_before(LIQ_STUDY_DATE, count=80) + (LIQ_STUDY_DATE,)
+    session_dates = days[-20:]
+    incomplete = session_dates[:2]
+    bars = _liquidity_bars_over_days("GAPPY", days, incomplete_days=incomplete, close="500", volume=10000)
+
+    profile = compute_symbol_liquidity_profile(
+        symbol="GAPPY", bars=bars, session_dates=session_dates, lookback_days=20,
+    )
+
+    assert profile.eligible is False
+    assert INSUFFICIENT_OPENING_RANGE_COVERAGE in profile.exclusion_reasons
+    assert profile.session_opening_range_complete_pct == pytest.approx(18 / 20)
+
+
+def test_compute_symbol_liquidity_profile_excludes_insufficient_rvol_history_coverage():
+    # Only 10 days of history exist before the (fully complete) session
+    # dates -- never enough to satisfy a 20-session RVOL lookback, even
+    # though every one of those 10 days, and every session date itself, has
+    # a complete opening range. Isolates the lookback-depth failure mode
+    # from the opening-range-coverage failure mode.
+    lookback_history = trading_sessions_before(LIQ_STUDY_DATE, count=10)
+    session_dates = (LIQ_STUDY_DATE,)
+    bars = _liquidity_bars_over_days("SHALLOW", lookback_history + session_dates, close="500", volume=10000)
+
+    profile = compute_symbol_liquidity_profile(
+        symbol="SHALLOW", bars=bars, session_dates=session_dates, lookback_days=20,
+    )
+
+    assert profile.eligible is False
+    assert profile.exclusion_reasons == (INSUFFICIENT_RVOL_HISTORY_COVERAGE,)
+    assert profile.session_opening_range_complete_pct == 1.0
+    assert profile.rvol_history_satisfiable_pct == 0.0
+
+
+def test_compute_symbol_liquidity_profile_reports_no_historical_data():
+    profile = compute_symbol_liquidity_profile(
+        symbol="EMPTY", bars=[], session_dates=(LIQ_STUDY_DATE,), lookback_days=20,
+    )
+
+    assert profile.eligible is False
+    assert profile.exclusion_reasons == (NO_HISTORICAL_DATA,)
+    assert profile.trading_days_observed == 0
+
+
+def test_symbol_liquidity_profile_rejects_inconsistent_eligibility_and_reasons():
+    with pytest.raises(UniverseResearchError):
+        SymbolLiquidityProfile(
+            symbol="X", trading_days_observed=1, avg_daily_dollar_volume=Decimal("1"),
+            avg_daily_share_volume=Decimal("1"), median_price=Decimal("1"),
+            opening_window_minute_coverage_pct=1.0, session_opening_range_complete_pct=1.0,
+            rvol_history_satisfiable_pct=1.0, eligible=True, exclusion_reasons=(BELOW_MINIMUM_PRICE,),
+        )
+    with pytest.raises(UniverseResearchError):
+        SymbolLiquidityProfile(
+            symbol="X", trading_days_observed=1, avg_daily_dollar_volume=Decimal("1"),
+            avg_daily_share_volume=Decimal("1"), median_price=Decimal("1"),
+            opening_window_minute_coverage_pct=1.0, session_opening_range_complete_pct=1.0,
+            rvol_history_satisfiable_pct=1.0, eligible=False, exclusion_reasons=(),
+        )
+
+
+def _profile(symbol, *, dollar_volume, eligible=True, reasons=()):
+    return SymbolLiquidityProfile(
+        symbol=symbol, trading_days_observed=90, avg_daily_dollar_volume=Decimal(str(dollar_volume)),
+        avg_daily_share_volume=Decimal("100000"), median_price=Decimal("100"),
+        opening_window_minute_coverage_pct=1.0, session_opening_range_complete_pct=1.0,
+        rvol_history_satisfiable_pct=1.0, eligible=eligible, exclusion_reasons=reasons,
+    )
+
+
+def test_rank_liquidity_qualified_symbols_orders_by_dollar_volume_and_excludes_ineligible():
+    profiles = {
+        "LOW": _profile("LOW", dollar_volume=1_000_000),
+        "HIGH": _profile("HIGH", dollar_volume=5_000_000),
+        "MID": _profile("MID", dollar_volume=3_000_000),
+        "OUT": _profile("OUT", dollar_volume=9_000_000, eligible=False, reasons=(BELOW_MINIMUM_PRICE,)),
+    }
+
+    ranked = rank_liquidity_qualified_symbols(profiles)
+
+    assert ranked == ("HIGH", "MID", "LOW")
+
+
+def test_rank_liquidity_qualified_symbols_breaks_ties_alphabetically():
+    profiles = {
+        "ZEBRA": _profile("ZEBRA", dollar_volume=5_000_000),
+        "ALPHA": _profile("ALPHA", dollar_volume=5_000_000),
+        "MIKE": _profile("MIKE", dollar_volume=5_000_000),
+    }
+
+    ranked = rank_liquidity_qualified_symbols(profiles)
+
+    assert ranked == ("ALPHA", "MIKE", "ZEBRA")
+
+
+def test_rank_liquidity_qualified_symbols_is_deterministic_across_dict_orderings():
+    a = {"A": _profile("A", dollar_volume=2), "B": _profile("B", dollar_volume=1), "C": _profile("C", dollar_volume=3)}
+    b = {"C": _profile("C", dollar_volume=3), "A": _profile("A", dollar_volume=2), "B": _profile("B", dollar_volume=1)}
+
+    assert rank_liquidity_qualified_symbols(a) == rank_liquidity_qualified_symbols(b) == ("C", "A", "B")
+
+
+def test_build_liquidity_tiers_is_nested_and_strictly_superset():
+    ranked = ("A", "B", "C", "D", "E")
+    tiers = build_liquidity_tiers(ranked, (2, 4))
+
+    assert tiers[0].symbols == ("A", "B")
+    assert tiers[1].symbols == ("A", "B", "C", "D")
+    assert set(tiers[0].symbols) <= set(tiers[1].symbols)
+    assert tiers[0].size_shortfall is False
+    assert tiers[1].size_shortfall is False
+
+
+def test_build_liquidity_tiers_does_not_pad_a_short_tier():
+    ranked = ("A", "B", "C")
+    tiers = build_liquidity_tiers(ranked, (2, 10))
+
+    assert tiers[1].requested_size == 10
+    assert tiers[1].achieved_size == 3
+    assert tiers[1].symbols == ("A", "B", "C")
+    assert tiers[1].size_shortfall is True
+
+
+def test_build_liquidity_tiers_rejects_non_ascending_or_duplicate_sizes():
+    with pytest.raises(UniverseResearchError):
+        build_liquidity_tiers(("A", "B"), (10, 5))
+    with pytest.raises(UniverseResearchError):
+        build_liquidity_tiers(("A", "B"), (5, 5))
+    with pytest.raises(UniverseResearchError):
+        build_liquidity_tiers(("A", "B"), (0,))
+
+
+def test_liquidity_thresholds_rejects_invalid_values():
+    with pytest.raises(UniverseResearchError):
+        LiquidityThresholds(min_median_price=Decimal("0"))
+    with pytest.raises(UniverseResearchError):
+        LiquidityThresholds(min_session_opening_range_complete_pct=1.5)
+    with pytest.raises(UniverseResearchError):
+        LiquidityThresholds(min_rvol_history_satisfiable_pct=0.0)
