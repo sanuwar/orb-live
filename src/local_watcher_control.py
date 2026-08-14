@@ -136,16 +136,11 @@ class MorningWatcherController:
         self._process: ProcessHandle | None = None
         self._monitor_thread: threading.Thread | None = None
         self._instance_id = uuid.uuid4().hex
-        self._has_started = False
         self._readiness: dict[str, Any] | None = None
         self._state = "OWNERSHIP_UNKNOWN" if self._ownership_marker.exists() else "NOT_RUNNING"
         self._result = "UNKNOWN" if self._state == "OWNERSHIP_UNKNOWN" else "NONE"
         self._started_at: str | None = None
-        self._ended_at: str | None = None
-        self._exit_code: int | None = None
-        self._terminal_state: str | None = None
-        self._stop_reason: str | None = None
-        self._artifact_reference: str | None = None
+        self._last_run: dict[str, Any] | None = None
         self._projection_status = 'NO_AUTOMATIC_EVIDENCE'
 
     def check_readiness(self) -> dict[str, Any]:
@@ -179,11 +174,7 @@ class MorningWatcherController:
                 "process_state": self._state,
                 "watcher_result": self._result,
                 "started_at": self._started_at,
-                "ended_at": self._ended_at,
-                "exit_code": self._exit_code,
-                "terminal_state": self._terminal_state,
-                "stop_reason": self._stop_reason,
-                "artifact_reference": self._artifact_reference,
+                "last_run": self._last_run,
                 "projection_status": self._projection_status,
                 "readiness": self._readiness,
                 "authority": AUTHORITY_CEILING,
@@ -201,10 +192,6 @@ class MorningWatcherController:
                 return False, self.status()
             if self._process is not None and self._process.poll() is None:
                 self._state = "RUNNING"
-                return False, self.status()
-            if self._has_started:
-                self._state = "BLOCKED"
-                self._result = "WATCH_ALREADY_STARTED_THIS_SERVICE_INSTANCE"
                 return False, self.status()
             if not readiness["ready"]:
                 self._state = "BLOCKED"
@@ -226,12 +213,9 @@ class MorningWatcherController:
                 self._result = "WATCHER_LAUNCH_FAILED"
                 return False, self.status()
             self._process = process
-            self._has_started = True
             self._state = "RUNNING"
             self._result = "RUNNING"
             self._started_at = _moment(self._clock())
-            self._ended_at = None
-            self._exit_code = None
             monitor = threading.Thread(
                 target=self._monitor_process,
                 args=(process,),
@@ -273,25 +257,30 @@ class MorningWatcherController:
         with self._lock:
             if process is not self._process:
                 return
-            self._exit_code = process.returncode
-            self._ended_at = _moment(self._clock())
-            self._terminal_state = summary.get("final_state")
-            self._stop_reason = summary.get("stop_reason")
-            self._artifact_reference = summary.get("artifact_reference")
+            finished_at = _moment(self._clock())
+            terminal_state = summary.get("final_state")
+            stop_reason = summary.get("stop_reason")
+            artifact_reference = summary.get("artifact_reference")
             artifact_path = summary.get("artifact_path")
             if isinstance(artifact_path, str):
                 try:
                     self._projection_status = str(append_watch_artifact(Path(artifact_path)).get("status"))
                 except (OSError, RuntimeProjectionError, ValueError):
                     self._projection_status = "PROJECTION_FAILED"
-            if self._terminal_state == "WINDOW_COMPLETE_NO_CANDIDATE":
-                self._state, self._result = "COMPLETE", "NO_CANDIDATE"
-            elif self._terminal_state == "CANDIDATE_CAPTURED":
-                self._state, self._result = "COMPLETE", "CANDIDATE"
-            elif self._terminal_state == "OPERATOR_STOPPED":
-                self._state, self._result = "COMPLETE", "OPERATOR_STOPPED"
+            if terminal_state == "WINDOW_COMPLETE_NO_CANDIDATE":
+                result = "NO_CANDIDATE"
+            elif terminal_state == "CANDIDATE_CAPTURED":
+                result = "CANDIDATE"
+            elif terminal_state == "OPERATOR_STOPPED":
+                result = "OPERATOR_STOPPED"
+            elif stop_reason == "OUTSIDE_ENTRY_WINDOW":
+                result = "NOT_RUN_OUTSIDE_ENTRY_WINDOW"
             else:
-                self._state, self._result = "FAILED", "WATCHER_FAILED"
+                result = "FAILED"
+            self._last_run = {"result": result, "terminal_state": terminal_state, "started_at": self._started_at, "finished_at": finished_at, "stop_reason": stop_reason}
+            self._process = None
+            self._started_at = None
+            self._state, self._result = "NOT_RUNNING", "NONE"
             try:
                 self._ownership_marker.unlink(missing_ok=True)
             except OSError:

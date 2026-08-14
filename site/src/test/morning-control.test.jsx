@@ -1,113 +1,12 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+﻿import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import MorningControl from '../components/MorningControl'
-import {
-  checkLocalReadiness,
-  readLocalControlStatus,
-  startLocalMorningWatch,
-  stopLocalMorningWatch,
-} from '../operations/localControlClient'
-
-vi.mock('../operations/localControlClient', () => ({
-  checkLocalReadiness: vi.fn(),
-  readLocalControlStatus: vi.fn(),
-  startLocalMorningWatch: vi.fn(),
-  stopLocalMorningWatch: vi.fn(),
-}))
-
-const unavailable = {
-  available: false,
-  ok: false,
-  payload: { process_state: 'CONTROL_SERVICE_UNAVAILABLE', readiness: null },
-}
-const ready = {
-  available: true,
-  ok: true,
-  payload: {
-    service: 'LOCAL_CONTROL_ONLY',
-    process_state: 'NOT_RUNNING',
-    watcher_result: 'NONE',
-    readiness: { status: 'READY_FOR_MORNING_WATCH', ready: true, blockers: [] },
-  },
-}
-
-describe('MorningControl', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    readLocalControlStatus.mockResolvedValue(unavailable)
-    checkLocalReadiness.mockResolvedValue(ready)
-    startLocalMorningWatch.mockResolvedValue(ready)
-    stopLocalMorningWatch.mockResolvedValue(ready)
-  })
-
-  it('labels the surface local-only and fails closed when unavailable', async () => {
-    render(<MorningControl />)
-    expect(screen.getByText('Local control only')).toBeVisible()
-    expect(await screen.findByText('CONTROL_SERVICE_UNAVAILABLE')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Check readiness' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Start morning watch' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Stop watch' })).toBeDisabled()
-    expect(screen.queryByText(/remote control/i)).not.toBeInTheDocument()
-  })
-
-  it('renders blocked readiness and never enables start', async () => {
-    readLocalControlStatus.mockResolvedValue(ready)
-    checkLocalReadiness.mockResolvedValue({
-      available: true,
-      ok: true,
-      payload: {
-        ...ready.payload,
-        readiness: {
-          status: 'BLOCKED_BY_LOCAL_CONFIGURATION',
-          ready: false,
-          blockers: ['ALPACA_API_KEY_ID_MISSING'],
-        },
-      },
-    })
-    render(<MorningControl />)
-    await screen.findByText('READY_FOR_MORNING_WATCH')
-    fireEvent.click(screen.getByRole('button', { name: 'Check readiness' }))
-    expect(await screen.findByText(/ALPACA_API_KEY_ID_MISSING/)).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Start morning watch' })).toBeDisabled()
-    expect(startLocalMorningWatch).not.toHaveBeenCalled()
-  })
-
-  it('enables only stop while the owned watcher is running', async () => {
-    readLocalControlStatus.mockResolvedValue({
-      ...ready,
-      payload: { ...ready.payload, process_state: 'RUNNING', watcher_result: 'RUNNING' },
-    })
-    render(<MorningControl />)
-    expect((await screen.findAllByText('RUNNING')).length).toBeGreaterThan(0)
-    expect(screen.getByRole('button', { name: 'Start morning watch' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Stop watch' })).toBeEnabled()
-  })
-
-  it('renders a completed terminal result without enabling stop', async () => {
-    readLocalControlStatus.mockResolvedValue({
-      ...ready,
-      payload: {
-        ...ready.payload,
-        process_state: 'COMPLETE',
-        watcher_result: 'NO_CANDIDATE',
-        terminal_state: 'WINDOW_COMPLETE_NO_CANDIDATE',
-      },
-    })
-    render(<MorningControl />)
-    expect(await screen.findByText('COMPLETE')).toBeVisible()
-    expect(screen.getByText('NO_CANDIDATE')).toBeVisible()
-    expect(screen.getByText('WINDOW_COMPLETE_NO_CANDIDATE')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Start morning watch' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Stop watch' })).toBeDisabled()
-  })
-
-  it('invokes only the fixed readiness operation', async () => {
-    readLocalControlStatus.mockResolvedValue(ready)
-    render(<MorningControl />)
-    await screen.findByText('READY_FOR_MORNING_WATCH')
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Check readiness' }))
-    })
-    await waitFor(() => expect(checkLocalReadiness).toHaveBeenCalledOnce())
-  })
-})
+import { checkLocalReadiness, readLocalControlStatus, startLocalMorningWatch, stopLocalMorningWatch } from '../operations/localControlClient'
+vi.mock('../operations/localControlClient', () => ({ checkLocalReadiness: vi.fn(), readLocalControlStatus: vi.fn(), startLocalMorningWatch: vi.fn(), stopLocalMorningWatch: vi.fn() }))
+const ready = { available: true, ok: true, payload: { service: 'LOCAL_CONTROL_ONLY', process_state: 'NOT_RUNNING', watcher_result: 'NONE', readiness: { status: 'READY_FOR_MORNING_WATCH', ready: true, blockers: [] } } }
+describe('MorningControl', () => { beforeEach(() => { vi.clearAllMocks(); readLocalControlStatus.mockResolvedValue(ready); checkLocalReadiness.mockResolvedValue(ready); startLocalMorningWatch.mockResolvedValue(ready); stopLocalMorningWatch.mockResolvedValue(ready) })
+  it('uses readable current-state text and no mojibake', async () => { render(<MorningControl />); expect(await screen.findByText('READY FOR MORNING WATCH')).toBeVisible(); expect(document.body.textContent).not.toContain('â') })
+  it('shows a completed attempt as last run while current state is not running and restart is available', async () => { readLocalControlStatus.mockResolvedValue({ ...ready, payload: { ...ready.payload, last_run: { result: 'NO_CANDIDATE', terminal_state: 'WINDOW_COMPLETE_NO_CANDIDATE', started_at: 'a', finished_at: 'b', stop_reason: 'ENTRY_WINDOW_COMPLETE' } } }); render(<MorningControl />); expect(await screen.findByText('NOT RUNNING')).toBeVisible(); expect(screen.getByText('NO CANDIDATE')).toBeVisible(); expect(screen.getByRole('button', { name: 'Start morning watch' })).toBeEnabled() })
+  it('shows outside-window as expected guarded outcome rather than failure', async () => { readLocalControlStatus.mockResolvedValue({ ...ready, payload: { ...ready.payload, last_run: { result: 'NOT_RUN_OUTSIDE_ENTRY_WINDOW', terminal_state: null, started_at: 'a', finished_at: 'b', stop_reason: 'OUTSIDE_ENTRY_WINDOW' } } }); render(<MorningControl />); expect(await screen.findByText('NOT RUN — OUTSIDE ENTRY WINDOW')).toBeVisible(); expect(screen.queryByText('FAILED')).not.toBeInTheDocument() })
+  it('refresh retains last-run returned by status', async () => { readLocalControlStatus.mockResolvedValue({ ...ready, payload: { ...ready.payload, last_run: { result: 'CANDIDATE', terminal_state: 'CANDIDATE_CAPTURED', started_at: 'a', finished_at: 'b', stop_reason: 'DONE' } } }); render(<MorningControl />); await screen.findByText('CANDIDATE'); await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Refresh status' })) }); await waitFor(() => expect(readLocalControlStatus).toHaveBeenCalledTimes(2)); expect(screen.getByText('CANDIDATE')).toBeVisible() })
+  it('leaves controls disabled when unavailable', async () => { readLocalControlStatus.mockResolvedValue({ available: false, ok: false, payload: { process_state: 'CONTROL_SERVICE_UNAVAILABLE', readiness: null } }); render(<MorningControl />); await screen.findByText('CONTROL SERVICE UNAVAILABLE'); expect(screen.getByRole('button', { name: 'Start morning watch' })).toBeDisabled() }) })

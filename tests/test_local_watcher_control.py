@@ -123,7 +123,7 @@ def test_readiness_success_allows_one_watcher_and_duplicate_start_is_rejected(tm
     duplicate, status = value.start()
     assert not duplicate and status["process_state"] == "RUNNING"
     child.finish()
-    wait_for(value, "FAILED")
+    wait_for(value, "NOT_RUNNING")
 
 
 def test_readiness_failure_blocks_without_launching(tmp_path):
@@ -172,9 +172,10 @@ def test_terminal_state_is_captured_without_continuing_to_handoff(tmp_path, term
     value, child = controller(tmp_path, summary=summary)
     assert value.start()[0]
     child.finish()
-    status = wait_for(value, "COMPLETE")
-    assert status["watcher_result"] == expected
-    assert status["exit_code"] == 0
+    status = wait_for(value, "NOT_RUNNING")
+    assert status["watcher_result"] == "NONE"
+    assert status["last_run"]["result"] == expected
+    assert status["last_run"]["terminal_state"] == terminal
     assert status["broker_write_count"] == 0
     assert status["activation_approved"] is False
     assert status["permits_automated_action"] is False
@@ -191,9 +192,9 @@ def test_nonzero_or_unrecognized_exit_fails_without_restart(tmp_path):
     value, child = controller(tmp_path, process=child)
     assert value.start()[0]
     child.finish()
-    status = wait_for(value, "FAILED")
-    assert status["watcher_result"] == "WATCHER_FAILED"
-    assert value.start()[0] is False
+    status = wait_for(value, "NOT_RUNNING")
+    assert status["last_run"]["result"] == "FAILED"
+    assert value.start()[0] is True
 
 
 def test_api_exposes_only_fixed_operations_and_rejects_input_pid_or_command(tmp_path):
