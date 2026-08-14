@@ -35,7 +35,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -55,7 +55,8 @@ from src.market_data_canonical import (
     validate_market_bar, validate_market_data_batch,
 )
 from src.market_data_provider import (
-    ALPACA_DEFAULT_BASE_URL, AlpacaCredentials, MarketDataProviderError, normalize_alpaca_bar,
+    ALPACA_DEFAULT_BASE_URL, ALPACA_IEX_SOURCE, AlpacaCredentials, MarketDataProviderError,
+    normalize_alpaca_bar,
 )
 from src.signal_engine import LiveData, OpeningData, SignalDecision, SignalEngine
 
@@ -160,6 +161,43 @@ def trading_sessions_before(reference_day: date, *, count: int) -> tuple[date, .
         if reference_day - cursor > timedelta(days=3650):
             raise UniverseResearchError("exceeded supported calendar coverage while walking back")
     return tuple(reversed(values))
+
+
+#: Research-only heuristic (see `historical_fetch_start`), not a change to
+#: `calculate_median_opening_volume`'s own `lookback_days=20` requirement.
+DEFAULT_RVOL_WARMUP_MULTIPLIER = 3
+
+
+def historical_fetch_start(
+    first_session_date: date, *, lookback_days: int,
+    warmup_multiplier: int = DEFAULT_RVOL_WARMUP_MULTIPLIER,
+) -> date:
+    """The oldest date this study's historical fetch window should reach.
+
+    `calculate_median_opening_volume` (`src/market_data.py`, unmodified)
+    does not require the nearest `lookback_days` calendar sessions to each
+    be complete -- it walks backward through every historical date it is
+    GIVEN, skips any without a complete opening range, and stops once it
+    has found `lookback_days` complete ones. Its accuracy is therefore
+    bounded entirely by how far back the fetch window reaches, not by this
+    module's own logic.
+
+    Diagnosis against the operator's real IEX-fed cache found a persistent,
+    well-under-100% per-session opening-range completion rate for many
+    large-cap symbols (real feed sparsity, not a bug -- see
+    `docs/research/ORB_UNIVERSE_EXPANSION_STUDY.md`), so fetching exactly
+    `lookback_days` calendar sessions of buffer before the first study
+    session does not give that walk-back enough candidates to reliably find
+    `lookback_days` complete ones. Fetching `lookback_days *
+    warmup_multiplier` sessions of buffer instead is a heuristic, not a
+    guarantee: a symbol whose completion rate is low enough can still come
+    up short, which is a genuine IEX-coverage limit no larger buffer alone
+    can fix."""
+    if lookback_days < 1:
+        raise UniverseResearchError("lookback_days must be positive")
+    if warmup_multiplier < 1:
+        raise UniverseResearchError("warmup_multiplier must be positive")
+    return trading_sessions_before(first_session_date, count=lookback_days * warmup_multiplier)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -721,10 +759,22 @@ RESEARCH_FRESHNESS_POLICY = MarketDataFreshnessPolicy(
 )
 
 
+#: Feed values Alpaca's Market Data API v2 accepts for US equities. `iex`
+#: (this module's and the production provider's default) is a single-venue
+#: subset of consolidated volume; `sip` is the full consolidated tape and
+#: requires a paid Alpaca market-data subscription entitlement. Exposed as a
+#: RESEARCH-ONLY parameter (see `--feed` on `scripts/
+#: research_orb_universe_expansion.py`) to let an operator compare
+#: opening-range coverage between the two -- this never changes
+#: `src/market_data_provider.py`'s production default, which stays `iex`.
+SUPPORTED_FEEDS = frozenset({"iex", "sip"})
+DEFAULT_FEED = "iex"
+
+
 async def fetch_full_minute_history(
     http_client: _HttpClientLike, *, credentials: AlpacaCredentials, symbol: str,
     start: datetime, end: datetime, now: Callable[[], datetime],
-    base_url: str = ALPACA_DEFAULT_BASE_URL,
+    base_url: str = ALPACA_DEFAULT_BASE_URL, feed: str = DEFAULT_FEED,
     on_page: Callable[[int, int], None] | None = None,
 ) -> list[MarketBar]:
     """Fetch every minute bar in `[start, end)` for `symbol`, following
@@ -742,6 +792,8 @@ async def fetch_full_minute_history(
         raise UniverseResearchError("start and end must be timezone-aware")
     if start >= end:
         raise UniverseResearchError("start must be earlier than end")
+    if feed not in SUPPORTED_FEEDS:
+        raise UniverseResearchError(f"feed must be one of {sorted(SUPPORTED_FEEDS)}")
 
     all_bars: list[MarketBar] = []
     page_token: str | None = None
@@ -751,7 +803,7 @@ async def fetch_full_minute_history(
             "start": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "end": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "timeframe": "1Min",
-            "feed": "iex",
+            "feed": feed,
             "limit": 10000,
             "adjustment": "split",
         }
@@ -777,10 +829,19 @@ async def fetch_full_minute_history(
         raw_bars = payload["bars"] or []
         if not isinstance(raw_bars, list):
             raise MarketDataProviderError("provider 'bars' field is not a list")
-        all_bars.extend(
+        page_bars = (
             normalize_alpaca_bar(raw_bar, symbol=normalized_symbol, receive_timestamp=receive_timestamp)
             for raw_bar in raw_bars if raw_bar is not None
         )
+        if feed != "iex":
+            # `normalize_alpaca_bar` (src/market_data_provider.py, unmodified)
+            # always tags a bar with the fixed `ALPACA_IEX_SOURCE` identity,
+            # correct for its own iex-only production caller. Retagging here
+            # keeps a SIP comparison's provenance honest without touching
+            # that production function.
+            source_identity = dataclass_replace(ALPACA_IEX_SOURCE, feed=feed)
+            page_bars = (dataclass_replace(bar, source=source_identity) for bar in page_bars)
+        all_bars.extend(page_bars)
         if on_page is not None:
             on_page(page_number, len(all_bars))
         page_token = payload.get("next_page_token")
@@ -861,6 +922,8 @@ __all__ = [
     "incremental_symbols",
     "all_pool_symbols_with_production",
     "trading_sessions_before",
+    "DEFAULT_RVOL_WARMUP_MULTIPLIER",
+    "historical_fetch_start",
     "CANDIDATE",
     "GAP_ELIMINATED",
     "RVOL_ELIMINATED",
@@ -886,6 +949,8 @@ __all__ = [
     "cache_key",
     "CachingHttpClient",
     "MAX_PAGES_PER_SYMBOL",
+    "SUPPORTED_FEEDS",
+    "DEFAULT_FEED",
     "RESEARCH_FRESHNESS_POLICY",
     "fetch_full_minute_history",
     "eligible_minute_bars",

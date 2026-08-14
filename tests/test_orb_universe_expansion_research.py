@@ -13,6 +13,7 @@ from src.orb_universe_expansion_research import (
     BREAKOUT_ELIMINATED,
     CANDIDATE,
     DATA_INCOMPLETE,
+    DEFAULT_RVOL_WARMUP_MULTIPLIER,
     GAP_ELIMINATED,
     INVALID_INSUFFICIENT_COVERAGE,
     MINIMUM_COVERAGE,
@@ -28,6 +29,7 @@ from src.orb_universe_expansion_research import (
     eligible_minute_bars,
     evaluate_symbol_session,
     fetch_full_minute_history,
+    historical_fetch_start,
     incremental_symbols,
     liquid_universe,
     production_universe,
@@ -539,3 +541,155 @@ def test_validate_cache_integrity_removes_corrupt_entries_but_keeps_truncated_pa
     assert (cache_dir / "valid_truncated.json").exists()
     assert not (cache_dir / "missing_bars_key.json").exists()
     assert not (cache_dir / "corrupt.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Diagnosis of the operator's second real run (87.56% -> 51.24% coverage by
+# universe size, still below the 95% floor): raw-vs-eligible comparison
+# against the operator's real post-pagination-fix cache showed the missing
+# opening-range minutes are ABSENT IN ALPACA'S RAW IEX RESPONSE ITSELF (not
+# filtered out by `eligible_minute_bars`, not a timezone bug, not a
+# pagination gap) -- i.e. real IEX single-venue trading sparsity, matching
+# the operator's hypothesis. These tests cover the two capabilities added in
+# response: a research-only `feed` parameter to let an operator compare IEX
+# vs SIP coverage, and a larger RVOL historical warmup buffer to compensate
+# for sparse opening ranges among the *lookback* candidates.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_full_minute_history_defaults_to_iex_feed():
+    import asyncio
+    from datetime import timezone as tz
+
+    captured_params = []
+
+    class _CapturingClient:
+        async def get(self, url, *, headers, params):
+            captured_params.append(dict(params))
+            return _FakeResponse(200, {"bars": [], "next_page_token": None, "symbol": "AAPL"})
+
+    credentials = AlpacaCredentials(api_key_id="key", api_secret_key="secret")
+    asyncio.run(fetch_full_minute_history(
+        _CapturingClient(), credentials=credentials, symbol="AAPL",
+        start=datetime(2026, 6, 1, tzinfo=tz.utc), end=datetime(2026, 6, 2, tzinfo=tz.utc),
+        now=lambda: datetime(2026, 6, 2, tzinfo=tz.utc),
+    ))
+
+    assert captured_params[0]["feed"] == "iex"
+
+
+def test_fetch_full_minute_history_honors_explicit_sip_feed_and_retags_source():
+    import asyncio
+    from datetime import timezone as tz
+
+    captured_params = []
+
+    class _CapturingClient:
+        async def get(self, url, *, headers, params):
+            captured_params.append(dict(params))
+            return _FakeResponse(200, {
+                "bars": [{"t": "2026-06-01T13:30:00Z", "o": "100", "h": "101", "l": "99", "c": "100.5", "v": 1000}],
+                "next_page_token": None, "symbol": "AAPL",
+            })
+
+    credentials = AlpacaCredentials(api_key_id="key", api_secret_key="secret")
+    bars = asyncio.run(fetch_full_minute_history(
+        _CapturingClient(), credentials=credentials, symbol="AAPL",
+        start=datetime(2026, 6, 1, tzinfo=tz.utc), end=datetime(2026, 6, 2, tzinfo=tz.utc),
+        now=lambda: datetime(2026, 6, 2, tzinfo=tz.utc), feed="sip",
+    ))
+
+    assert captured_params[0]["feed"] == "sip"
+    # Retagged so a SIP comparison's provenance is honest -- `normalize_
+    # alpaca_bar` (production, unmodified) always stamps ALPACA_IEX_SOURCE.
+    assert bars[0].source.feed == "sip"
+    assert bars[0].source.provider == "alpaca"
+
+
+def test_fetch_full_minute_history_rejects_unsupported_feed():
+    import asyncio
+    from datetime import timezone as tz
+
+    credentials = AlpacaCredentials(api_key_id="key", api_secret_key="secret")
+    with pytest.raises(UniverseResearchError):
+        asyncio.run(fetch_full_minute_history(
+            _FakePaginatingHttpClient({}), credentials=credentials, symbol="AAPL",
+            start=datetime(2026, 6, 1, tzinfo=tz.utc), end=datetime(2026, 6, 2, tzinfo=tz.utc),
+            now=lambda: datetime(2026, 6, 2, tzinfo=tz.utc), feed="nasdaq-totalview",
+        ))
+
+
+def test_historical_fetch_start_extends_buffer_by_warmup_multiplier():
+    first_session = date(2026, 6, 10)
+    plain = trading_sessions_before(first_session, count=20)[0]
+    warmed = historical_fetch_start(first_session, lookback_days=20)
+
+    assert DEFAULT_RVOL_WARMUP_MULTIPLIER == 3
+    assert warmed == trading_sessions_before(first_session, count=60)[0]
+    # The warmed-up start must reach further back in time than a plain
+    # exactly-lookback_days buffer would.
+    assert warmed < plain
+
+
+def test_historical_fetch_start_respects_explicit_multiplier():
+    first_session = date(2026, 6, 10)
+    assert historical_fetch_start(
+        first_session, lookback_days=20, warmup_multiplier=1,
+    ) == trading_sessions_before(first_session, count=20)[0]
+    assert historical_fetch_start(
+        first_session, lookback_days=20, warmup_multiplier=5,
+    ) == trading_sessions_before(first_session, count=100)[0]
+
+
+def test_historical_fetch_start_rejects_non_positive_inputs():
+    with pytest.raises(UniverseResearchError):
+        historical_fetch_start(date(2026, 6, 10), lookback_days=0)
+    with pytest.raises(UniverseResearchError):
+        historical_fetch_start(date(2026, 6, 10), lookback_days=20, warmup_multiplier=0)
+
+
+def test_larger_warmup_buffer_lets_median_volume_find_enough_complete_sessions():
+    """Reproduces the RVOL-lookback failure mode found in the real cache:
+    a symbol whose opening range is complete on only every-other session.
+    A plain 20-session buffer supplies just 10 complete candidates (fewer
+    than the 20 `relative_volume_lookback_days` requires); the warmed-up
+    buffer supplies enough candidates for 20 complete ones to exist."""
+    from src.market_data import calculate_median_opening_volume
+
+    symbol = "TESTX"
+    study_date = date(2026, 6, 10)
+    lookback_days = 20
+
+    def _build_bars(*, back_to: date) -> list[MinuteBar]:
+        bars = []
+        cursor = study_date - timedelta(days=1)
+        while cursor >= back_to:
+            if cursor.weekday() < 5:
+                # Every other session is missing its 09:32 bar -- an
+                # incomplete opening range, exactly like the real IEX gaps.
+                complete = (cursor.toordinal() % 2 == 0)
+                start = datetime.combine(cursor, time(9, 30), tzinfo=ET)
+                for offset in range(5):
+                    if complete or offset != 2:
+                        bars.append(MinuteBar(
+                            symbol=symbol, begins_at=start + timedelta(minutes=offset),
+                            open_price=Decimal("100"), high_price=Decimal("100.5"),
+                            low_price=Decimal("99.5"), close_price=Decimal("100"),
+                            volume=1000, session="REGULAR", interpolated=False,
+                        ))
+            cursor -= timedelta(days=1)
+        return bars
+
+    plain_start = trading_sessions_before(study_date, count=lookback_days)[0]
+    warmed_start = historical_fetch_start(study_date, lookback_days=lookback_days)
+
+    with pytest.raises(ValueError):
+        calculate_median_opening_volume(
+            _build_bars(back_to=plain_start), before_date=study_date, lookback_days=lookback_days,
+        )
+
+    # No exception: the larger buffer supplies enough complete candidates.
+    result = calculate_median_opening_volume(
+        _build_bars(back_to=warmed_start), before_date=study_date, lookback_days=lookback_days,
+    )
+    assert result == Decimal("5000")
