@@ -2515,3 +2515,10 @@
 .control-blockers { padding: var(--space-3); border-radius: var(--radius-sm); background: var(--color-red-100); color: var(--color-red-800); font-family: var(--font-mono); font-size: var(--text-xs); }
 @media (max-width: 760px) { .morning-control > header { display: grid; } .control-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 480px) { .control-facts { grid-template-columns: 1fr; } .control-actions { display: grid; } }
+
+.candidate-attention { padding: var(--space-5); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-sm); }
+.candidate-attention h2 { margin-bottom: var(--space-2); }
+.candidate-attention p { margin-bottom: var(--space-3); }
+.candidate-attention-active { border: 2px solid var(--color-teal-700); border-top-width: 6px; background: #edf9f7; box-shadow: var(--shadow-md); }
+.candidate-attention-active .candidate-symbol { margin: 0; color: var(--color-teal-700); font-family: var(--font-mono); font-size: var(--text-2xl); font-weight: 850; }
+.candidate-attention-active > strong { display: inline-block; color: var(--color-teal-700); font-family: var(--font-mono); font-size: var(--text-sm); }
