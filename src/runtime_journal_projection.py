@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
+from src.runtime_filter_projection import FilterProjectionError, project_filter_facts
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_HISTORY_PATH = REPOSITORY_ROOT / "artifacts" / "operator-projection" / "runtime-journal.json"
@@ -78,6 +80,7 @@ def project_watch_summary(summary: Mapping[str, Any], *, artifact_name: str) -> 
     session_id = "watch-" + evidence_id[:20]
     records = [_record(projection_key=session_id, status=final_state, stage="COMPLETE", occurred_at=completed_at, reason=stop_reason)]
     events = [_event(projection_key=session_id, event_type="WATCH_SESSION_COMPLETED", occurred_at=completed_at, severity="INFO" if final_state != "PROVIDER_FAILURE" else "WARNING", component="morning_watcher", detail_code=final_state)]
+    evaluation_facts: list[dict[str, Any]] = []
     for ordinal, evaluation in enumerate(evaluations):
         if not isinstance(evaluation, Mapping):
             raise RuntimeProjectionError("invalid evaluation")
@@ -86,6 +89,11 @@ def project_watch_summary(summary: Mapping[str, Any], *, artifact_name: str) -> 
         if not isinstance(candidates, list) or len(candidates) > 1:
             raise RuntimeProjectionError("invalid candidate decisions")
         key = f"{session_id}:evaluation:{ordinal}"
+        try:
+            filter_facts = project_filter_facts(evaluation.get("evidence_artifact"))
+        except FilterProjectionError:
+            filter_facts = []
+        evaluation_facts.append({"scheduledAt": when, "filterEvidence": "AVAILABLE" if filter_facts else "UNAVAILABLE", "filterFacts": filter_facts})
         records.append(_record(projection_key=key, status="EVALUATED", stage="RUN_STARTED", occurred_at=when, reason=_safe_code(str(evaluation.get("quality_outcome", "UNKNOWN")), field="quality outcome")))
         events.append(_event(projection_key=key, event_type="SCANNER_EVALUATED", occurred_at=when, severity="INFO", component="morning_watcher", detail_code="SCANNER_EVALUATED"))
         if candidates:
@@ -98,7 +106,7 @@ def project_watch_summary(summary: Mapping[str, Any], *, artifact_name: str) -> 
             candidate_key = key + ":candidate"
             records.append(_record(projection_key=candidate_key, status="CANDIDATE_CAPTURED", stage="CANDIDATE_CAPTURED", occurred_at=when, symbol=symbol, reason="LONG_CANDIDATE"))
             events.append(_event(projection_key=candidate_key, event_type="CANDIDATE_DETECTED", occurred_at=when, severity="REVIEW", component="strategy", detail_code="LONG_CANDIDATE"))
-    return {"schemaVersion": SCHEMA_VERSION, "sourceEvidenceId": evidence_id, "session": {"sessionId": session_id, "startedAt": started_at, "completedAt": completed_at, "terminalState": final_state, "stopReason": stop_reason, "evaluationCount": len(evaluations)}, "records": records, "events": events}
+    return {"schemaVersion": SCHEMA_VERSION, "sourceEvidenceId": evidence_id, "session": {"sessionId": session_id, "startedAt": started_at, "completedAt": completed_at, "terminalState": final_state, "stopReason": stop_reason, "evaluationCount": len(evaluations), "evaluations": evaluation_facts}, "records": records, "events": events}
 
 
 def read_history(path: Path = DEFAULT_HISTORY_PATH) -> dict[str, Any]:

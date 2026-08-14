@@ -1,5 +1,6 @@
-﻿import JournalBadge from './JournalBadge'
+import JournalBadge from './JournalBadge'
 import { displayValue } from '../journal/journalModel'
+import { formatEasternTime } from '../formatters/easternTime'
 
 function tone(value) {
   if (value === 'COMPLETE' || value === 'VERIFIED_FLAT') return 'success'
@@ -14,7 +15,7 @@ export default function JournalRecordCard({ record }) {
     <article className="journal-record-card">
       <header>
         <div><JournalBadge tone={record.source === 'AGENT' ? 'info' : 'neutral'}>{record.source}</JournalBadge> <JournalBadge tone={tone(record.commissioningStage)}>{record.commissioningStage}</JournalBadge></div>
-        <time dateTime={record.eventTimestamp}>{new Date(record.eventTimestamp).toLocaleString()}</time>
+        <time dateTime={record.eventTimestamp}>{formatEasternTime(record.eventTimestamp)}</time>
       </header>
       <h3>{displayValue(record.symbol)} · {record.status}</h3>
       <dl className="journal-record-facts">

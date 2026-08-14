@@ -2,6 +2,8 @@ import { useState } from 'react'
 import MobileNav from './MobileNav'
 import Sidebar from './Sidebar'
 import StatusBanner from './StatusBanner'
+import SubpageContext from './SubpageContext'
+import { primaryRoute } from '../data/subpageRoutes'
 
 export default function AppShell({ route, children }) {
   const [menuOpen, setMenuOpen] = useState(false)
@@ -11,16 +13,17 @@ export default function AppShell({ route, children }) {
       <a className="skip-link" href="#main-content">
         Skip to content
       </a>
-      <Sidebar route={route} />
+      <Sidebar route={primaryRoute(route)} />
       <div className="app-frame">
         <MobileNav
-          route={route}
+          route={primaryRoute(route)}
           open={menuOpen}
           onToggle={() => setMenuOpen((value) => !value)}
           onNavigate={() => setMenuOpen(false)}
         />
         <StatusBanner />
         <main id="main-content" className="main-content" tabIndex="-1">
+          <SubpageContext route={route} />
           {children}
         </main>
         <footer className="site-footer">

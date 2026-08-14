@@ -3,13 +3,14 @@ import MorningControl from '../components/MorningControl'
 import AutomaticEventFeed from '../components/AutomaticEventFeed'
 import PageHeader from '../components/PageHeader'
 import { parseOperatorSnapshot } from '../operations/operatorSnapshot'
+import { formatEasternTime } from '../formatters/easternTime'
 
 const unavailable = 'NO EVIDENCE'
 function Fact({ label, value }) { return <div><dt>{label}</dt><dd>{value}</dd></div> }
 function SnapshotPanel({ snapshot }) {
   const components = Object.entries(snapshot.source_component_statuses)
   return <>
-    <section aria-labelledby="today-title"><div className="section-heading"><span className="section-label">Today / session</span><h2 id="today-title">{snapshot.operational_status}</h2><p>Generated {snapshot.generated_as_of}. Session-specific watcher, entry-window, candidate, and evaluation facts are not present in this projection.</p></div><dl className="operations-facts"><Fact label="Operating mode" value={snapshot.operating_mode}/><Fact label="Scheduler" value={snapshot.scheduler_status}/><Fact label="Runner" value={snapshot.runner_status}/><Fact label="Evidence" value={`${snapshot.evidence_completeness} / ${snapshot.evidence_freshness}`}/></dl></section>
+    <section aria-labelledby="today-title"><div className="section-heading"><span className="section-label">Today / session</span><h2 id="today-title">{snapshot.operational_status}</h2><p>Generated {formatEasternTime(snapshot.generated_as_of)}. Session-specific watcher, entry-window, candidate, and evaluation facts are not present in this projection.</p></div><dl className="operations-facts"><Fact label="Operating mode" value={snapshot.operating_mode}/><Fact label="Scheduler" value={snapshot.scheduler_status}/><Fact label="Runner" value={snapshot.runner_status}/><Fact label="Evidence" value={`${snapshot.evidence_completeness} / ${snapshot.evidence_freshness}`}/></dl></section>
     <section aria-labelledby="readiness-title"><div className="section-heading"><span className="section-label">Readiness</span><h2 id="readiness-title">{snapshot.supervised_readiness_status}</h2></div><dl className="operations-facts"><Fact label="Release SHA" value={snapshot.release_commit_sha}/><Fact label="Implementation digest" value={snapshot.implementation_digest}/><Fact label="Authority" value="ATTENDED_COMMISSIONING_ONLY"/><Fact label="Automated/write authority" value="DISABLED"/></dl></section>
     <section className="operations-unavailable" aria-labelledby="scanner-title"><div className="section-heading"><span className="section-label">Scanner / filters</span><h2 id="scanner-title">{unavailable}</h2><p>This sanitized operator snapshot has no per-symbol, filter, evaluation, or candidate fields. The UI will not infer them.</p></div></section>
     <section className="operations-unavailable" aria-labelledby="candidate-title"><div className="section-heading"><span className="section-label">Candidate / lifecycle</span><h2 id="candidate-title">{unavailable}</h2><p>No candidate, quantity, price, fill, or lifecycle data exists in this projection. No trade status is inferred.</p></div></section>

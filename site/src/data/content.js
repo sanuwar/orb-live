@@ -69,7 +69,7 @@ export const strategyMeasurements = [
   { stage: 'Narrow', value: '≥1.0', unit: '% gap', measure: 'Gap threshold', capture: 'Opening price versus prior close', operation: 'Reject smaller opening moves' },
   { stage: 'Narrow', value: '≥3.0', unit: '× volume', measure: 'Participation threshold', capture: 'Current activity versus 20-session baseline', operation: 'Reject low-participation breakouts' },
   { stage: 'Narrow', value: 'SPY > VWAP', unit: 'pass / fail', measure: 'Market context', capture: 'Current SPY price versus intraday VWAP', operation: 'Reject a long setup when the condition is false' },
-  { stage: 'Narrow', value: '1', unit: 'minute close', measure: 'Breakout confirmation', capture: 'Completed bar above the opening-range high', operation: 'Reject an unconfirmed price excursion' },
+  { stage: 'Narrow', value: 'Completed', unit: 'bar close', measure: 'Breakout confirmation', capture: 'Completed bar strictly above the opening-range high', operation: 'Reject an unconfirmed price excursion' },
   { stage: 'Narrow', value: '09:40–11:00', unit: 'ET', measure: 'Entry window', capture: 'Timestamp of the confirmed candidate', operation: 'Reject candidates outside the 80-minute window' },
 ]
 
@@ -129,10 +129,10 @@ export const strategySteps = [
       'The current design checks whether SPY is above VWAP before accepting a long candidate.',
   },
   {
-    title: 'One-minute breakout',
-    summary: 'Wait for a completed one-minute confirmation.',
+    title: 'Completed-bar breakout',
+    summary: 'Wait for completed-bar confirmation.',
     detail:
-      'A candidate is evaluated after a one-minute bar confirms the breakout during the permitted entry window.',
+      'A candidate is evaluated only after a completed bar closes above the opening-range high during the permitted entry window.',
   },
 ]
 
