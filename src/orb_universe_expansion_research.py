@@ -36,11 +36,11 @@ import copy
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from statistics import mean, median
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from src.config import load_config
 from src.exchange_calendar import EASTERN, regular_session_bounds
@@ -50,7 +50,13 @@ from src.market_data import (
     calculate_median_opening_volume,
     calculate_opening_range,
 )
-from src.market_data_canonical import session_open_for
+from src.market_data_canonical import (
+    MarketBar, MarketDataFreshnessPolicy, MarketDataQuality, session_open_for,
+    validate_market_bar, validate_market_data_batch,
+)
+from src.market_data_provider import (
+    ALPACA_DEFAULT_BASE_URL, AlpacaCredentials, MarketDataProviderError, normalize_alpaca_bar,
+)
 from src.signal_engine import LiveData, OpeningData, SignalDecision, SignalEngine
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
@@ -176,6 +182,24 @@ _TERMINAL_STATES = frozenset({
     BREAKOUT_ELIMINATED, DATA_INCOMPLETE,
 })
 
+# Granular reasons for DATA_INCOMPLETE, in the order `evaluate_symbol_session`
+# checks for them. Kept as an explicit, closed set (not a free-text string)
+# so a caller can safely aggregate by reason without guessing at spelling.
+MISSING_OPENING_RANGE_BARS = "MISSING_OPENING_RANGE_BARS"
+INSUFFICIENT_RVOL_LOOKBACK_HISTORY = "INSUFFICIENT_RVOL_LOOKBACK_HISTORY"
+MISSING_HISTORICAL_PRIOR_CLOSE = "MISSING_HISTORICAL_PRIOR_CLOSE"
+MISSING_TODAY_BARS = "MISSING_TODAY_BARS"
+MISSING_SPY_BARS_FOR_SESSION = "MISSING_SPY_BARS_FOR_SESSION"
+MISSING_ENTRY_WINDOW_BARS = "MISSING_ENTRY_WINDOW_BARS"
+NO_EVALUABLE_MINUTE_IN_WINDOW = "NO_EVALUABLE_MINUTE_IN_WINDOW"
+
+DATA_INCOMPLETE_REASONS = frozenset({
+    MISSING_OPENING_RANGE_BARS, INSUFFICIENT_RVOL_LOOKBACK_HISTORY,
+    MISSING_HISTORICAL_PRIOR_CLOSE, MISSING_TODAY_BARS,
+    MISSING_SPY_BARS_FOR_SESSION, MISSING_ENTRY_WINDOW_BARS,
+    NO_EVALUABLE_MINUTE_IN_WINDOW,
+})
+
 
 @dataclass(frozen=True)
 class SessionEvaluation:
@@ -185,12 +209,18 @@ class SessionEvaluation:
     gap_percent: Decimal | None
     relative_volume: Decimal | None
     approved_at: datetime | None
+    incomplete_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.state not in _TERMINAL_STATES:
             raise UniverseResearchError("invalid session evaluation state")
         if self.state == CANDIDATE and self.approved_at is None:
             raise UniverseResearchError("a CANDIDATE evaluation must record an approval time")
+        if self.state == DATA_INCOMPLETE:
+            if self.incomplete_reason not in DATA_INCOMPLETE_REASONS:
+                raise UniverseResearchError("a DATA_INCOMPLETE evaluation must record a known reason")
+        elif self.incomplete_reason is not None:
+            raise UniverseResearchError("incomplete_reason only applies to DATA_INCOMPLETE")
 
 
 def evaluate_symbol_session(
@@ -215,34 +245,58 @@ def evaluate_symbol_session(
             candidate_bars, session_date=session_date,
             opening_range_minutes=opening_minutes, session_open=session_open,
         )
+    except ValueError:
+        return SessionEvaluation(
+            symbol, session_date, DATA_INCOMPLETE, None, None, None,
+            incomplete_reason=MISSING_OPENING_RANGE_BARS,
+        )
+
+    try:
         median_volume = calculate_median_opening_volume(
             candidate_bars, before_date=session_date, lookback_days=lookback_days,
             opening_range_minutes=opening_minutes, session_open_for=session_open_for,
         )
-        historical = [
-            bar for bar in candidate_bars
-            if bar.timestamp_et.date() < session_date and not bar.interpolated
-        ]
-        today_bars = sorted(
-            (
-                bar for bar in candidate_bars
-                if bar.timestamp_et.date() == session_date and not bar.interpolated
-            ),
-            key=lambda bar: bar.begins_at,
-        )
-        spy_today = sorted(
-            (
-                bar for bar in spy_bars
-                if bar.timestamp_et.date() == session_date and not bar.interpolated
-            ),
-            key=lambda bar: bar.begins_at,
-        )
-        if not historical or not today_bars or not spy_today:
-            raise ValueError("required strategy inputs are absent")
-        previous_close = max(historical, key=lambda bar: bar.begins_at).close_price
-        today_open = today_bars[0].open_price
     except ValueError:
-        return SessionEvaluation(symbol, session_date, DATA_INCOMPLETE, None, None, None)
+        return SessionEvaluation(
+            symbol, session_date, DATA_INCOMPLETE, None, None, None,
+            incomplete_reason=INSUFFICIENT_RVOL_LOOKBACK_HISTORY,
+        )
+
+    historical = [
+        bar for bar in candidate_bars
+        if bar.timestamp_et.date() < session_date and not bar.interpolated
+    ]
+    if not historical:
+        return SessionEvaluation(
+            symbol, session_date, DATA_INCOMPLETE, None, None, None,
+            incomplete_reason=MISSING_HISTORICAL_PRIOR_CLOSE,
+        )
+    today_bars = sorted(
+        (
+            bar for bar in candidate_bars
+            if bar.timestamp_et.date() == session_date and not bar.interpolated
+        ),
+        key=lambda bar: bar.begins_at,
+    )
+    if not today_bars:
+        return SessionEvaluation(
+            symbol, session_date, DATA_INCOMPLETE, None, None, None,
+            incomplete_reason=MISSING_TODAY_BARS,
+        )
+    spy_today = sorted(
+        (
+            bar for bar in spy_bars
+            if bar.timestamp_et.date() == session_date and not bar.interpolated
+        ),
+        key=lambda bar: bar.begins_at,
+    )
+    if not spy_today:
+        return SessionEvaluation(
+            symbol, session_date, DATA_INCOMPLETE, None, None, None,
+            incomplete_reason=MISSING_SPY_BARS_FOR_SESSION,
+        )
+    previous_close = max(historical, key=lambda bar: bar.begins_at).close_price
+    today_open = today_bars[0].open_price
 
     opening_data = OpeningData(
         symbol=symbol,
@@ -270,7 +324,10 @@ def evaluate_symbol_session(
         if entry_start <= (bar.begins_at + timedelta(minutes=1)).astimezone(EASTERN).time() <= entry_end
     ]
     if not window_bars:
-        return SessionEvaluation(symbol, session_date, DATA_INCOMPLETE, None, None, None)
+        return SessionEvaluation(
+            symbol, session_date, DATA_INCOMPLETE, None, None, None,
+            incomplete_reason=MISSING_ENTRY_WINDOW_BARS,
+        )
 
     last_decision: SignalDecision | None = None
     for bar in window_bars:
@@ -305,7 +362,10 @@ def evaluate_symbol_session(
             )
 
     if last_decision is None:
-        return SessionEvaluation(symbol, session_date, DATA_INCOMPLETE, None, None, None)
+        return SessionEvaluation(
+            symbol, session_date, DATA_INCOMPLETE, None, None, None,
+            incomplete_reason=NO_EVALUABLE_MINUTE_IN_WINDOW,
+        )
     if last_decision.reason == _SPY_VWAP_REASON:
         return SessionEvaluation(
             symbol, session_date, SPY_VWAP_ELIMINATED,
@@ -320,6 +380,15 @@ def evaluate_symbol_session(
 # ---------------------------------------------------------------------------
 # Report construction.
 # ---------------------------------------------------------------------------
+
+
+#: Minimum fraction of possible symbol-days (`universe_size * sessions`)
+#: that must reach a determinate (non-DATA_INCOMPLETE) evaluation before a
+#: universe size's candidate-day rate may be treated as decision-quality.
+#: Chosen per the operator's explicit direction on this study, not derived.
+MINIMUM_COVERAGE = 0.95
+VALID_COVERAGE = "VALID"
+INVALID_INSUFFICIENT_COVERAGE = "INVALID_INSUFFICIENT_COVERAGE"
 
 
 @dataclass(frozen=True)
@@ -339,7 +408,23 @@ class UniverseSizeReport:
     spy_vwap_survivors: int
     breakout_survivors: int
     data_incomplete_count: int
+    data_incomplete_by_reason: Mapping[str, int]
+    data_incomplete_by_symbol: Mapping[str, int]
+    data_incomplete_by_session: Mapping[date, int]
     top_candidate_symbols: tuple[tuple[str, int], ...]
+
+    @property
+    def possible_symbol_days(self) -> int:
+        return len(self.universe) * self.sessions
+
+    @property
+    def completeness(self) -> float:
+        possible = self.possible_symbol_days
+        return (self.evaluated_count / possible) if possible else 0.0
+
+    @property
+    def coverage_status(self) -> str:
+        return VALID_COVERAGE if self.completeness >= MINIMUM_COVERAGE else INVALID_INSUFFICIENT_COVERAGE
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -347,6 +432,26 @@ class UniverseSizeReport:
             "universe_size": len(self.universe),
             "universe": list(self.universe),
             "sessions": self.sessions,
+            "coverage": {
+                "possible_symbol_days": self.possible_symbol_days,
+                "complete_symbol_days": self.evaluated_count,
+                "data_incomplete_symbol_days": self.data_incomplete_count,
+                "completeness": round(self.completeness, 4),
+                "minimum_required": MINIMUM_COVERAGE,
+                "status": self.coverage_status,
+                "data_incomplete_by_reason": dict(sorted(self.data_incomplete_by_reason.items())),
+                "data_incomplete_by_symbol": dict(
+                    sorted(self.data_incomplete_by_symbol.items(), key=lambda item: (-item[1], item[0]))
+                ),
+                "data_incomplete_by_session": {
+                    day.isoformat(): count
+                    for day, count in sorted(self.data_incomplete_by_session.items())
+                },
+            },
+            # Candidate-rate figures below are informational whenever
+            # coverage_status is INVALID_INSUFFICIENT_COVERAGE -- they are
+            # computed only from the symbol-days that WERE evaluable and do
+            # not represent the full studied universe/session set.
             "sessions_with_candidate": self.sessions_with_candidate,
             "zero_candidate_sessions": self.zero_candidate_sessions,
             "candidate_day_rate": round(self.candidate_day_rate, 4),
@@ -377,6 +482,9 @@ def _report_for_universe(
     gap_survivors = rvol_survivors = spy_survivors = breakout_survivors = 0
     evaluated_count = data_incomplete_count = 0
     candidate_days_by_symbol: dict[str, int] = {symbol: 0 for symbol in universe}
+    incomplete_by_reason: dict[str, int] = {}
+    incomplete_by_symbol: dict[str, int] = {}
+    incomplete_by_session: dict[date, int] = {}
 
     for session_date in session_dates:
         session_candidates = 0
@@ -384,22 +492,39 @@ def _report_for_universe(
             evaluation = evaluations.get((symbol, session_date))
             if evaluation is None or evaluation.state == DATA_INCOMPLETE:
                 data_incomplete_count += 1
+                reason = evaluation.incomplete_reason if evaluation is not None else "MISSING_EVALUATION"
+                incomplete_by_reason[reason] = incomplete_by_reason.get(reason, 0) + 1
+                incomplete_by_symbol[symbol] = incomplete_by_symbol.get(symbol, 0) + 1
+                incomplete_by_session[session_date] = incomplete_by_session.get(session_date, 0) + 1
                 continue
             evaluated_count += 1
-            gap_survivors += 1
+            # Each `*_survivors` counter must only advance for symbol-days
+            # that actually cleared that specific gate -- i.e. the increment
+            # happens strictly AFTER the corresponding elimination check, not
+            # before it. (A prior version incremented every counter before
+            # checking that gate's own elimination state, which meant e.g.
+            # `gap_survivors` always equalled `symbols_evaluated` and
+            # `breakout_survivors` counted BREAKOUT_ELIMINATED symbol-days as
+            # if they had "survived" the breakout gate -- the exact bug this
+            # ordering fixes. See tests/test_orb_universe_expansion_research.
+            # py::test_breakout_survivors_never_exceeds_total_candidates.)
             if evaluation.state == GAP_ELIMINATED:
                 continue
-            rvol_survivors += 1
+            gap_survivors += 1
             if evaluation.state == RVOL_ELIMINATED:
                 continue
-            spy_survivors += 1
+            rvol_survivors += 1
             if evaluation.state == SPY_VWAP_ELIMINATED:
                 continue
+            spy_survivors += 1
+            if evaluation.state == BREAKOUT_ELIMINATED:
+                continue
             breakout_survivors += 1
-            if evaluation.state == CANDIDATE:
-                session_candidates += 1
-                total_candidates += 1
-                candidate_days_by_symbol[symbol] += 1
+            # Only CANDIDATE can remain once a symbol-day has cleared every
+            # gate including breakout.
+            session_candidates += 1
+            total_candidates += 1
+            candidate_days_by_symbol[symbol] += 1
         per_session_counts.append(session_candidates)
 
     sessions = len(session_dates)
@@ -430,6 +555,9 @@ def _report_for_universe(
         spy_vwap_survivors=spy_survivors,
         breakout_survivors=breakout_survivors,
         data_incomplete_count=data_incomplete_count,
+        data_incomplete_by_reason=incomplete_by_reason,
+        data_incomplete_by_symbol=incomplete_by_symbol,
+        data_incomplete_by_session=incomplete_by_session,
         top_candidate_symbols=top_symbols,
     )
 
@@ -478,10 +606,15 @@ def csv_summary_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for universe_report in report["universe_reports"]:
         funnel = universe_report["funnel"]
+        coverage = universe_report["coverage"]
         rows.append({
             "label": universe_report["label"],
             "universe_size": universe_report["universe_size"],
             "sessions": universe_report["sessions"],
+            "possible_symbol_days": coverage["possible_symbol_days"],
+            "complete_symbol_days": coverage["complete_symbol_days"],
+            "completeness": coverage["completeness"],
+            "coverage_status": coverage["status"],
             "sessions_with_candidate": universe_report["sessions_with_candidate"],
             "zero_candidate_sessions": universe_report["zero_candidate_sessions"],
             "candidate_day_rate": universe_report["candidate_day_rate"],
@@ -555,6 +688,169 @@ class CachingHttpClient:
         return response
 
 
+# ---------------------------------------------------------------------------
+# Historical retrieval: pagination + quality filtering.
+#
+# `AlpacaMarketDataProvider.fetch_minute_bars` (src/market_data_provider.py)
+# deliberately returns only ONE page (Alpaca caps a page at 10,000 bars) and
+# does not read `next_page_token` at all -- correct for its only current
+# production caller, which requests at most a single trading day of history,
+# far short of that cap. A 90+ session research window needs roughly
+# 30,000-45,000 minute bars per symbol, 3-4x the page cap, so a single-page
+# fetch there silently returns only the OLDEST ~26 trading days of the
+# requested range and drops the rest. This was the confirmed root cause of
+# the DATA_INCOMPLETE dominance in the first real run of this study: 99 of
+# 101 cached Alpaca responses carried a non-null `next_page_token` (i.e.
+# were truncated at exactly 10,000 bars), so most (symbol, session) pairs
+# fell outside the ~26 trading days actually retrieved. This module follows
+# that cursor to completion itself rather than changing the production
+# provider's single-page contract.
+# ---------------------------------------------------------------------------
+
+#: Fail-closed guard against a runaway pagination loop (a malformed or
+#: adversarial `next_page_token` cycle) -- 50 pages is roughly 500,000 bars,
+#: far more than any symbol in this study's date range can produce.
+MAX_PAGES_PER_SYMBOL = 50
+
+#: Historical bars in this study can be many months old; the shared default
+#: freshness policy (5 minutes, meant for a live snapshot) would mark all of
+#: them STALE. 400 days comfortably covers any date range this study uses
+#: while still catching a genuinely corrupt/out-of-range timestamp.
+RESEARCH_FRESHNESS_POLICY = MarketDataFreshnessPolicy(
+    version="orb-universe-expansion-research-v1", max_age_seconds=400 * 86400.0,
+)
+
+
+async def fetch_full_minute_history(
+    http_client: _HttpClientLike, *, credentials: AlpacaCredentials, symbol: str,
+    start: datetime, end: datetime, now: Callable[[], datetime],
+    base_url: str = ALPACA_DEFAULT_BASE_URL,
+    on_page: Callable[[int, int], None] | None = None,
+) -> list[MarketBar]:
+    """Fetch every minute bar in `[start, end)` for `symbol`, following
+    Alpaca's `next_page_token` cursor until it is exhausted rather than
+    stopping after the first page. `on_page`, if given, is called after each
+    page as `on_page(page_number, bars_fetched_so_far)` for CLI progress
+    output. Raises `UniverseResearchError` if the pagination guard is
+    exceeded, and `MarketDataProviderError` for any transport/shape failure
+    -- the same exception types the single-page production provider raises,
+    so callers do not need a third error type to handle."""
+    normalized_symbol = symbol.upper().strip()
+    if not normalized_symbol:
+        raise UniverseResearchError("a symbol is required")
+    if start.tzinfo is None or end.tzinfo is None:
+        raise UniverseResearchError("start and end must be timezone-aware")
+    if start >= end:
+        raise UniverseResearchError("start must be earlier than end")
+
+    all_bars: list[MarketBar] = []
+    page_token: str | None = None
+    receive_timestamp = now()
+    for page_number in range(1, MAX_PAGES_PER_SYMBOL + 1):
+        params: dict[str, Any] = {
+            "start": start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "end": end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timeframe": "1Min",
+            "feed": "iex",
+            "limit": 10000,
+            "adjustment": "split",
+        }
+        if page_token is not None:
+            params["page_token"] = page_token
+        try:
+            response = await http_client.get(
+                f"{base_url}/stocks/{normalized_symbol}/bars",
+                headers=credentials.headers(), params=params,
+            )
+        except Exception as exc:
+            raise MarketDataProviderError("provider request failed") from exc
+        if response.status_code != 200:
+            raise MarketDataProviderError(
+                f"provider returned a non-success status ({response.status_code})"
+            )
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise MarketDataProviderError("provider response was not valid JSON") from exc
+        if not isinstance(payload, Mapping) or "bars" not in payload:
+            raise MarketDataProviderError("provider response is missing 'bars'")
+        raw_bars = payload["bars"] or []
+        if not isinstance(raw_bars, list):
+            raise MarketDataProviderError("provider 'bars' field is not a list")
+        all_bars.extend(
+            normalize_alpaca_bar(raw_bar, symbol=normalized_symbol, receive_timestamp=receive_timestamp)
+            for raw_bar in raw_bars if raw_bar is not None
+        )
+        if on_page is not None:
+            on_page(page_number, len(all_bars))
+        page_token = payload.get("next_page_token")
+        if not page_token:
+            return all_bars
+    raise UniverseResearchError(
+        f"{normalized_symbol}: exceeded the {MAX_PAGES_PER_SYMBOL}-page pagination guard "
+        "without the provider exhausting next_page_token"
+    )
+
+
+def eligible_minute_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetime) -> list[MinuteBar]:
+    """Quality-gate raw normalized bars before bridging to `MinuteBar`.
+    `MarketBar.to_minute_bar()` (`src/market_data_canonical.py`) is
+    documented to be called only on bars that already carry
+    `MarketDataQuality.VALID` -- this applies the same canonical fail-closed
+    gate (`validate_market_bar` / `validate_market_data_batch`) that
+    `_live_eligible_bars` applies in `src/live_shadow_session.py`, dropping
+    (never silently repairing) anything malformed, duplicate, out-of-order,
+    or outside the regular session, so extended-hours or corrupt bars never
+    contaminate an opening-range, RVOL, or breakout calculation."""
+    batch = validate_market_data_batch(bars)
+    eligible: list[MinuteBar] = []
+    for index, bar in enumerate(bars):
+        outcome = batch.get(
+            index,
+            validate_market_bar(
+                bar, expected_symbol=symbol, expected_trading_date=bar.trading_date,
+                expected_interval_seconds=60, freshness_policy=RESEARCH_FRESHNESS_POLICY, now=now,
+            ),
+        )
+        if outcome is MarketDataQuality.VALID:
+            eligible.append(bar.to_minute_bar())
+    return eligible
+
+
+def validate_cache_integrity(cache_dir: Path = DEFAULT_CACHE_DIR) -> dict[str, list[str]]:
+    """Scan the on-disk response cache and remove entries that cannot
+    possibly be a usable Alpaca response: unparseable JSON, or a payload
+    missing the `bars` key entirely (e.g. an interrupted write). Returns
+    `{"removed": [...], "kept": [...]}` filenames.
+
+    A cached response with a non-null `next_page_token` (a truncated first
+    or middle page) is intentionally NOT evicted here -- it is a genuine,
+    correctly normalized partial answer, not corruption. Every page's cache
+    key is a hash of its exact request params, which now includes
+    `page_token`; `fetch_full_minute_history` requesting the same first page
+    again gets this cache hit, then simply requests the NEXT page (a
+    different params dict -> a different, not-yet-cached key) to continue
+    where the original single-page fetch stopped. No previously fetched
+    page is wasted or re-downloaded."""
+    if not cache_dir.exists():
+        return {"removed": [], "kept": []}
+    removed: list[str] = []
+    kept: list[str] = []
+    for path in sorted(cache_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            path.unlink(missing_ok=True)
+            removed.append(path.name)
+            continue
+        if not isinstance(payload, Mapping) or "bars" not in payload:
+            path.unlink(missing_ok=True)
+            removed.append(path.name)
+            continue
+        kept.append(path.name)
+    return {"removed": removed, "kept": kept}
+
+
 __all__ = [
     "UniverseResearchError",
     "UNIVERSE_POOL",
@@ -571,13 +867,29 @@ __all__ = [
     "SPY_VWAP_ELIMINATED",
     "BREAKOUT_ELIMINATED",
     "DATA_INCOMPLETE",
+    "MISSING_OPENING_RANGE_BARS",
+    "INSUFFICIENT_RVOL_LOOKBACK_HISTORY",
+    "MISSING_HISTORICAL_PRIOR_CLOSE",
+    "MISSING_TODAY_BARS",
+    "MISSING_SPY_BARS_FOR_SESSION",
+    "MISSING_ENTRY_WINDOW_BARS",
+    "NO_EVALUABLE_MINUTE_IN_WINDOW",
+    "DATA_INCOMPLETE_REASONS",
     "SessionEvaluation",
     "evaluate_symbol_session",
+    "MINIMUM_COVERAGE",
+    "VALID_COVERAGE",
+    "INVALID_INSUFFICIENT_COVERAGE",
     "UniverseSizeReport",
     "build_study_report",
     "csv_summary_rows",
     "cache_key",
     "CachingHttpClient",
+    "MAX_PAGES_PER_SYMBOL",
+    "RESEARCH_FRESHNESS_POLICY",
+    "fetch_full_minute_history",
+    "eligible_minute_bars",
+    "validate_cache_integrity",
     "DEFAULT_CACHE_DIR",
     "DEFAULT_OUTPUT_DIR",
 ]
