@@ -9,7 +9,7 @@ import { readAutomaticRuntimeProjection } from '../operations/localControlClient
 export function JournalProvider({ children, store: suppliedStore }) {
   const store = useMemo(() => suppliedStore ?? createJournalStore(), [suppliedStore])
   const [records, setRecords] = useState(() => store.discover())
-  const [automatic, setAutomatic] = useState({ status: 'NO_AUTOMATIC_EVIDENCE', records: [], events: [] })
+  const [automatic, setAutomatic] = useState({ status: 'NO_AUTOMATIC_EVIDENCE', sessions: [], records: [], events: [] })
   useEffect(() => {
     let active = true
     readAutomaticRuntimeProjection().then((result) => { if (active) setAutomatic(parseAutomaticProjection(result.payload)) })

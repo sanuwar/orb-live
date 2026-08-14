@@ -1,0 +1,7 @@
+import { describe, expect, it } from 'vitest'
+import { sessionAnalytics } from '../analytics/sessionAnalytics'
+
+describe('sanitized session analytics', () => {
+  it('uses only available evaluator facts and retains denominator coverage', () => { const value = sessionAnalytics({ sessions: [{ terminalState: 'WINDOW_COMPLETE_NO_CANDIDATE', evaluationCount: 2, evaluations: [{ filterEvidence: 'AVAILABLE', filterFacts: [{ symbol: 'AAPL', state: 'REJECTED', failedRule: 'OPENING_GAP' }, { symbol: 'MSFT', state: 'VALID_DECISION', failedRule: 'UNAVAILABLE' }] }, { filterEvidence: 'UNAVAILABLE', filterFacts: [] }] }] }); expect(value).toMatchObject({ sessions: 1, candidate: 0, noCandidate: 1, evaluations: 2, filterFactCoverage: 2 }); expect(value.filterRejections).toEqual([{ rule: 'OPENING_GAP', count: 1, coverage: 2 }]); expect(value.symbols.find((item) => item.symbol === 'AAPL')).toMatchObject({ evaluations: 1, candidates: 0, rejections: 1 }) })
+  it('returns N/A-compatible null denominators when there is no evidence', () => { const value = sessionAnalytics({ sessions: [] }); expect(value.candidateFrequency).toBeNull(); expect(value.filterFactCoverage).toBe(0); expect(value.symbols).toEqual([]) })
+})

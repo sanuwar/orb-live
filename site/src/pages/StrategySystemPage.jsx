@@ -1,6 +1,6 @@
 import PageHeader from '../components/PageHeader'
 const sections = [
-  ['Strategy', 'orb_long_v0 is the sole v1 strategy. The commissioning universe is fixed at 10 symbols.', '#/strategy'],
+  ['How ORB-LIVE Decides', 'Active orb_long_v0 signal conditions, illustrative breakout concepts, and explicit research boundaries.', '#/strategy'],
   ['System flow', 'Observation, qualification, review, and evidence remain explicitly bounded.', '#/system-flow'],
   ['Safety', 'Authority remains ATTENDED_COMMISSIONING_ONLY. Automated and unattended activation are not active.', '#/safety'],
   ['Architecture & glossary', 'Static documentation explains narrow layers and shared vocabulary without runtime imports.', '#/architecture-glossary'],

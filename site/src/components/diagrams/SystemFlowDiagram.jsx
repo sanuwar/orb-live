@@ -9,7 +9,7 @@ const equations = [
   {
     stage: 'Narrow',
     slug: 'narrow',
-    formula: '≥1% + ≥3× + 1m',
+    formula: 'Gap + RVOL + completed close',
     input: 'Observed session',
     output: '0–1 candidate',
   },

@@ -1,55 +1,22 @@
 import Callout from '../components/Callout'
-import JourneySpine from '../components/JourneySpine'
-import MeasurementPipeline from '../components/MeasurementPipeline'
 import PageHeader from '../components/PageHeader'
+import MeasurementPipeline from '../components/MeasurementPipeline'
 import StrategyTimeline from '../components/diagrams/StrategyTimeline'
+import { activeSignalConditions, strategyPresentation } from '../data/strategyFacts'
+
+const examples = [
+  { title: 'Illustrative Case A', detail: 'Strong gap and RVOL. Price crosses the opening-range high, leaves a large upper wick, and closes only slightly above the range.', outcome: 'Weak hold or confirmation.' },
+  { title: 'Illustrative Case B', detail: 'Moderate gap and strong RVOL. Price decisively clears the opening-range high, leaves a small upper wick, and closes near the bar high.', outcome: 'Stronger breakout behavior.' },
+]
 
 export default function StrategyPage() {
-  return (
-    <div className="page">
-      <PageHeader
-        eyebrow="ORB V0 · long only"
-        title="10 symbols. 8 measurements. 80 minutes."
-        lead="A candidate survives only when every configured observation and qualification measurement passes."
-      />
-
-      <JourneySpine
-        focus={['observe', 'narrow']}
-        compact
-        title="Observe + Narrow"
-        description="6 primary stage metrics summarize the measurement path; the instrument board below shows how each value is captured and used."
-      />
-
-      <MeasurementPipeline />
-      <StrategyTimeline />
-
-      <section className="management-grid" aria-labelledby="management-title">
-        <div>
-          <span className="section-label">Protection sequence</span>
-          <h2 id="management-title">OR low → 5R → 2R → 55:45</h2>
-          <ol className="management-steps">
-            <li><span>0R</span><div><strong>Initial stop</strong><p>Opening-range low.</p></div></li>
-            <li><span>5R</span><div><strong>Breakeven</strong><p>Designed stop reference moves to entry.</p></div></li>
-            <li><span>2R</span><div><strong>Target</strong><p>Designed full profit exit.</p></div></li>
-            <li><span>55:45</span><div><strong>Time exit</strong><p>Zero overnight positions.</p></div></li>
-          </ol>
-        </div>
-        <details className="r-explainer">
-          <summary>
-            <span className="r-symbol" aria-hidden="true">R</span>
-            <div><strong>5R = entry − initial stop</strong><p>Open the fictional numeric example.</p></div>
-          </summary>
-          <div className="r-example">
-            <span className="fictional-pill">Fictional example</span>
-            <p>$50.00 entry − $49.50 stop = $0.50 per share = 5R.</p>
-            <p>$55.00 target = $5.00 above entry = 2R.</p>
-          </div>
-        </details>
-      </section>
-
-      <Callout title="Design limits are not outcome guarantees" tone="neutral" icon="i">
-        <p>Gaps, slippage, partial fills, latency, and broker behavior can exceed planned risk.</p>
-      </Callout>
-    </div>
-  )
+  return <div className="page">
+    <PageHeader eyebrow="How ORB-LIVE Decides" title="10 symbols. 8 measurements. 80 minutes." lead="This explains the existing orb_long_v0 signal conditions. It does not add a score, ranking rule, or trading control." />
+    <MeasurementPipeline />
+    <StrategyTimeline />
+    <section aria-labelledby="active-logic"><span className="section-label">Current active logic</span><h2 id="active-logic">Every required signal condition</h2><ul>{activeSignalConditions.map((condition) => <li key={condition}>{condition}</li>)}</ul><p>{strategyPresentation.openingRange} establishes the breakout reference. SPY/VWAP is shown because the current canonical configuration enables that filter.</p></section>
+    <section aria-labelledby="breakout-examples"><span className="section-label">Illustrative example - not live trade data</span><h2 id="breakout-examples">High gap plus high RVOL does not automatically mean a strong breakout</h2><div className="area-card-grid">{examples.map((example) => <article key={example.title}><h3>{example.title}</h3><div aria-label="Illustrative opening-range breakout diagram"><p>OR high: ----------------</p><p>Price bar: | candle |</p></div><p>{example.detail}</p><strong>{example.outcome}</strong></article>)}</div></section>
+    <section className="operations-unavailable"><span className="section-label">Real ORB-LIVE session</span><h2>REAL CASE STUDY PENDING SUFFICIENT EVIDENCE</h2><p>Only authenticated, sanitized session evidence may populate a real case study. No historic result is inferred.</p></section>
+    <Callout title="Research is not active strategy logic" tone="neutral" icon="i"><p>Breakout displacement, close location, wick size, and future deterministic candidate ranking are research concepts only. They are not production rules in orb_long_v0.</p></Callout>
+  </div>
 }

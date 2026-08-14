@@ -1,14 +1,17 @@
 import PageHeader from '../components/PageHeader'
 import JournalOverviewPage from './JournalOverviewPage'
 import { useJournal } from '../journal/journalContext'
+import { sessionAnalytics } from '../analytics/sessionAnalytics'
+import { formatEasternTime } from '../formatters/easternTime'
 
+function metric(value, evidenceAvailable) { return evidenceAvailable ? value : 'N/A' }
 export default function PerformancePage() {
-  const { automatic } = useJournal()
-  const available = automatic.status === 'AUTOMATIC_EVIDENCE_AVAILABLE'
-  return <div className="page performance-page">
-    <PageHeader eyebrow="Performance" title="Sanitized journal, events, and evidence." lead="Automatic runtime records are read from the local sanitized projection; manual records and explicit evidence import remain available." />
-    <section className="operations-unavailable"><span className="section-label">Automatic runtime records</span><h2>{available ? 'AUTOMATIC EVIDENCE AVAILABLE' : 'NO AUTOMATIC EVIDENCE'}</h2><p>{available ? `${automatic.records.length} projected records are shown alongside manual records.` : 'Start the local control service and complete a watcher session, or use manual import for debug evidence.'}</p></section>
-    <nav className="section-nav" aria-label="Performance sections"><a href="#/journal">Journal overview</a><a href="#/journal-records">Trades & events</a><a href="#/manual-record">Add manual record</a><a href="#/evidence-import">Import sanitized evidence</a></nav>
-    <JournalOverviewPage />
+  const { automatic } = useJournal(); const metrics = sessionAnalytics(automatic); const available = automatic.status === 'AUTOMATIC_EVIDENCE_AVAILABLE'; const latest = automatic.sessions?.at(-1)
+  return <div className="page performance-page"><PageHeader eyebrow="Performance" title="Sanitized journal, events, and evidence." lead="Metrics use only the local sanitized runtime projection. Missing evidence is never converted into a trading outcome." />
+    <section aria-labelledby="session-metrics"><span className="section-label">Automatic runtime records</span><h2 id="session-metrics">Observed session evidence</h2><div className="journal-metrics"><article><strong>{metric(metrics.sessions, available)}</strong><span>Sessions observed</span></article><article><strong>{metric(metrics.candidate, available)}</strong><span>Candidate sessions</span></article><article><strong>{metric(metrics.noCandidate, available)}</strong><span>No-candidate sessions</span></article><article><strong>{metrics.candidateFrequency === null ? 'N/A' : `${(metrics.candidateFrequency * 100).toFixed(0)}%`}</strong><span>Candidate frequency</span></article><article><strong>{metric(metrics.evaluations, available)}</strong><span>Scanner evaluations</span></article></div><p>{available ? `Coverage: ${metrics.filterFactCoverage} authenticated per-symbol evaluator facts.${latest?.completedAt ? ` Latest session: ${formatEasternTime(latest.completedAt)}.` : ''}` : 'NO AUTOMATIC EVIDENCE.'}</p></section>
+    <section className="operations-unavailable"><span className="section-label">Trade performance</span><h2>INSUFFICIENT LIVE TRADE EVIDENCE</h2><p>Completed authentic entry, protection, exit, and reconciliation evidence is required before P&amp;L, win rate, or R-multiple is shown.</p></section>
+    <section aria-labelledby="filter-analytics"><span className="section-label">Filter analytics</span><h2 id="filter-analytics">Recorded evaluator rejection facts</h2>{metrics.filterFactCoverage === 0 ? <p>FILTER DETAIL PENDING AUTHENTIC PROJECTED EVIDENCE.</p> : <><p>Coverage: {metrics.filterFactCoverage} per-symbol evaluator facts. Pass rates are not inferred from short-circuit evidence.</p><ul>{metrics.filterRejections.length ? metrics.filterRejections.map((item) => <li key={item.rule}>{item.rule}: {item.count} recorded rejection{item.count === 1 ? '' : 's'}</li>) : <li>No recorded filter rejection facts.</li>}</ul></>}</section>
+    <section aria-labelledby="symbol-analytics"><span className="section-label">Symbol analytics</span><h2 id="symbol-analytics">Authenticated observed symbols</h2>{metrics.symbols.length === 0 ? <p>N/A - no authenticated per-symbol filter evidence.</p> : <ul>{metrics.symbols.map((item) => <li key={item.symbol}>{item.symbol}: {item.evaluations} evaluations, {item.candidates} candidate decisions, {item.rejections} recorded rejections, candidate frequency {item.candidateFrequency === null ? 'N/A' : `${(item.candidateFrequency * 100).toFixed(0)}%`}</li>)}</ul>}</section>
+    <nav className="section-nav" aria-label="Performance sections"><a href="#/journal">Journal overview</a><a href="#/journal-records">Trades & events</a><a href="#/manual-record">Add manual record</a><a href="#/evidence-import">Import sanitized evidence</a></nav><JournalOverviewPage />
   </div>
 }
