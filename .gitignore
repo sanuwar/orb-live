@@ -38,3 +38,7 @@ artifacts/operator-projection/
 # Research tooling: cached historical bars and generated study output
 # (Issue #298) -- never commit raw market-data dumps.
 artifacts/research-universe-expansion/
+
+# Research tooling: generated study output (Issue #300) -- reuses the
+# Issue #298 bar-cache above; no separate cache directory of its own.
+artifacts/research-gap-rvol-sensitivity/

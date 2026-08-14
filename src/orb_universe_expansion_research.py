@@ -274,6 +274,43 @@ def evaluate_symbol_session(
     session's minute bars plus at least `relative_volume_lookback_days`
     prior real sessions (for the previous close and median opening volume);
     `spy_bars` need only cover the session itself."""
+    evaluation, _, _, _ = evaluate_symbol_session_with_signal(
+        symbol=symbol, session_date=session_date, candidate_bars=candidate_bars,
+        spy_bars=spy_bars, config=config,
+    )
+    return evaluation
+
+
+@dataclass(frozen=True)
+class SessionSignalInputs:
+    """Threshold-independent inputs for one (symbol, session_date)
+    evaluation: opening range, median opening volume, and the completed-bar
+    entry-window walk (each bar paired with its own `LiveData`). Computing
+    these is the expensive part of `evaluate_symbol_session_with_signal` --
+    it scans the full, multi-month `candidate_bars`/`spy_bars` sequences --
+    and none of it depends on `minimum_gap_percent`/`minimum_relative_volume`
+    (or any other `SignalEngine` threshold). A caller sweeping many threshold
+    combinations over the same historical bars (e.g. the gap/RVOL
+    sensitivity study) should compute this ONCE per (symbol, session_date)
+    and reuse it for every combination via `resolve_session_signal`, rather
+    than re-scanning the full bar history once per combination.
+    `incomplete_reason` is `None` when every input was assembled
+    successfully; otherwise it is the `DATA_INCOMPLETE` reason
+    `evaluate_symbol_session` would have returned, and `opening_data`/
+    `window` are `None`/empty."""
+    incomplete_reason: str | None
+    opening_data: OpeningData | None
+    window: tuple[tuple[MinuteBar, LiveData], ...]
+
+
+def precompute_session_signal_inputs(
+    *,
+    symbol: str,
+    session_date: date,
+    candidate_bars: Sequence[MinuteBar],
+    spy_bars: Sequence[MinuteBar],
+    config: Mapping[str, Any],
+) -> SessionSignalInputs:
     opening_minutes = int(config["signal"]["opening_range_minutes"])
     lookback_days = int(config["signal"]["relative_volume_lookback_days"])
     session_open = session_open_for(session_date)
@@ -284,10 +321,7 @@ def evaluate_symbol_session(
             opening_range_minutes=opening_minutes, session_open=session_open,
         )
     except ValueError:
-        return SessionEvaluation(
-            symbol, session_date, DATA_INCOMPLETE, None, None, None,
-            incomplete_reason=MISSING_OPENING_RANGE_BARS,
-        )
+        return SessionSignalInputs(MISSING_OPENING_RANGE_BARS, None, ())
 
     try:
         median_volume = calculate_median_opening_volume(
@@ -295,20 +329,14 @@ def evaluate_symbol_session(
             opening_range_minutes=opening_minutes, session_open_for=session_open_for,
         )
     except ValueError:
-        return SessionEvaluation(
-            symbol, session_date, DATA_INCOMPLETE, None, None, None,
-            incomplete_reason=INSUFFICIENT_RVOL_LOOKBACK_HISTORY,
-        )
+        return SessionSignalInputs(INSUFFICIENT_RVOL_LOOKBACK_HISTORY, None, ())
 
     historical = [
         bar for bar in candidate_bars
         if bar.timestamp_et.date() < session_date and not bar.interpolated
     ]
     if not historical:
-        return SessionEvaluation(
-            symbol, session_date, DATA_INCOMPLETE, None, None, None,
-            incomplete_reason=MISSING_HISTORICAL_PRIOR_CLOSE,
-        )
+        return SessionSignalInputs(MISSING_HISTORICAL_PRIOR_CLOSE, None, ())
     today_bars = sorted(
         (
             bar for bar in candidate_bars
@@ -317,10 +345,7 @@ def evaluate_symbol_session(
         key=lambda bar: bar.begins_at,
     )
     if not today_bars:
-        return SessionEvaluation(
-            symbol, session_date, DATA_INCOMPLETE, None, None, None,
-            incomplete_reason=MISSING_TODAY_BARS,
-        )
+        return SessionSignalInputs(MISSING_TODAY_BARS, None, ())
     spy_today = sorted(
         (
             bar for bar in spy_bars
@@ -329,10 +354,7 @@ def evaluate_symbol_session(
         key=lambda bar: bar.begins_at,
     )
     if not spy_today:
-        return SessionEvaluation(
-            symbol, session_date, DATA_INCOMPLETE, None, None, None,
-            incomplete_reason=MISSING_SPY_BARS_FOR_SESSION,
-        )
+        return SessionSignalInputs(MISSING_SPY_BARS_FOR_SESSION, None, ())
     previous_close = max(historical, key=lambda bar: bar.begins_at).close_price
     today_open = today_bars[0].open_price
 
@@ -346,10 +368,6 @@ def evaluate_symbol_session(
         median_opening_volume=median_volume,
     )
 
-    evaluation_config = copy.deepcopy(dict(config))
-    evaluation_config["strategy"]["enabled"] = True  # in-memory only; never persisted
-    engine = SignalEngine(evaluation_config)
-
     entry_start = time.fromisoformat(config["signal"]["entry_start"])
     entry_end = time.fromisoformat(config["signal"]["entry_end"])
     # `SignalEngine.evaluate` checks the entry window against `live.timestamp`
@@ -362,12 +380,9 @@ def evaluate_symbol_session(
         if entry_start <= (bar.begins_at + timedelta(minutes=1)).astimezone(EASTERN).time() <= entry_end
     ]
     if not window_bars:
-        return SessionEvaluation(
-            symbol, session_date, DATA_INCOMPLETE, None, None, None,
-            incomplete_reason=MISSING_ENTRY_WINDOW_BARS,
-        )
+        return SessionSignalInputs(MISSING_ENTRY_WINDOW_BARS, None, ())
 
-    last_decision: SignalDecision | None = None
+    window: list[tuple[MinuteBar, LiveData]] = []
     for bar in window_bars:
         spy_up_to_now = [b for b in spy_today if b.begins_at <= bar.begins_at]
         if not spy_up_to_now:
@@ -376,43 +391,102 @@ def evaluate_symbol_session(
             spy_vwap = calculate_estimated_vwap(spy_up_to_now)
         except ValueError:
             continue
-        live_data = LiveData(
+        window.append((bar, LiveData(
             timestamp=bar.begins_at + timedelta(minutes=1),
             completed_bar_close=bar.close_price,
             spy_price=spy_up_to_now[-1].close_price,
             spy_vwap=spy_vwap,
-        )
-        decision = engine.evaluate(opening_data, live_data)
+        )))
+    return SessionSignalInputs(None, opening_data, tuple(window))
+
+
+def resolve_session_signal(
+    *,
+    symbol: str,
+    session_date: date,
+    inputs: SessionSignalInputs,
+    config: Mapping[str, Any],
+) -> tuple[SessionEvaluation, OpeningData | None, LiveData | None, SignalDecision | None]:
+    """The cheap, threshold-dependent half of
+    `evaluate_symbol_session_with_signal`: given already-precomputed
+    `SessionSignalInputs`, run only the `SignalEngine` gate order (gap ->
+    opening RVOL -> SPY/VWAP -> ORB breakout) against `config`'s thresholds.
+    Also returns the exact `OpeningData`/`LiveData`/`SignalDecision` the
+    canonical `SignalEngine` used for the approving bar when
+    `state == CANDIDATE` (all three `None` for every other terminal state),
+    so a caller (e.g. the gap/RVOL sensitivity study's trade-quality path)
+    can feed the identical approved signal into
+    `src.shadow_trading_decision.build_shadow_trading_decision` without
+    recomputing or reinterpreting the canonical entry/stop calculation."""
+    if inputs.incomplete_reason is not None:
+        return SessionEvaluation(
+            symbol, session_date, DATA_INCOMPLETE, None, None, None,
+            incomplete_reason=inputs.incomplete_reason,
+        ), None, None, None
+
+    evaluation_config = copy.deepcopy(dict(config))
+    evaluation_config["strategy"]["enabled"] = True  # in-memory only; never persisted
+    engine = SignalEngine(evaluation_config)
+
+    last_decision: SignalDecision | None = None
+    for bar, live_data in inputs.window:
+        decision = engine.evaluate(inputs.opening_data, live_data)
         last_decision = decision
         if decision.approved:
             return SessionEvaluation(
                 symbol, session_date, CANDIDATE, decision.gap_percent,
                 decision.relative_volume, bar.begins_at,
-            )
+            ), inputs.opening_data, live_data, decision
         if decision.reason == _GAP_REASON:
             return SessionEvaluation(
                 symbol, session_date, GAP_ELIMINATED, decision.gap_percent, None, None,
-            )
+            ), None, None, None
         if decision.reason == _RVOL_REASON:
             return SessionEvaluation(
                 symbol, session_date, RVOL_ELIMINATED,
                 decision.gap_percent, decision.relative_volume, None,
-            )
+            ), None, None, None
 
     if last_decision is None:
         return SessionEvaluation(
             symbol, session_date, DATA_INCOMPLETE, None, None, None,
             incomplete_reason=NO_EVALUABLE_MINUTE_IN_WINDOW,
-        )
+        ), None, None, None
     if last_decision.reason == _SPY_VWAP_REASON:
         return SessionEvaluation(
             symbol, session_date, SPY_VWAP_ELIMINATED,
             last_decision.gap_percent, last_decision.relative_volume, None,
-        )
+        ), None, None, None
     return SessionEvaluation(
         symbol, session_date, BREAKOUT_ELIMINATED,
         last_decision.gap_percent, last_decision.relative_volume, None,
+    ), None, None, None
+
+
+def evaluate_symbol_session_with_signal(
+    *,
+    symbol: str,
+    session_date: date,
+    candidate_bars: Sequence[MinuteBar],
+    spy_bars: Sequence[MinuteBar],
+    config: Mapping[str, Any],
+) -> tuple[SessionEvaluation, OpeningData | None, LiveData | None, SignalDecision | None]:
+    """Same evaluation as `evaluate_symbol_session`, additionally returning
+    the exact `OpeningData`/`LiveData`/`SignalDecision` the canonical
+    `SignalEngine` used for the approving bar when `state == CANDIDATE`
+    (all three `None` for every other terminal state). `evaluate_symbol_session`
+    above is a thin wrapper over this function that keeps its original
+    three-value return for every existing caller; this function is itself a
+    thin wrapper over `precompute_session_signal_inputs` +
+    `resolve_session_signal` for a single (symbol, session_date, config) --
+    a caller sweeping many threshold combinations over the same historical
+    bars should call those two functions directly instead, to avoid
+    re-scanning the bar history once per combination."""
+    inputs = precompute_session_signal_inputs(
+        symbol=symbol, session_date=session_date, candidate_bars=candidate_bars,
+        spy_bars=spy_bars, config=config,
     )
+    return resolve_session_signal(symbol=symbol, session_date=session_date, inputs=inputs, config=config)
 
 
 # ---------------------------------------------------------------------------
@@ -1134,18 +1208,21 @@ async def fetch_full_minute_history(
     )
 
 
-def eligible_minute_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetime) -> list[MinuteBar]:
-    """Quality-gate raw normalized bars before bridging to `MinuteBar`.
-    `MarketBar.to_minute_bar()` (`src/market_data_canonical.py`) is
-    documented to be called only on bars that already carry
-    `MarketDataQuality.VALID` -- this applies the same canonical fail-closed
-    gate (`validate_market_bar` / `validate_market_data_batch`) that
-    `_live_eligible_bars` applies in `src/live_shadow_session.py`, dropping
-    (never silently repairing) anything malformed, duplicate, out-of-order,
-    or outside the regular session, so extended-hours or corrupt bars never
-    contaminate an opening-range, RVOL, or breakout calculation."""
+def eligible_market_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetime) -> list[MarketBar]:
+    """Quality-gate raw normalized bars, returning the canonical `MarketBar`
+    objects themselves (not yet bridged to `MinuteBar`). Applies the same
+    fail-closed gate (`validate_market_bar` / `validate_market_data_batch`)
+    that `_live_eligible_bars` applies in `src/live_shadow_session.py`,
+    dropping (never silently repairing) anything malformed, duplicate,
+    out-of-order, or outside the regular session. Kept separate from
+    `eligible_minute_bars` below so a caller that needs the original
+    `MarketBar` representation -- e.g. the gap/RVOL sensitivity study's
+    trade-quality path, which feeds subsequent bars straight into
+    `src.shadow_execution_simulator.simulate_shadow_execution` -- does not
+    have to re-derive it from a `MinuteBar`, which cannot losslessly
+    reconstruct one."""
     batch = validate_market_data_batch(bars)
-    eligible: list[MinuteBar] = []
+    eligible: list[MarketBar] = []
     for index, bar in enumerate(bars):
         outcome = batch.get(
             index,
@@ -1155,8 +1232,17 @@ def eligible_minute_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetim
             ),
         )
         if outcome is MarketDataQuality.VALID:
-            eligible.append(bar.to_minute_bar())
+            eligible.append(bar)
     return eligible
+
+
+def eligible_minute_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetime) -> list[MinuteBar]:
+    """Quality-gate raw normalized bars before bridging to `MinuteBar`.
+    `MarketBar.to_minute_bar()` (`src/market_data_canonical.py`) is
+    documented to be called only on bars that already carry
+    `MarketDataQuality.VALID` -- see `eligible_market_bars` above, which
+    this is now a thin bridge over, for the actual filtering logic."""
+    return [bar.to_minute_bar() for bar in eligible_market_bars(bars, symbol=symbol, now=now)]
 
 
 def validate_cache_integrity(cache_dir: Path = DEFAULT_CACHE_DIR) -> dict[str, list[str]]:
@@ -1221,6 +1307,10 @@ __all__ = [
     "DATA_INCOMPLETE_REASONS",
     "SessionEvaluation",
     "evaluate_symbol_session",
+    "evaluate_symbol_session_with_signal",
+    "SessionSignalInputs",
+    "precompute_session_signal_inputs",
+    "resolve_session_signal",
     "MINIMUM_COVERAGE",
     "VALID_COVERAGE",
     "INVALID_INSUFFICIENT_COVERAGE",
@@ -1247,6 +1337,7 @@ __all__ = [
     "DEFAULT_FEED",
     "RESEARCH_FRESHNESS_POLICY",
     "fetch_full_minute_history",
+    "eligible_market_bars",
     "eligible_minute_bars",
     "validate_cache_integrity",
     "DEFAULT_CACHE_DIR",
