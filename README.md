@@ -42,6 +42,13 @@ Open the Operations page and use **Check readiness**. The service exposes only r
 ```powershell
 python scripts/check_morning_watch_readiness.py
 ```
+Authenticated remote viewing is a separate read-only service on
+`127.0.0.1:8777`; it never exposes or proxies the local-control port. Build the
+remote UI, configure its scrypt password hash and HTTPS Origin outside source
+control, then publish only port `8777` through an outbound Cloudflare Tunnel.
+See [`M25_REMOTE_READ_ONLY_MONITORING.md`](M25_REMOTE_READ_ONLY_MONITORING.md)
+for the exact local commands, endpoint inventory, allowlisted payload, and
+operator-owned hostname/tunnel setup.
 
 This is local-only: it checks source/configuration/calendar facts, reports only
 whether Alpaca credentials are present, and confirms that broker writes remain
@@ -215,9 +222,10 @@ ahead of its milestone:
   no protective order, so it recorded `NOT_OBSERVED` and promoted nothing — the
   mapping is still empty and grounding is still incomplete. *(Milestone 9 — the
   first automation milestone.)*
-- **`site/` has no broker or market-data connection.** Its only runtime-bound
-  surface is the M25.3 loopback service with four fixed observational watcher
-  operations; journal/evidence data remains browser-local. *(M25.)*
+- **`site/` has no broker or market-data connection.** Local Operations can
+  reach only the M25.3 loopback controller. The separate M25.6 remote bundle
+  reaches only same-origin authenticated session and sanitized projection
+  endpoints; it contains no watcher-control client or broker path. *(M25.)*
 
 ## Repository layout
 

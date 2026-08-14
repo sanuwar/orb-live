@@ -27,7 +27,7 @@ function productionSource(excluded = []) {
 
 describe('safety isolation', () => {
   it('keeps broker clients and all non-allowlisted network calls unreachable', () => {
-    const sourceWithoutLocalClient = productionSource(['localControlClient.js'])
+    const sourceWithoutAllowlistedClients = productionSource(['localControlClient.js', 'remoteClient.js'])
     const allSource = productionSource()
     const prohibitedEverywhere = [
       /\bXMLHttpRequest\b/,
@@ -42,7 +42,7 @@ describe('safety isolation', () => {
       /\b(?:exec|execFile|spawn|fork)\s*\(/,
     ]
 
-    expect(sourceWithoutLocalClient).not.toMatch(/\bfetch\s*\(/)
+    expect(sourceWithoutAllowlistedClients).not.toMatch(/\bfetch\s*\(/)
     prohibitedEverywhere.forEach((pattern) => expect(allSource).not.toMatch(pattern))
   })
 
@@ -54,6 +54,15 @@ describe('safety isolation', () => {
     expect(source).toContain("request('/start', 'POST')")
     expect(source).toContain("request('/stop', 'POST')")
     expect(source).not.toMatch(/0\.0\.0\.0|execute|run-command|shell|script|pid/i)
+  })
+
+  it('limits the remote client to same-origin auth and read-only monitoring routes', () => {
+    const source = readFileSync(join(sourceRoot, 'remote', 'remoteClient.js'), 'utf8')
+    expect(source).toContain("'/api/remote/session'")
+    expect(source).toContain("'/api/remote/projection'")
+    expect(source).toContain("'/api/auth/login'")
+    expect(source).toContain("'/api/auth/logout'")
+    expect(source).not.toMatch(/127\.0\.0\.1:8766|api\/local-control|readiness|start|stop|broker|commission/i)
   })
 
   it('contains no credential paths or fingerprint-like values', () => {
