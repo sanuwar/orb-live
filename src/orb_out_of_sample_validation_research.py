@@ -485,6 +485,7 @@ def simulate_candidate_signals_detailed(
     implementation_digest: str,
     created_at: datetime,
     run_label: str,
+    session_bounds_provider=None,
 ) -> tuple[dict[str, Any], list[ShadowExecutionResult]]:
     """Replays an arbitrary candidate-signal subset through the unmodified
     M15 shadow-execution simulator -- the same building blocks
@@ -496,7 +497,13 @@ def simulate_candidate_signals_detailed(
     and `simulate_shadow_execution`'s. Returns both the aggregate summary
     (`aggregate_trade_quality`, unmodified) and the raw per-trade results,
     which the aggregate alone cannot support (streaks, monthly/day/symbol
-    breakdowns)."""
+    breakdowns).
+
+    `session_bounds_provider`, if given, is forwarded to
+    `simulate_shadow_execution`'s own identically-named parameter; every
+    existing caller omits this and is unaffected (see
+    `src/shadow_execution_simulator.py` and
+    `src/orb_research_historical_calendar.py`)."""
     combo_config = sensitivity_config(base_config, gap_percent=combo.gap_percent, rvol_multiple=combo.rvol_multiple)
     strategy_version = f"{base_config['strategy']['name']}-{base_config['strategy']['version']}"
     shadow_run_id = f"oos-validation-{run_label}-{combo.label}"
@@ -513,7 +520,8 @@ def simulate_candidate_signals_detailed(
         )
         session_bars = _session_bars_for(candidate_bars, session_date=session_date)
         subsequent_bars = [bar for bar in session_bars if bar.event_timestamp >= shadow_decision.signal_timestamp]
-        results.append(simulate_shadow_execution(shadow_decision, subsequent_bars))
+        kwargs = {} if session_bounds_provider is None else {"session_bounds_provider": session_bounds_provider}
+        results.append(simulate_shadow_execution(shadow_decision, subsequent_bars, **kwargs))
     return aggregate_trade_quality(results), results
 
 
@@ -586,25 +594,30 @@ def one_trade_per_day_vs_all_candidates(
     base_config: Mapping[str, Any],
     implementation_digest: str,
     created_at: datetime,
+    session_bounds_provider=None,
 ) -> dict[str, Any]:
     """Goal item "V1 one-trade-per-day view": simulates the same
     configuration's candidates two ways -- every candidate (ALL_CANDIDATES,
     research-only, not current production behavior) and exactly one per day
     via `select_first_candidate_per_day` (ONE_TRADE_PER_DAY, matching
     current ORB-LIVE v1's own bound) -- and reports both aggregates plus
-    each view's extended stats side by side."""
+    each view's extended stats side by side.
+
+    `session_bounds_provider`, if given, is forwarded to
+    `simulate_candidate_signals_detailed`'s own identically-named
+    parameter; every existing caller omits this and is unaffected."""
     all_signals = evaluation.candidate_signals
     one_per_day_signals = select_first_candidate_per_day(all_signals)
 
     all_summary, all_results = simulate_candidate_signals_detailed(
         candidate_signals=all_signals, combo=combo, market_bars_by_symbol=market_bars_by_symbol,
         base_config=base_config, implementation_digest=implementation_digest, created_at=created_at,
-        run_label="all-candidates",
+        run_label="all-candidates", session_bounds_provider=session_bounds_provider,
     )
     one_summary, one_results = simulate_candidate_signals_detailed(
         candidate_signals=one_per_day_signals, combo=combo, market_bars_by_symbol=market_bars_by_symbol,
         base_config=base_config, implementation_digest=implementation_digest, created_at=created_at,
-        run_label="one-trade-per-day",
+        run_label="one-trade-per-day", session_bounds_provider=session_bounds_provider,
     )
 
     return {

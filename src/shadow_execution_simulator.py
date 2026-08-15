@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from src.config import load_config
+from src.exchange_calendar import regular_session_bounds
 from src.exit_engine import ExitAction, ExitEngine, PositionState
 from src.market_data_canonical import (
     MarketBar,
@@ -254,7 +255,10 @@ def _build_result(
     return ShadowExecutionResult(simulation_id=digest, simulation_digest=digest, **result_fields)
 
 
-def _validated_bars(decision: ShadowTradingDecision, bars: Sequence[MarketBar]) -> tuple[list[MarketBar], str, str | None]:
+def _validated_bars(
+    decision: ShadowTradingDecision, bars: Sequence[MarketBar], *,
+    session_bounds_provider: Callable[[date], tuple[time, time] | None] = regular_session_bounds,
+) -> tuple[list[MarketBar], str, str | None]:
     ordered = list(bars)
     if not ordered:
         return [], "", None
@@ -274,6 +278,7 @@ def _validated_bars(decision: ShadowTradingDecision, bars: Sequence[MarketBar]) 
                 expected_interval_seconds=60,
                 freshness_policy=HISTORICAL_POLICY,
                 now=now,
+                session_bounds_provider=session_bounds_provider,
             )
         if quality is not MarketDataQuality.VALID:
             return [], "", quality.value
@@ -284,17 +289,26 @@ def _validated_bars(decision: ShadowTradingDecision, bars: Sequence[MarketBar]) 
     return eligible, compute_market_data_batch_digest(digests) if digests else "", None
 
 
-def simulate_shadow_execution(decision: ShadowTradingDecision, subsequent_bars: Sequence[MarketBar]) -> ShadowExecutionResult:
+def simulate_shadow_execution(
+    decision: ShadowTradingDecision, subsequent_bars: Sequence[MarketBar], *,
+    session_bounds_provider: Callable[[date], tuple[time, time] | None] = regular_session_bounds,
+) -> ShadowExecutionResult:
     """Evaluate one immutable long candidate with conservative OHLC rules.
 
     A limit entry fills only on a later bar whose low reaches the candidate
     price.  Same-bar entry/stop or entry/target is ambiguous, as is a post-
     entry bar touching both stop and target; no favorable ordering is guessed.
-    """
+
+    `session_bounds_provider` defaults to the production `regular_session_
+    bounds` -- every existing caller omits it and is therefore unaffected.
+    It exists only so research code replaying candidates from historical
+    periods outside `src.exchange_calendar`'s own coverage can supply an
+    alternate, explicitly research-only provider, forwarded unchanged to
+    `_validated_bars`' own identically-defaulted parameter."""
     eligible, reason = _authentic_candidate(decision)
     if not eligible:
         return _build_result(decision, input_market_data_digest="", state=ShadowExecutionState.NOT_ELIGIBLE, reason_code=reason)
-    bars, input_digest, quality_reason = _validated_bars(decision, subsequent_bars)
+    bars, input_digest, quality_reason = _validated_bars(decision, subsequent_bars, session_bounds_provider=session_bounds_provider)
     if quality_reason is not None:
         return _build_result(decision, input_market_data_digest="", state=ShadowExecutionState.DATA_INVALID, reason_code=quality_reason)
     if not bars:

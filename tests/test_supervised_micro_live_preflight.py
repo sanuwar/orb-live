@@ -20,7 +20,7 @@ from src.supervised_micro_live_preflight import (
 DAY = date(2026, 8, 11)
 SIGNAL = datetime(2026, 8, 11, 14, 45, tzinfo=timezone.utc)
 REVIEWED = datetime(2026, 8, 11, 14, 50, tzinfo=timezone.utc)
-TRUSTED = "448f1e2739eb01d8606536723c7752c0e06a86e770c655489262d94553d9e114"
+TRUSTED = "f79587b9e58da0465973f8ac08ce26f7cb648a52952df6407c3c0a57abd4c53a"
 
 
 def candidate(kind=ShadowDecisionType.LONG_CANDIDATE):

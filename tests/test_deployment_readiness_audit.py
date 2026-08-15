@@ -143,6 +143,11 @@ def test_audit_uses_existing_contracts_and_expected_digest() -> None:
     # `session_bounds_provider` keyword to `session_open_for` and
     # `validate_market_bar` in the already-pinned src/market_data_canonical.py
     # -- no file added to or removed from the closure, content changed only.
-    assert report["implementation_digest"] == "448f1e2739eb01d8606536723c7752c0e06a86e770c655489262d94553d9e114"
+    # Issue #311 then added the identical optional, defaulted
+    # `session_bounds_provider` keyword to `_validated_bars` and
+    # `simulate_shadow_execution` in the already-pinned
+    # src/shadow_execution_simulator.py -- again no closure membership
+    # change, content changed only.
+    assert report["implementation_digest"] == "f79587b9e58da0465973f8ac08ce26f7cb648a52952df6407c3c0a57abd4c53a"
     assert report["pinned_file_count"] == 51
     assert report["architecture_audit_reference"] == "scripts/architecture_audit.py:audit_repository"
