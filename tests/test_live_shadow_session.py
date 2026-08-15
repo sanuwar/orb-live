@@ -304,7 +304,21 @@ def test_multi_symbol_request_budget_is_enforced(tmp_path):
     assert evidence["symbol_results"]["AAPL"]["evaluation_state"] == "VALID_DECISION"
 
 
-def test_cli_symbols_parsing_preserves_single_symbol_compatibility(tmp_path, capsys):
+def test_cli_symbols_parsing_preserves_single_symbol_compatibility(tmp_path, capsys, monkeypatch):
+    # main() has no --now/date override and run_session() falls back to the
+    # real wall clock when none is given (src/live_shadow_session.py:520),
+    # so this CLI-level test would otherwise fail on any non-trading day
+    # (e.g. a weekend) purely from when it happens to run. Every other test
+    # in this file pins `now=NOW` directly on run_session; the CLI path has
+    # no such hook, so the wall clock itself is pinned here instead, to the
+    # same fixed, known-trading-day NOW the rest of the file already uses.
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW if tz is None else NOW.astimezone(tz)
+
+    monkeypatch.setattr("src.live_shadow_session.datetime", _FixedDateTime)
+
     assert main(["--symbols", "AAPL,MSFT", "--output-dir", str(tmp_path)]) == 0
     multi_path = Path(capsys.readouterr().out.strip())
     assert json.loads(multi_path.read_text())["watchlist"] == ["AAPL", "MSFT"]

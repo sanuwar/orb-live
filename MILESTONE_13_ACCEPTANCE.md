@@ -52,7 +52,7 @@ provenance.
 ## 6. Final implementation digest
 
 ```
-c45f7610cde1e491016dccc49029c9df5c3eeb87e1ab504d625bb5f92edad9f6
+448f1e2739eb01d8606536723c7752c0e06a86e770c655489262d94553d9e114
 ```
 
 Independently reconstructed (separate hashing routine, separate
@@ -89,7 +89,13 @@ kill-switch/realized-daily-loss source exists yet). M20 Issue 1 later
 changed the content of the already-pinned `src/protection_grounding_
 assessment.py` to add broker-authoritative, reversible working-stop
 grounding without adding a pinned path or granting execution authority.
-Those reviewed changes moved the live digest to the value above.
+Issue #305 (injectable calendar seam, an out-of-sample-research enabling
+change) then changed the CONTENT of the already-pinned `src/market_data_
+canonical.py`, adding an optional, keyword-only `session_bounds_provider`
+parameter (default `regular_session_bounds`, i.e. current production
+behavior) to `session_open_for` and `validate_market_bar`, without adding
+or removing any pinned path or granting execution authority. Those
+reviewed changes moved the live digest to the value above.
 
 ## 7. Pinned file count
 

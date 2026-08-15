@@ -310,10 +310,17 @@ def precompute_session_signal_inputs(
     candidate_bars: Sequence[MinuteBar],
     spy_bars: Sequence[MinuteBar],
     config: Mapping[str, Any],
+    session_open_resolver: Callable[..., time] = session_open_for,
 ) -> SessionSignalInputs:
+    """`session_open_resolver` defaults to the production
+    `src.market_data_canonical.session_open_for` -- every existing caller
+    omits it and is therefore unaffected. Out-of-sample research passes a
+    partial application of `session_open_for` bound to an alternate
+    `session_bounds_provider` (see `src/orb_research_historical_calendar.py`)
+    instead."""
     opening_minutes = int(config["signal"]["opening_range_minutes"])
     lookback_days = int(config["signal"]["relative_volume_lookback_days"])
-    session_open = session_open_for(session_date)
+    session_open = session_open_resolver(session_date)
 
     try:
         opening_range = calculate_opening_range(
@@ -326,7 +333,7 @@ def precompute_session_signal_inputs(
     try:
         median_volume = calculate_median_opening_volume(
             candidate_bars, before_date=session_date, lookback_days=lookback_days,
-            opening_range_minutes=opening_minutes, session_open_for=session_open_for,
+            opening_range_minutes=opening_minutes, session_open_for=session_open_resolver,
         )
     except ValueError:
         return SessionSignalInputs(INSUFFICIENT_RVOL_LOOKBACK_HISTORY, None, ())
@@ -854,6 +861,7 @@ def compute_symbol_liquidity_profile(
     lookback_days: int,
     opening_range_minutes: int = 5,
     thresholds: LiquidityThresholds = DEFAULT_LIQUIDITY_THRESHOLDS,
+    session_open_resolver: Callable[..., time] = session_open_for,
 ) -> SymbolLiquidityProfile:
     """Derive one symbol's objective liquidity/data-quality profile
     directly from its real historical bars. Pure and deterministic given
@@ -909,7 +917,7 @@ def compute_symbol_liquidity_profile(
         try:
             calculate_opening_range(
                 day_bars, session_date=day, opening_range_minutes=opening_range_minutes,
-                session_open=session_open_for(day),
+                session_open=session_open_resolver(day),
             )
             opening_range_complete[day] = True
         except ValueError:
@@ -1208,7 +1216,10 @@ async def fetch_full_minute_history(
     )
 
 
-def eligible_market_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetime) -> list[MarketBar]:
+def eligible_market_bars(
+    bars: Sequence[MarketBar], *, symbol: str, now: datetime,
+    session_bounds_provider: Callable[[date], tuple[time, time] | None] = regular_session_bounds,
+) -> list[MarketBar]:
     """Quality-gate raw normalized bars, returning the canonical `MarketBar`
     objects themselves (not yet bridged to `MinuteBar`). Applies the same
     fail-closed gate (`validate_market_bar` / `validate_market_data_batch`)
@@ -1220,7 +1231,14 @@ def eligible_market_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetim
     trade-quality path, which feeds subsequent bars straight into
     `src.shadow_execution_simulator.simulate_shadow_execution` -- does not
     have to re-derive it from a `MinuteBar`, which cannot losslessly
-    reconstruct one."""
+    reconstruct one.
+
+    `session_bounds_provider` defaults to the production
+    `regular_session_bounds` and is forwarded unchanged to
+    `validate_market_bar`'s own identically-defaulted parameter -- every
+    existing caller omits it and is therefore unaffected. Out-of-sample
+    research passes an alternate research-only provider explicitly (see
+    `src/orb_research_historical_calendar.py`)."""
     batch = validate_market_data_batch(bars)
     eligible: list[MarketBar] = []
     for index, bar in enumerate(bars):
@@ -1229,6 +1247,7 @@ def eligible_market_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetim
             validate_market_bar(
                 bar, expected_symbol=symbol, expected_trading_date=bar.trading_date,
                 expected_interval_seconds=60, freshness_policy=RESEARCH_FRESHNESS_POLICY, now=now,
+                session_bounds_provider=session_bounds_provider,
             ),
         )
         if outcome is MarketDataQuality.VALID:
@@ -1236,13 +1255,19 @@ def eligible_market_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetim
     return eligible
 
 
-def eligible_minute_bars(bars: Sequence[MarketBar], *, symbol: str, now: datetime) -> list[MinuteBar]:
+def eligible_minute_bars(
+    bars: Sequence[MarketBar], *, symbol: str, now: datetime,
+    session_bounds_provider: Callable[[date], tuple[time, time] | None] = regular_session_bounds,
+) -> list[MinuteBar]:
     """Quality-gate raw normalized bars before bridging to `MinuteBar`.
     `MarketBar.to_minute_bar()` (`src/market_data_canonical.py`) is
     documented to be called only on bars that already carry
     `MarketDataQuality.VALID` -- see `eligible_market_bars` above, which
     this is now a thin bridge over, for the actual filtering logic."""
-    return [bar.to_minute_bar() for bar in eligible_market_bars(bars, symbol=symbol, now=now)]
+    return [
+        bar.to_minute_bar()
+        for bar in eligible_market_bars(bars, symbol=symbol, now=now, session_bounds_provider=session_bounds_provider)
+    ]
 
 
 def validate_cache_integrity(cache_dir: Path = DEFAULT_CACHE_DIR) -> dict[str, list[str]]:

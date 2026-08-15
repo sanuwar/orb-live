@@ -177,6 +177,7 @@ def precompute_inputs_table(
     minute_bars_by_symbol: Mapping[str, Sequence],
     spy_minute_bars: Sequence,
     base_config: Mapping[str, Any],
+    session_open_resolver=None,
 ) -> InputsTable:
     """Precompute `SessionSignalInputs` once for every (symbol, session_date)
     pair, using `base_config` (whose opening-range length, RVOL lookback,
@@ -187,14 +188,23 @@ def precompute_inputs_table(
     `evaluate_combo` below reuses this table across all 12 combinations, so
     the expensive full-history bar scan runs once per symbol/session, not
     once per symbol/session/combination -- a 12x reduction for this study's
-    matrix."""
+    matrix.
+
+    `session_open_resolver`, if given, is forwarded to
+    `precompute_session_signal_inputs`'s own identically-named parameter
+    (which defaults to the production `session_open_for` when omitted here
+    too). Out-of-sample research passes an alternate resolver bound to a
+    research-only calendar provider (see
+    `src/orb_research_historical_calendar.py`); every existing caller omits
+    this and is unaffected."""
     table: InputsTable = {}
+    kwargs = {} if session_open_resolver is None else {"session_open_resolver": session_open_resolver}
     for symbol in universe:
         candidate_bars = minute_bars_by_symbol[symbol]
         for session_date in session_dates:
             table[(symbol, session_date)] = precompute_session_signal_inputs(
                 symbol=symbol, session_date=session_date, candidate_bars=candidate_bars,
-                spy_bars=spy_minute_bars, config=base_config,
+                spy_bars=spy_minute_bars, config=base_config, **kwargs,
             )
     return table
 

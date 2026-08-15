@@ -139,6 +139,10 @@ def test_audit_uses_existing_contracts_and_expected_digest() -> None:
     # reached because execution_safety_governance_deferred_gates.py
     # (already pinned) deferred-imports it. Never copy a historical value
     # forward -- this asserts the current, live-recomputed values.
-    assert report["implementation_digest"] == "c45f7610cde1e491016dccc49029c9df5c3eeb87e1ab504d625bb5f92edad9f6"
+    # Issue #305 (injectable calendar seam) added an optional, defaulted
+    # `session_bounds_provider` keyword to `session_open_for` and
+    # `validate_market_bar` in the already-pinned src/market_data_canonical.py
+    # -- no file added to or removed from the closure, content changed only.
+    assert report["implementation_digest"] == "448f1e2739eb01d8606536723c7752c0e06a86e770c655489262d94553d9e114"
     assert report["pinned_file_count"] == 51
     assert report["architecture_audit_reference"] == "scripts/architecture_audit.py:audit_repository"
