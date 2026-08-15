@@ -1219,6 +1219,7 @@ async def fetch_full_minute_history(
 def eligible_market_bars(
     bars: Sequence[MarketBar], *, symbol: str, now: datetime,
     session_bounds_provider: Callable[[date], tuple[time, time] | None] = regular_session_bounds,
+    freshness_policy: MarketDataFreshnessPolicy = RESEARCH_FRESHNESS_POLICY,
 ) -> list[MarketBar]:
     """Quality-gate raw normalized bars, returning the canonical `MarketBar`
     objects themselves (not yet bridged to `MinuteBar`). Applies the same
@@ -1238,7 +1239,14 @@ def eligible_market_bars(
     `validate_market_bar`'s own identically-defaulted parameter -- every
     existing caller omits it and is therefore unaffected. Out-of-sample
     research passes an alternate research-only provider explicitly (see
-    `src/orb_research_historical_calendar.py`)."""
+    `src/orb_research_historical_calendar.py`).
+
+    `freshness_policy` defaults to `RESEARCH_FRESHNESS_POLICY` (400 days),
+    which comfortably covers every study up to and including Issue #302's
+    90-session window but not a study whose window itself reaches back
+    further than 400 days from the run date -- the out-of-sample validation
+    study (Issue #304) passes a wider policy explicitly rather than this
+    module silently widening the default for every caller."""
     batch = validate_market_data_batch(bars)
     eligible: list[MarketBar] = []
     for index, bar in enumerate(bars):
@@ -1246,7 +1254,7 @@ def eligible_market_bars(
             index,
             validate_market_bar(
                 bar, expected_symbol=symbol, expected_trading_date=bar.trading_date,
-                expected_interval_seconds=60, freshness_policy=RESEARCH_FRESHNESS_POLICY, now=now,
+                expected_interval_seconds=60, freshness_policy=freshness_policy, now=now,
                 session_bounds_provider=session_bounds_provider,
             ),
         )
@@ -1258,6 +1266,7 @@ def eligible_market_bars(
 def eligible_minute_bars(
     bars: Sequence[MarketBar], *, symbol: str, now: datetime,
     session_bounds_provider: Callable[[date], tuple[time, time] | None] = regular_session_bounds,
+    freshness_policy: MarketDataFreshnessPolicy = RESEARCH_FRESHNESS_POLICY,
 ) -> list[MinuteBar]:
     """Quality-gate raw normalized bars before bridging to `MinuteBar`.
     `MarketBar.to_minute_bar()` (`src/market_data_canonical.py`) is
@@ -1266,7 +1275,10 @@ def eligible_minute_bars(
     this is now a thin bridge over, for the actual filtering logic."""
     return [
         bar.to_minute_bar()
-        for bar in eligible_market_bars(bars, symbol=symbol, now=now, session_bounds_provider=session_bounds_provider)
+        for bar in eligible_market_bars(
+            bars, symbol=symbol, now=now, session_bounds_provider=session_bounds_provider,
+            freshness_policy=freshness_policy,
+        )
     ]
 
 
