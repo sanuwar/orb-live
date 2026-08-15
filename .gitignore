@@ -46,3 +46,7 @@ artifacts/research-gap-rvol-sensitivity/
 # Research tooling: generated study output (Issue #302) -- reuses the
 # Issue #298 bar-cache above; no separate cache directory of its own.
 artifacts/research-fine-rvol-validation/
+
+# Research tooling: generated study output (Issue #304) -- reuses the
+# Issue #298 bar-cache above; no separate cache directory of its own.
+artifacts/research-out-of-sample-validation/
