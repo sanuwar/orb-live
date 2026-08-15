@@ -1,7 +1,10 @@
 from pathlib import Path
 
+import yaml
 
-WORKFLOW = (Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+
+WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml"
+WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8")
 
 
 def test_exact_sha_dispatch_is_declared_and_pinned() -> None:
@@ -25,3 +28,27 @@ def test_exact_sha_workflow_keeps_minimal_permissions_and_required_verifiers() -
     assert "python scripts/verify_operator_routes.py" in WORKFLOW
     assert "python scripts/verify_operator_milestone.py" in WORKFLOW
     assert "python -m pytest -q tests/test_architecture_audit.py" in WORKFLOW
+
+
+def test_workflow_yaml_is_well_formed() -> None:
+    parsed = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    assert "concurrency" in parsed
+    assert "jobs" in parsed and "test" in parsed["jobs"]
+
+
+def test_concurrency_cancels_superseded_runs_without_using_ref() -> None:
+    concurrency = yaml.safe_load(WORKFLOW)["concurrency"]
+    assert concurrency["group"] == "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}"
+    assert concurrency["cancel-in-progress"] is True
+    # The exact-SHA dispatch path's own invariant (never reference the ref
+    # context expression anywhere in this file) must still hold with the
+    # concurrency block present.
+    assert "github.ref" not in WORKFLOW
+
+
+def test_push_trigger_still_scoped_to_main_only() -> None:
+    triggers = yaml.safe_load(WORKFLOW)[True]  # bare `on:` parses as the YAML 1.1 boolean key True
+    assert triggers["push"]["branches"] == ["main"]
+    assert "pull_request" in triggers
+    assert "workflow_dispatch" in triggers
