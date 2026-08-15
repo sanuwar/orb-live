@@ -16,6 +16,21 @@ on:
         required: false
         type: string
 
+concurrency:
+  # Grouped by PR number, not by branch/ref: this workflow's own exact-SHA
+  # dispatch path (below) deliberately never spells out the two-word
+  # "github dot ref" context expression anywhere in this file (see
+  # tests/test_exact_sha_workflow.py), so a PR-number-based group --
+  # falling back to the run's own unique `github.run_id` for push-to-main
+  # and workflow_dispatch runs, which therefore never collide with
+  # anything and always run to completion -- gets the same effect without
+  # touching that invariant.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  # A newer push to the same PR makes an in-flight run's result moot --
+  # only the latest commit's outcome ever gates a merge, so the superseded
+  # run is cancelled rather than left to burn minutes to completion.
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
