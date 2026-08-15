@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Sequence
+from typing import Callable, Sequence
 
 from src.exchange_calendar import EASTERN, regular_session_bounds
 from src.market_data import MinuteBar
@@ -274,11 +274,19 @@ def validate_market_bar(
     expected_interval_seconds: int,
     freshness_policy: MarketDataFreshnessPolicy,
     now: datetime,
+    session_bounds_provider: Callable[[date], tuple[time, time] | None] = regular_session_bounds,
 ) -> MarketDataQuality:
     """The fail-closed per-bar quality gate. Every branch below returns a
     specific rejection reason; nothing here ever repairs or substitutes a
     value. Order is cheapest-and-most-specific first, but no check is
-    skipped on the strength of another passing."""
+    skipped on the strength of another passing.
+
+    `session_bounds_provider` defaults to the production
+    `regular_session_bounds` -- every existing caller omits it and is
+    therefore unaffected. It exists only so research code evaluating
+    historical periods outside `src.exchange_calendar`'s own coverage can
+    supply an alternate, explicitly research-only provider, without this
+    module ever importing or knowing about that provider itself."""
     _require_aware(now, label="now")
 
     structural = _classify_structural_defects(bar)
@@ -298,7 +306,7 @@ def validate_market_bar(
     if age_seconds > freshness_policy.max_age_seconds:
         return MarketDataQuality.STALE
 
-    bounds = regular_session_bounds(bar.trading_date)
+    bounds = session_bounds_provider(bar.trading_date)
     if bounds is None:
         return MarketDataQuality.MARKET_HOLIDAY
     session_open, session_close = bounds
@@ -378,14 +386,23 @@ def validate_market_data_batch(
     return overrides
 
 
-def session_open_for(trading_date: date) -> time:
+def session_open_for(
+    trading_date: date,
+    *,
+    session_bounds_provider: Callable[[date], tuple[time, time] | None] = regular_session_bounds,
+) -> time:
     """The authoritative session open for `trading_date`, derived from
     `src.exchange_calendar.regular_session_bounds` rather than a hardcoded
     constant. Raises if the date is not a trading day -- callers computing
     an opening range for a non-trading day have already made a mistake
     upstream (the quality gate above independently catches this too, via
-    MARKET_HOLIDAY, for data that arrives despite that mistake)."""
-    bounds = regular_session_bounds(trading_date)
+    MARKET_HOLIDAY, for data that arrives despite that mistake).
+
+    `session_bounds_provider` defaults to the production
+    `regular_session_bounds` -- every existing caller omits it and is
+    therefore unaffected. See `validate_market_bar`'s identical parameter
+    for why this seam exists."""
+    bounds = session_bounds_provider(trading_date)
     if bounds is None:
         raise MarketDataError(f"{trading_date.isoformat()} is not a trading day")
     return bounds[0]
