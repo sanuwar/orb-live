@@ -52,7 +52,7 @@ provenance.
 ## 6. Final implementation digest
 
 ```
-448f1e2739eb01d8606536723c7752c0e06a86e770c655489262d94553d9e114
+f79587b9e58da0465973f8ac08ce26f7cb648a52952df6407c3c0a57abd4c53a
 ```
 
 Independently reconstructed (separate hashing routine, separate
@@ -94,8 +94,14 @@ change) then changed the CONTENT of the already-pinned `src/market_data_
 canonical.py`, adding an optional, keyword-only `session_bounds_provider`
 parameter (default `regular_session_bounds`, i.e. current production
 behavior) to `session_open_for` and `validate_market_bar`, without adding
-or removing any pinned path or granting execution authority. Those
-reviewed changes moved the live digest to the value above.
+or removing any pinned path or granting execution authority. Issue #311
+(the same enabling pattern, one call site deeper) then changed the CONTENT
+of the already-pinned `src/shadow_execution_simulator.py`, adding the
+identical optional, keyword-only `session_bounds_provider` parameter
+(same default, same current-production-behavior guarantee) to
+`_validated_bars` and `simulate_shadow_execution`, again without adding or
+removing any pinned path or granting execution authority. Those reviewed
+changes moved the live digest to the value above.
 
 ## 7. Pinned file count
 

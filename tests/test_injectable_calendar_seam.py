@@ -170,13 +170,28 @@ PRODUCTION_ENTRY_POINTS = (
 )
 
 
+#: Files whose *own* pinned implementation legitimately forwards its own
+#: default-preserving `session_bounds_provider` parameter internally
+#: (e.g. `shadow_execution_simulator.simulate_shadow_execution` ->
+#: `_validated_bars`, added by Issue #311) -- safe by construction because
+#: the parameter still defaults to `regular_session_bounds` there. The
+#: literal-keyword check below is skipped only for these; the
+#: research-provider-name check still applies to every production file.
+FILES_WITH_OWN_DEFAULT_PRESERVING_FORWARDING = frozenset({"src/shadow_execution_simulator.py"})
+
+
 @pytest.mark.parametrize("relative_path", PRODUCTION_ENTRY_POINTS)
 def test_no_production_file_passes_session_bounds_provider(relative_path):
     full_path = REPOSITORY_ROOT / relative_path
     if not full_path.exists():
         pytest.skip(f"{relative_path} not present")
     source = full_path.read_text(encoding="utf-8")
-    assert "session_bounds_provider=" not in source
+    # The real risk is a production file wiring in the RESEARCH-ONLY
+    # provider itself -- checked unconditionally for every file here.
+    assert "research_regular_session_bounds" not in source
+    assert "orb_research_historical_calendar" not in source
+    if relative_path not in FILES_WITH_OWN_DEFAULT_PRESERVING_FORWARDING:
+        assert "session_bounds_provider=" not in source
     assert "session_open_resolver=" not in source
 
 

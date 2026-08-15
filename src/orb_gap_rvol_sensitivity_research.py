@@ -428,13 +428,21 @@ def simulate_combo_trade_quality(
     base_config: Mapping[str, Any],
     implementation_digest: str,
     created_at: datetime,
+    session_bounds_provider=None,
 ) -> dict[str, Any]:
     """For every `CANDIDATE` this combination produced, replay it through
     `simulate_shadow_execution` (ORB V0's own exit rules, unmodified) using
     the real subsequent same-day bars, then aggregate to the metrics goal
     item 8 requests. ORB V0 never holds overnight (`ExitEngine`'s own
     `exit.time_exit` forces a same-day exit) so subsequent bars are bounded
-    to the candidate's own session date."""
+    to the candidate's own session date.
+
+    `session_bounds_provider`, if given, is forwarded to
+    `simulate_shadow_execution`'s own identically-named parameter (which
+    defaults to the production `regular_session_bounds` when omitted here
+    too). Out-of-sample research passes an alternate research-only provider
+    explicitly (see `src/orb_research_historical_calendar.py`); every
+    existing caller omits this and is unaffected."""
     combo_config = sensitivity_config(
         base_config, gap_percent=evaluation.combo.gap_percent, rvol_multiple=evaluation.combo.rvol_multiple,
     )
@@ -453,7 +461,8 @@ def simulate_combo_trade_quality(
         )
         session_bars = _session_bars(candidate_bars, session_date=session_date)
         subsequent_bars = [bar for bar in session_bars if bar.event_timestamp >= shadow_decision.signal_timestamp]
-        results.append(simulate_shadow_execution(shadow_decision, subsequent_bars))
+        kwargs = {} if session_bounds_provider is None else {"session_bounds_provider": session_bounds_provider}
+        results.append(simulate_shadow_execution(shadow_decision, subsequent_bars, **kwargs))
     return aggregate_trade_quality(results)
 
 
