@@ -43,6 +43,7 @@ import csv
 import json
 import os
 import sys
+from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
 from functools import partial
 from pathlib import Path
@@ -75,6 +76,7 @@ from src.orb_out_of_sample_validation_research import (
     one_trade_per_day_vs_all_candidates,
     precompute_inputs_table,
     same_day_symbol_combinations,
+    simulate_candidate_signals_detailed,
     simulate_combo_trade_quality,
 )
 from src.orb_research_historical_calendar import (
@@ -276,6 +278,7 @@ async def _run(
         trade_quality_by_combo[combo] = simulate_combo_trade_quality(
             evaluation=evaluations_by_combo[combo], market_bars_by_symbol=market_bars_by_symbol,
             base_config=config, implementation_digest=implementation_digest, created_at=created_at,
+            session_bounds_provider=research_regular_session_bounds,
         )
         tq = trade_quality_by_combo[combo]
         print(
@@ -283,12 +286,39 @@ async def _run(
             f"win_rate={tq['win_rate']}, expectancy={tq['expectancy_per_trade']}, pf={tq['profit_factor']}"
         )
 
+    print("Validation: proving the Issue #311 calendar seam removed the 2025 DATA_INVALID truncation")
+    validation_by_combo = {}
+    for combo in config_matrix():
+        _, raw_results = simulate_candidate_signals_detailed(
+            candidate_signals=evaluations_by_combo[combo].candidate_signals, combo=combo,
+            market_bars_by_symbol=market_bars_by_symbol, base_config=config,
+            implementation_digest=implementation_digest, created_at=created_at,
+            run_label="validation", session_bounds_provider=research_regular_session_bounds,
+        )
+        state_counts = Counter(r.state.value for r in raw_results)
+        data_invalid_reasons = Counter(r.reason_code for r in raw_results if r.state.value == "DATA_INVALID")
+        closed_by_month = Counter(
+            r.trading_date.strftime("%Y-%m") for r in raw_results if r.realized_pnl is not None
+        )
+        validation_by_combo[combo] = {
+            "state_distribution": dict(sorted(state_counts.items())),
+            "data_invalid_reason_distribution": dict(sorted(data_invalid_reasons.items())),
+            "closed_trades_by_month": dict(sorted(closed_by_month.items())),
+        }
+        market_holiday_data_invalid = data_invalid_reasons.get("MARKET_HOLIDAY", 0)
+        print(
+            f"  [{CONFIG_LABELS[combo]}] states={dict(sorted(state_counts.items()))}, "
+            f"MARKET_HOLIDAY-attributed DATA_INVALID={market_holiday_data_invalid}"
+        )
+        print(f"  [{CONFIG_LABELS[combo]}] closed trades by month: {dict(sorted(closed_by_month.items()))}")
+
     print("One-trade-per-day vs all-candidates: replaying both views per configuration")
     one_vs_all_by_combo = {}
     for combo in config_matrix():
         one_vs_all_by_combo[combo] = one_trade_per_day_vs_all_candidates(
             combo=combo, evaluation=evaluations_by_combo[combo], market_bars_by_symbol=market_bars_by_symbol,
             base_config=config, implementation_digest=implementation_digest, created_at=created_at,
+            session_bounds_provider=research_regular_session_bounds,
         )
         ova = one_vs_all_by_combo[combo]
         print(
@@ -325,7 +355,21 @@ async def _run(
     print(f"  FINAL DECISION: {decision['decision']}")
 
     report = {
-        "issue": 304,
+        "issue": 313,
+        "corrects_issue": 304,
+        "corrects_pr": 307,
+        "correction_root_cause_issue": 311,
+        "correction_note": (
+            "This report supersedes the trade-quality figures in the merged Issue #304/PR #307 "
+            "artifact. That prior run never supplied a session_bounds_provider into "
+            "simulate_shadow_execution, so every subsequent bar on a 2025 date was classified "
+            "MARKET_HOLIDAY against the production-only calendar and the whole simulated trade "
+            "returned DATA_INVALID -- silently excluded from 'closed trades.' Candidate selection "
+            "(candidate days/rate, universe) was unaffected and is expected to match #307 exactly; "
+            "only trade-quality figures (expectancy, profit factor, win rate, drawdown, robustness) "
+            "changed. See docs/research/ORB_OUT_OF_SAMPLE_VALIDATION_CORRECTION.md for the full "
+            "old-vs-corrected comparison."
+        ),
         "discovery_period": DISCOVERY_PERIOD,
         "out_of_sample_period": {
             "reference_day": reference_day.isoformat(),
@@ -378,6 +422,7 @@ async def _run(
                 "multiplicity_distribution": distribution_by_combo[combo],
                 "common_same_day_symbol_combinations": combinations_by_combo[combo],
                 "one_trade_per_day_vs_all_candidates": one_vs_all_by_combo[combo],
+                "calendar_truncation_validation": validation_by_combo[combo],
             }
             for combo in config_matrix()
         },
