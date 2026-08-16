@@ -1,5 +1,19 @@
 # ORB Out-of-Sample Historical Validation (Issue #304)
 
+> **⚠ SUPERSEDED (Issue #313).** The trade-quality figures below (closed
+> trades, win rate, expectancy, profit factor, max drawdown, robustness
+> classification, and the final decision `RESEARCH_CONFIGURATION_NOT_ROBUST`)
+> were computed from a bug (Issue #311, fixed by merged PR #312) that
+> silently truncated 2025 simulated trades to `DATA_INVALID`, leaving an
+> effective ~63-session subset instead of the full 252-session period.
+> Candidate-frequency numbers (candidate days, candidate-day rate, total
+> candidates) below are unaffected and confirmed unchanged on rerun.
+> **See `docs/research/ORB_OUT_OF_SAMPLE_VALIDATION_CORRECTION.md` for the
+> corrected trade-quality results and superseding final decision
+> (`READY_FOR_PRODUCTION_PARAMETER_REVIEW`).** This document is left intact
+> below as the historical record of what was originally measured and why
+> it was wrong -- not silently rewritten.
+
 Research-only. Answers one question: **if ORB-LIVE had actually followed
 the current business logic over a historical period it was never tuned
 on, would it have been profitable?**
