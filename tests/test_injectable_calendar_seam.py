@@ -156,6 +156,41 @@ def test_research_calendar_provider_resolves_a_known_2025_session_through_the_se
     assert resolved == time(9, 30)
 
 
+def test_research_calendar_provider_resolves_a_known_2024_session_through_the_seam():
+    """Third-period validation (Issue #317) reaches into 2024 -- the research
+    calendar's floor was extended from 2025-01-01 to 2024-01-01 for exactly
+    this reason (see `src/orb_research_historical_calendar.py`)."""
+    from src.orb_research_historical_calendar import research_regular_session_bounds
+
+    resolved = session_open_for(date(2024, 4, 3), session_bounds_provider=research_regular_session_bounds)
+    assert resolved == time(9, 30)
+
+
+def test_validate_market_bar_accepts_a_2024_bar_through_the_research_provider():
+    from src.orb_research_historical_calendar import research_regular_session_bounds
+
+    trading_date = date(2024, 4, 3)
+    # Built directly rather than through `_bar()`: that helper's own default
+    # `open_time = session_open_for(trading_date)` uses the PRODUCTION
+    # calendar unconditionally and would raise for a 2024 date (production
+    # coverage starts 2026-01-01) before this test ever reaches the seam
+    # under test.
+    event = datetime.combine(trading_date, time(9, 30), tzinfo=EASTERN)
+    b = MarketBar(
+        symbol="AAPL", exchange_session="REGULAR", trading_date=trading_date, event_timestamp=event,
+        end_timestamp=event + timedelta(minutes=1), receive_timestamp=event + timedelta(seconds=1),
+        open=Decimal("200.00"), high=Decimal("201.00"), low=Decimal("199.50"), close=Decimal("200.50"),
+        volume=10_000, source=SOURCE, interval_seconds=60, provider_sequence_id="seq-2024",
+        quality=MarketDataQuality.VALID,
+    )
+    outcome = validate_market_bar(
+        b, expected_symbol="AAPL", expected_trading_date=trading_date, expected_interval_seconds=60,
+        freshness_policy=MarketDataFreshnessPolicy(version="test-v1", max_age_seconds=1100 * 86400.0),
+        now=b.event_timestamp + timedelta(seconds=30), session_bounds_provider=research_regular_session_bounds,
+    )
+    assert outcome is MarketDataQuality.VALID
+
+
 # ---------------------------------------------------------------------------
 # 8. No production/live launcher path ever supplies a non-default provider.
 # ---------------------------------------------------------------------------

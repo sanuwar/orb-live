@@ -82,6 +82,54 @@ def test_2025_weekend_is_closed():
     assert research_regular_session_bounds(date(2025, 4, 5)) is None  # Saturday
 
 
+@pytest.mark.parametrize(
+    "day",
+    [
+        date(2024, 1, 1),   # New Year's Day
+        date(2024, 1, 15),  # MLK Day
+        date(2024, 2, 19),  # Washington's Birthday
+        date(2024, 3, 29),  # Good Friday
+        date(2024, 5, 27),  # Memorial Day
+        date(2024, 6, 19),  # Juneteenth
+        date(2024, 7, 4),   # Independence Day
+        date(2024, 9, 2),   # Labor Day
+        date(2024, 11, 28), # Thanksgiving
+        date(2024, 12, 25), # Christmas
+    ],
+)
+def test_2024_full_holidays_are_closed(day):
+    assert research_regular_session_bounds(day) is None
+
+
+@pytest.mark.parametrize("day", [date(2024, 7, 3), date(2024, 11, 29), date(2024, 12, 24)])
+def test_2024_early_closes_end_at_1pm(day):
+    bounds = research_regular_session_bounds(day)
+    assert bounds == (REGULAR_OPEN, EARLY_REGULAR_CLOSE)
+
+
+def test_ordinary_2024_trading_day_uses_regular_hours():
+    assert research_regular_session_bounds(date(2024, 4, 3)) == (REGULAR_OPEN, REGULAR_CLOSE)
+
+
+def test_2024_weekend_is_closed():
+    assert research_regular_session_bounds(date(2024, 4, 6)) is None  # Saturday
+
+
+def test_2024_and_2025_holiday_tables_are_disjoint():
+    from src.orb_research_historical_calendar import RESEARCH_FULL_HOLIDAYS_2024, RESEARCH_FULL_HOLIDAYS_2025
+
+    assert not (RESEARCH_FULL_HOLIDAYS_2024 & RESEARCH_FULL_HOLIDAYS_2025)
+
+
+def test_year_end_boundary_between_2024_and_2025_tables_is_seamless():
+    # 2024-12-31 (Tue, ordinary trading day) and 2025-01-02 (Thu, ordinary
+    # trading day) must both resolve correctly across the internal 2024/2025
+    # table split, with 2025-01-01 (New Year's Day) closed in between.
+    assert research_regular_session_bounds(date(2024, 12, 31)) == (REGULAR_OPEN, REGULAR_CLOSE)
+    assert research_regular_session_bounds(date(2025, 1, 1)) is None
+    assert research_regular_session_bounds(date(2025, 1, 2)) == (REGULAR_OPEN, REGULAR_CLOSE)
+
+
 def test_dates_inside_production_coverage_delegate_unchanged():
     for day in (date(2026, 1, 2), date(2026, 4, 6), date(2026, 11, 27)):
         assert research_regular_session_bounds(day) == regular_session_bounds(day)
@@ -89,7 +137,7 @@ def test_dates_inside_production_coverage_delegate_unchanged():
 
 def test_date_before_research_coverage_floor_raises():
     with pytest.raises(ResearchCalendarError):
-        research_regular_session_bounds(date(2024, 12, 31))
+        research_regular_session_bounds(date(2023, 12, 31))
 
 
 def test_datetime_input_raises_instead_of_silently_truncating():
@@ -97,8 +145,8 @@ def test_datetime_input_raises_instead_of_silently_truncating():
         research_regular_session_bounds(datetime(2025, 4, 3, 9, 30))  # type: ignore[arg-type]
 
 
-def test_research_calendar_first_supported_date_is_2025_01_01():
-    assert RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE == date(2025, 1, 1)
+def test_research_calendar_first_supported_date_is_2024_01_01():
+    assert RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE == date(2024, 1, 1)
 
 
 def test_trading_sessions_before_returns_oldest_first_and_excludes_reference_day():
@@ -119,9 +167,27 @@ def test_trading_sessions_before_252_ending_before_discovery_period_has_no_overl
     assert not (set(oos_sessions) & discovery_sessions)
 
 
-def test_trading_sessions_before_beyond_2025_coverage_fails_closed():
+def test_trading_sessions_before_beyond_2024_coverage_fails_closed():
     with pytest.raises(ResearchCalendarError):
-        research_trading_sessions_before(date(2026, 4, 7), count=400)
+        research_trading_sessions_before(date(2026, 4, 7), count=600)
+
+
+def test_third_period_252_ending_before_oos_period_has_no_overlap():
+    # The third-period validation study (Issue TBD) window: 252 sessions
+    # ending immediately before the OOS study's own first session
+    # (2025-04-03), reaching back into 2024 -- the reason this module's
+    # floor was extended from 2025-01-01 to 2024-01-01.
+    third_period_sessions = research_trading_sessions_before(date(2025, 4, 3), count=252)
+    assert len(third_period_sessions) == 252
+    assert third_period_sessions[-1] < date(2025, 4, 3)
+
+    oos_sessions = set(research_trading_sessions_before(date(2026, 4, 7), count=252))
+    assert not (set(third_period_sessions) & oos_sessions)
+
+    from src.orb_universe_expansion_research import trading_sessions_before
+
+    discovery_sessions = set(trading_sessions_before(date(2026, 8, 14), count=90))
+    assert not (set(third_period_sessions) & discovery_sessions)
 
 
 def test_trading_sessions_before_rejects_non_positive_count():
