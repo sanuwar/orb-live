@@ -6,8 +6,6 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from src.orb_baseline_fourth_period_research import ANCHORED_COHORT
 from src.orb_existing_configs_reevaluation_research import FROZEN_CONFIG_SET
 from src.orb_independent_single_trade_core_validation_research import (
@@ -27,7 +25,6 @@ from src.orb_independent_single_trade_core_validation_research import (
     p_minus_1_coverage_gap,
     recommend_next_milestone,
 )
-from src.orb_research_historical_calendar import ResearchCalendarError
 
 
 # ---------------------------------------------------------------------------
@@ -86,17 +83,24 @@ def test_p_minus_1_session_count_is_252():
     assert P_MINUS_1_SESSION_COUNT == 252
 
 
-def test_derive_p_minus_1_sessions_raises_given_current_calendar_coverage():
-    # As of this module's authorship the research calendar only covers
-    # 2023-01-01 onward and P_MINUS_1 reaches back to ~2022-04; this must
-    # fail closed (propagate ResearchCalendarError), never silently return
-    # a shorter window.
-    with pytest.raises(ResearchCalendarError):
-        derive_p_minus_1_sessions()
+def test_derive_p_minus_1_sessions_succeeds_now_that_calendar_covers_2022():
+    # The research-only calendar was extended to 2022-01-01 (local
+    # milestone M40, this module's own follow-up) specifically so this
+    # window -- 252 sessions strictly before P0's own start date -- is
+    # fully computable. Exact dates pinned here so a future calendar
+    # regression fails loudly.
+    sessions = derive_p_minus_1_sessions()
+    assert len(sessions) == 252
+    assert sessions[0] == date(2022, 3, 30)
+    assert sessions[-1] == date(2023, 3, 30)
+    assert sessions[-1] < P0_START
 
 
 # ---------------------------------------------------------------------------
 # Coverage-gap detector: documents the exact shortfall, never estimates.
+# (The real P_MINUS_1 window is fully covered as of the calendar
+# extension above; a synthetic, deliberately-oversized window is used
+# below to keep this code path under test rather than deleting it.)
 
 def test_coverage_gap_is_none_when_window_is_fully_computable():
     # A window entirely inside covered research-calendar territory (e.g.
@@ -106,19 +110,27 @@ def test_coverage_gap_is_none_when_window_is_fully_computable():
     assert gap is None
 
 
-def test_coverage_gap_reports_the_real_current_shortfall():
+def test_coverage_gap_is_none_for_the_actual_p_minus_1_window():
     gap = p_minus_1_coverage_gap()
+    assert gap is None
+
+
+def test_coverage_gap_reports_a_real_shortfall_for_an_oversized_window():
+    # A window that reaches past the (now 2022-01-01) calendar floor still
+    # produces a structured gap report -- the detector itself is not
+    # hardcoded to any one year boundary.
+    gap = p_minus_1_coverage_gap(reference_day=date(2023, 3, 31), count=2000)
     assert gap is not None
-    assert gap.requested_session_count == 252
+    assert gap.requested_session_count == 2000
     assert gap.reference_day == date(2023, 3, 31)
-    assert gap.calendar_lower_bound == date(2023, 1, 1)
-    assert gap.sessions_available_within_calendar_coverage < 252
-    assert gap.sessions_short == 252 - gap.sessions_available_within_calendar_coverage
+    assert gap.calendar_lower_bound == date(2022, 1, 1)
+    assert gap.sessions_available_within_calendar_coverage < 2000
+    assert gap.sessions_short == 2000 - gap.sessions_available_within_calendar_coverage
     assert gap.sessions_short > 0
 
 
 def test_coverage_gap_detail_names_both_missing_prerequisites():
-    gap = p_minus_1_coverage_gap()
+    gap = p_minus_1_coverage_gap(reference_day=date(2023, 3, 31), count=2000)
     assert gap is not None
     assert "calendar" in gap.detail.lower()
     assert "alpaca" in gap.detail.lower() or "network fetch" in gap.detail.lower()
@@ -132,10 +144,10 @@ def test_earliest_cached_bar_utc_reads_existing_cache_without_fetching(tmp_path:
 def test_coverage_gap_includes_earliest_cached_bar_when_cache_dir_given():
     from src.orb_universe_expansion_research import DEFAULT_CACHE_DIR
 
-    gap = p_minus_1_coverage_gap(cache_dir=DEFAULT_CACHE_DIR)
+    gap = p_minus_1_coverage_gap(reference_day=date(2023, 3, 31), count=2000, cache_dir=DEFAULT_CACHE_DIR)
     assert gap is not None
     assert gap.earliest_cached_bar_utc is not None
-    assert gap.earliest_cached_bar_utc >= "2023-01-01"
+    assert gap.earliest_cached_bar_utc >= "2022-01-01"
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +158,7 @@ def _tq(*, closed, exp_r, pf_r, pf_r_inf=False):
 
 
 def test_classify_insufficient_sample_when_coverage_gap_present():
-    gap = p_minus_1_coverage_gap()
+    gap = p_minus_1_coverage_gap(reference_day=date(2023, 3, 31), count=2000)
     result = classify_validation(
         one_per_day=None, all_candidates=None, one_per_day_excluding_best_symbol=None,
         drawdown_r=None, coverage_gap=gap,
