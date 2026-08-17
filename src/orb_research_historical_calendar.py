@@ -34,20 +34,25 @@ observance rules `src/exchange_calendar.py` documents (Saturday holidays
 observed the preceding Friday, Sunday holidays observed the following
 Monday, New Year's Day the standing exception).
 
-2024 was added (Issue TBD, third-period RVOL-band validation) once the
+2024 was added (Issue #317, third-period RVOL-band validation) once the
 252-session lookback window ending immediately before 2025-04-03 was found
 to reach back into 2024 -- the original 2025-01-01 floor covered only 63
 sessions before that reference day, short of even the study's 120-session
 absolute minimum. Same sourcing standard as 2025: no fabricated dates, only
 the standard, publicly published NYSE holiday/early-close schedule.
 
+2023 was added (Issue #321, fourth-period baseline validation) for the
+identical reason one year further back: the 252-session window ending
+immediately before 2024-04-03 (P1's own first session) reaches into 2023.
+Same sourcing standard again -- no fabricated dates.
+
 For any date already inside `src.exchange_calendar`'s own coverage window,
 this module delegates to the production `regular_session_bounds` unchanged
 -- there is exactly one source of truth for any given date, never two
 tables that could silently disagree. Coverage is finite and explicitly
-stated here too: a date outside [2024-01-01, exchange_calendar's own
+stated here too: a date outside [2023-01-01, exchange_calendar's own
 `last_supported_date`] raises `ResearchCalendarError` rather than guessing,
-so a mistaken request (e.g. for 2023 data) fails loudly instead of
+so a mistaken request (e.g. for 2022 data) fails loudly instead of
 returning a fabricated answer.
 """
 from __future__ import annotations
@@ -73,13 +78,36 @@ class ResearchCalendarError(RuntimeError):
 
 #: This module's own lower bound. Below this, no NYSE holiday/early-close
 #: data has been restated here, so this module refuses rather than guess.
-RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE = date(2024, 1, 1)
+RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE = date(2023, 1, 1)
 
-#: The last date this module answers from its own 2024/2025 tables. From
-#: `src.exchange_calendar`'s own `first_supported_date` (2026-01-01)
+#: The last date this module answers from its own 2023/2024/2025 tables.
+#: From `src.exchange_calendar`'s own `first_supported_date` (2026-01-01)
 #: onward, every lookup delegates to the production calendar instead, so
 #: the two tables never overlap and can never disagree.
 _RESEARCH_ONLY_UPPER_BOUND = date(2025, 12, 31)
+
+#: Source: NYSE published 2023 holiday calendar. Full-day closures.
+RESEARCH_FULL_HOLIDAYS_2023: frozenset[date] = frozenset({
+    date(2023, 1, 2),   # New Year's Day observed (Jan 1 was a Sunday)
+    date(2023, 1, 16),  # Martin Luther King Jr. Day
+    date(2023, 2, 20),  # Washington's Birthday
+    date(2023, 4, 7),   # Good Friday
+    date(2023, 5, 29),  # Memorial Day
+    date(2023, 6, 19),  # Juneteenth (Mon)
+    date(2023, 7, 4),   # Independence Day (Tue)
+    date(2023, 9, 4),   # Labor Day
+    date(2023, 11, 23), # Thanksgiving
+    date(2023, 12, 25), # Christmas (Mon)
+})
+
+#: Source: NYSE published 2023 early-close (half-day, 13:00 ET) schedule.
+#: Only two half-days in 2023 -- Christmas Eve (2023-12-24) fell on a
+#: Sunday, so unlike 2024/2025 there is no separate Christmas-adjacent
+#: early close that year.
+RESEARCH_EARLY_CLOSE_DAYS_2023: Mapping[date, time] = {
+    date(2023, 7, 3): EARLY_REGULAR_CLOSE,   # day before Independence Day (Mon)
+    date(2023, 11, 24): EARLY_REGULAR_CLOSE, # day after Thanksgiving (Fri)
+}
 
 #: Source: NYSE published 2024 holiday calendar. Full-day closures.
 RESEARCH_FULL_HOLIDAYS_2024: frozenset[date] = frozenset({
@@ -123,13 +151,16 @@ RESEARCH_EARLY_CLOSE_DAYS_2025: Mapping[date, time] = {
     date(2025, 12, 24): EARLY_REGULAR_CLOSE, # Christmas Eve (Wed)
 }
 
-#: Combined lookup spanning both restated years -- built once here so
+#: Combined lookup spanning all three restated years -- built once here so
 #: `research_regular_session_bounds` has exactly one merged table to
-#: consult instead of per-year branching. The two years' key sets are
+#: consult instead of per-year branching. The three years' key sets are
 #: disjoint by construction (tested), so a plain union cannot silently
-#: shadow either source table.
-_RESEARCH_FULL_HOLIDAYS: frozenset[date] = RESEARCH_FULL_HOLIDAYS_2024 | RESEARCH_FULL_HOLIDAYS_2025
+#: shadow any source table.
+_RESEARCH_FULL_HOLIDAYS: frozenset[date] = (
+    RESEARCH_FULL_HOLIDAYS_2023 | RESEARCH_FULL_HOLIDAYS_2024 | RESEARCH_FULL_HOLIDAYS_2025
+)
 _RESEARCH_EARLY_CLOSE_DAYS: Mapping[date, time] = {
+    **RESEARCH_EARLY_CLOSE_DAYS_2023,
     **RESEARCH_EARLY_CLOSE_DAYS_2024,
     **RESEARCH_EARLY_CLOSE_DAYS_2025,
 }
@@ -138,13 +169,13 @@ _RESEARCH_EARLY_CLOSE_DAYS: Mapping[date, time] = {
 def research_regular_session_bounds(day: date) -> tuple[time, time] | None:
     """Open/close bounds for `day`, or `None` if the market does not open,
     extending `src.exchange_calendar.regular_session_bounds` backward to
-    2024-01-01 for research use only.
+    2023-01-01 for research use only.
 
     Delegates unchanged to the production function for any date already in
-    its own coverage; answers from the merged 2024/2025
+    its own coverage; answers from the merged 2023/2024/2025
     `RESEARCH_FULL_HOLIDAYS_*`/`RESEARCH_EARLY_CLOSE_DAYS_*` tables for
-    2024-2025 dates; raises `ResearchCalendarError` for anything before
-    2024-01-01 or after production's own `last_supported_date` -- never a
+    2023-2025 dates; raises `ResearchCalendarError` for anything before
+    2023-01-01 or after production's own `last_supported_date` -- never a
     silent guess."""
     if not isinstance(day, date) or isinstance(day, datetime):
         raise ResearchCalendarError(f"expected a date, got {day!r}")
@@ -168,7 +199,7 @@ def research_trading_sessions_before(reference_day: date, *, count: int) -> tupl
     equivalent of
     `src.orb_universe_expansion_research.trading_sessions_before`, using
     `research_regular_session_bounds` instead of the production-only
-    function so it can reach back to 2024. Raises `ResearchCalendarError`
+    function so it can reach back to 2023. Raises `ResearchCalendarError`
     (propagated from `research_regular_session_bounds`, fail-closed, not
     caught here) if walking back runs past this module's own coverage floor
     before finding `count` sessions."""
@@ -186,6 +217,8 @@ def research_trading_sessions_before(reference_day: date, *, count: int) -> tupl
 __all__ = [
     "ResearchCalendarError",
     "RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE",
+    "RESEARCH_FULL_HOLIDAYS_2023",
+    "RESEARCH_EARLY_CLOSE_DAYS_2023",
     "RESEARCH_FULL_HOLIDAYS_2024",
     "RESEARCH_EARLY_CLOSE_DAYS_2024",
     "RESEARCH_FULL_HOLIDAYS_2025",
