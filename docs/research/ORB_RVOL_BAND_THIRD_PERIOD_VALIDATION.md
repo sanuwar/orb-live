@@ -10,6 +10,22 @@ exactly two fixed variants (BASE, BAND), no threshold tuning, no new
 filters, no neighboring-band search. `strategy.enabled` stays `false`; no
 production threshold, universe, or config change is made here.
 
+> **Metric-unit note (Issue #321/PR #322).** Legacy "expectancy"/"profit
+> factor" throughout this document (including the predeclared
+> VALIDATED/MIXED/FAILED criteria below) are computed from raw
+> price-per-share realized P&L -- they are **NOT** R-normalized.
+> Risk-normalized profitability must be evaluated using R-based metrics
+> (`expectancy_r_per_trade`/`profit_factor_r`, introduced by PR #322).
+> Both B_BAND and C_BAND classified `FAILED` here on clearly negative
+> price-per-share figures (e.g. -0.446, -0.250); a risk-normalized rerun
+> was not performed, so this document does not claim the R-normalized
+> magnitude, only that the price-based verdict itself should not be read
+> as already risk-normalized. No trade counts, win rates, or dollar-based
+> figures in this document have changed -- this is a labeling
+> clarification only, not a rerun. See
+> `docs/research/ORB_BASELINE_FOURTH_PERIOD_VALIDATION.md` for the
+> corrected R-based methodology.
+
 ## Third period
 
 | | |

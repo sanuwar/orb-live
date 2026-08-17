@@ -10,6 +10,25 @@ independent milestone (Issue #313) that reruns the identical study with a
 bug fix and reports the corrected truth alongside the original, explicitly
 labeled.
 
+> **Metric-unit note (Issue #321/PR #322), independent of the calendar
+> bug this document itself corrects.** Legacy "expectancy"/"profit
+> factor" throughout this document (including the `ROBUST` classifications
+> for C and E below, e.g. "expectancy 0.258, PF 1.156") are computed from
+> raw price-per-share realized P&L -- they are **NOT** R-normalized.
+> Risk-normalized profitability must be evaluated using R-based metrics
+> (`expectancy_r_per_trade`/`profit_factor_r`, introduced by PR #322).
+> **Risk-normalized interpretation of the `ROBUST` classifications below
+> is provisional pending a dedicated R-normalized re-evaluation of
+> configurations C and E** -- the predeclared `classify_robustness`
+> criteria were evaluated against price-per-share figures, and a
+> risk-normalized rerun could in principle reach a different verdict, the
+> same way Issue #321's own R-normalized correction reversed that
+> study's price-based conclusion. No trade counts, win rates, or
+> dollar-based figures in this document have changed -- this is a
+> labeling clarification only, not a rerun. See
+> `docs/research/ORB_BASELINE_FOURTH_PERIOD_VALIDATION.md` for the
+> corrected R-based methodology.
+
 ## What #307 got right
 
 - **Candidate selection and candidate-frequency numbers are unaffected and
