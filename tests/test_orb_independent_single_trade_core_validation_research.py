@@ -141,13 +141,23 @@ def test_earliest_cached_bar_utc_reads_existing_cache_without_fetching(tmp_path:
     assert earliest_cached_bar_utc(tmp_path / "does-not-exist") is None
 
 
-def test_coverage_gap_includes_earliest_cached_bar_when_cache_dir_given():
-    from src.orb_universe_expansion_research import DEFAULT_CACHE_DIR
+def test_coverage_gap_includes_earliest_cached_bar_when_cache_dir_given(tmp_path: Path):
+    # A synthetic cache -- never the real, machine-local, gitignored bar
+    # cache (empty on a fresh checkout/CI runner; only populated locally
+    # after running research scripts), so this test is deterministic
+    # everywhere.
+    import json
 
-    gap = p_minus_1_coverage_gap(reference_day=date(2023, 3, 31), count=2000, cache_dir=DEFAULT_CACHE_DIR)
+    cache_dir = tmp_path / "bar-cache"
+    cache_dir.mkdir()
+    (cache_dir / "sample.json").write_text(
+        json.dumps({"symbol": "SPY", "bars": [{"t": "2022-04-01T13:30:00Z"}, {"t": "2022-04-01T13:31:00Z"}]}),
+        encoding="utf-8",
+    )
+
+    gap = p_minus_1_coverage_gap(reference_day=date(2023, 3, 31), count=2000, cache_dir=cache_dir)
     assert gap is not None
-    assert gap.earliest_cached_bar_utc is not None
-    assert gap.earliest_cached_bar_utc >= "2022-01-01"
+    assert gap.earliest_cached_bar_utc == "2022-04-01T13:30:00Z"
 
 
 # ---------------------------------------------------------------------------
