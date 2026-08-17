@@ -19,6 +19,7 @@ from src.orb_regime_diagnostic_research import (
     spy_gap_direction,
     spy_vwap_premium_bucket,
     symbol_summary,
+    trade_quality_from_rows,
     trailing_realized_volatility,
     volatility_bucket,
     TradeDiagnosticRow,
@@ -473,3 +474,130 @@ def test_script_passes_research_provider_into_build_diagnostic_rows():
     script_path = Path(__file__).resolve().parent.parent / "scripts" / "research_orb_regime_diagnostic.py"
     source = script_path.read_text(encoding="utf-8")
     assert "session_bounds_provider=session_bounds_provider" in source
+
+
+# ---------------------------------------------------------------------------
+# trade_quality_from_rows: explicit price-per-share vs R-normalized units
+# (Issue #322's own correction). `realized_pnl` and `r_multiple` are
+# INDEPENDENTLY controlled in `_unit_row` below -- unlike the module-level
+# `_row` fixture above (which sets `r_multiple = float(pnl)`, i.e.
+# deliberately conflates the two units and therefore cannot catch this
+# class of bug), so a fixture here can express a trade whose raw-price P&L
+# and R-multiple carry opposite signs.
+# ---------------------------------------------------------------------------
+
+
+def _unit_row(*, realized_pnl: str, r_multiple: float, is_winner: bool, is_stopped: bool = False, closed: bool = True):
+    return TradeDiagnosticRow(
+        decision={"symbol": "AAPL"},
+        outcome={
+            "closed": closed, "is_winner": is_winner if closed else None, "is_stopped": is_stopped,
+            "realized_pnl": realized_pnl if closed else None, "r_multiple": r_multiple if closed else None,
+        },
+    )
+
+
+def test_expectancy_price_per_share_derived_from_realized_pnl_only():
+    # Every trade has r_multiple=0 (would zero out any R-based expectancy)
+    # but realized_pnl varies -- expectancy_price_per_share must track
+    # realized_pnl, proving it does not secretly read r_multiple.
+    rows = [
+        _unit_row(realized_pnl="10.00", r_multiple=0.0, is_winner=True),
+        _unit_row(realized_pnl="-4.00", r_multiple=0.0, is_winner=False),
+    ]
+    result = trade_quality_from_rows(rows)
+    assert result["expectancy_price_per_share"] == pytest.approx(3.0)  # (10 - 4) / 2
+    assert result["expectancy_per_trade"] == result["expectancy_price_per_share"]  # legacy alias unchanged
+
+
+def test_expectancy_r_per_trade_derived_from_r_multiple_only():
+    # Every trade has the same realized_pnl (would produce a fixed
+    # price-per-share expectancy) but r_multiple varies -- expectancy_r
+    # must track r_multiple, not realized_pnl.
+    rows = [
+        _unit_row(realized_pnl="5.00", r_multiple=2.0, is_winner=True),
+        _unit_row(realized_pnl="5.00", r_multiple=-1.0, is_winner=True),
+    ]
+    result = trade_quality_from_rows(rows)
+    assert result["expectancy_r_per_trade"] == pytest.approx(0.5)  # (2.0 - 1.0) / 2
+    assert result["expectancy_price_per_share"] == pytest.approx(5.0)  # unaffected by r_multiple
+
+
+def test_cumulative_r_equals_sum_of_r_multiple():
+    rows = [
+        _unit_row(realized_pnl="1.00", r_multiple=1.5, is_winner=True),
+        _unit_row(realized_pnl="1.00", r_multiple=-0.5, is_winner=True),
+        _unit_row(realized_pnl="1.00", r_multiple=0.75, is_winner=True),
+    ]
+    result = trade_quality_from_rows(rows)
+    assert result["cumulative_r"] == pytest.approx(1.5 - 0.5 + 0.75)
+
+
+def test_expectancy_r_per_trade_equals_cumulative_r_over_closed_trades():
+    rows = [
+        _unit_row(realized_pnl="1.00", r_multiple=2.0, is_winner=True),
+        _unit_row(realized_pnl="-1.00", r_multiple=-1.0, is_winner=False),
+        _unit_row(realized_pnl="3.00", r_multiple=0.5, is_winner=True),
+    ]
+    result = trade_quality_from_rows(rows)
+    assert result["expectancy_r_per_trade"] == pytest.approx(result["cumulative_r"] / result["closed_trades"])
+
+
+def test_profit_factor_r_uses_positive_and_negative_r_totals():
+    rows = [
+        _unit_row(realized_pnl="1.00", r_multiple=3.0, is_winner=True),
+        _unit_row(realized_pnl="1.00", r_multiple=1.0, is_winner=True),
+        _unit_row(realized_pnl="-1.00", r_multiple=-2.0, is_winner=False),
+    ]
+    result = trade_quality_from_rows(rows)
+    assert result["gross_profit_r"] == pytest.approx(4.0)
+    assert result["gross_loss_r"] == pytest.approx(2.0)
+    assert result["profit_factor_r"] == pytest.approx(2.0)
+
+
+def test_profit_factor_r_infinite_no_losses_flag():
+    rows = [_unit_row(realized_pnl="1.00", r_multiple=1.5, is_winner=True)]
+    result = trade_quality_from_rows(rows)
+    assert result["profit_factor_r"] is None
+    assert result["profit_factor_r_infinite_no_losses"] is True
+
+
+def test_raw_price_pf_and_pf_r_are_allowed_to_differ():
+    # A trade with a very wide stop (small r_multiple despite large
+    # realized_pnl) alongside a trade with a tight stop (large r_multiple
+    # despite small realized_pnl) -- the two PF units diverge because they
+    # weight the same trades differently.
+    rows = [
+        _unit_row(realized_pnl="20.00", r_multiple=0.2, is_winner=True),
+        _unit_row(realized_pnl="-2.00", r_multiple=-2.0, is_winner=False),
+    ]
+    result = trade_quality_from_rows(rows)
+    assert result["profit_factor"] == pytest.approx(10.0)  # 20 / 2, strongly positive raw-price
+    assert result["profit_factor_r"] == pytest.approx(0.1)  # 0.2 / 2.0, strongly negative-leaning in R
+
+
+def test_fixture_with_positive_price_expectancy_but_negative_r_expectancy():
+    """The exact semantic mistake this correction prevents: a period whose
+    raw-price expectancy reads positive while its R-normalized expectancy
+    -- the metric that actually matters for fixed-risk account sizing --
+    is negative."""
+    rows = [
+        # Large winner with a wide stop (small R) and a small loser with a
+        # tight stop (large negative R): price-positive, R-negative.
+        _unit_row(realized_pnl="15.00", r_multiple=0.3, is_winner=True),
+        _unit_row(realized_pnl="-5.00", r_multiple=-1.0, is_winner=False),
+    ]
+    result = trade_quality_from_rows(rows)
+    assert result["expectancy_price_per_share"] > 0
+    assert result["expectancy_r_per_trade"] < 0
+    assert result["profit_factor_price_per_share"] > 1
+    assert result["profit_factor_r"] < 1
+
+
+def test_price_and_r_fields_are_never_silently_conflated_in_key_names():
+    rows = [_unit_row(realized_pnl="1.00", r_multiple=1.0, is_winner=True)]
+    result = trade_quality_from_rows(rows)
+    for key in ("expectancy_price_per_share", "profit_factor_price_per_share", "average_winner_price_per_share", "average_loser_price_per_share"):
+        assert key in result
+    for key in ("expectancy_r_per_trade", "gross_profit_r", "gross_loss_r", "profit_factor_r", "average_winner_r", "average_loser_r"):
+        assert key in result

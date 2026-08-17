@@ -35,8 +35,10 @@ from src.orb_baseline_fourth_period_research import (
     four_period_evidence_is_strong_enough,
     is_p0_catastrophically_unstable,
     max_drawdown_and_streak_from_rows,
+    merge_quarterly_reference,
     recommend_next_milestone,
     symbol_total_pnl,
+    symbol_total_r,
     trade_quality_excluding_symbol_from_aggregate,
 )
 from src.orb_baseline_stability_research import TradeDiagnosticRow
@@ -131,9 +133,28 @@ def _tq(**overrides):
         "expectancy_per_trade": (5.0 * 4 - 2.0 * 6) / 10, "profit_factor": (5.0 * 4) / (2.0 * 6),
         "profit_factor_infinite_no_losses": False, "stop_out_rate": 0.3, "cumulative_r": 3.0,
         "meets_minimum_sample": False,
+        # R-unit fields, independently controllable from the price-per-share
+        # ones above -- 4 winners averaging 0.8R, 6 losers averaging -0.3R.
+        "average_winner_r": 0.8, "average_loser_r": -0.3,
+        "gross_profit_r": 4 * 0.8, "gross_loss_r": 6 * 0.3,
+        "profit_factor_r": (4 * 0.8) / (6 * 0.3), "profit_factor_r_infinite_no_losses": False,
     }
     base.update(overrides)
     return base
+
+
+def test_combine_r_fields_are_exact_and_independent_of_price_fields():
+    # Both copies carry cumulative_r=3.0 (matching (0.8*4 - 0.3*6)) and
+    # price expectancy 0.8 -- combining must double R totals exactly, the
+    # same way it already doubles price totals, in fully independent fields.
+    tq = _tq()
+    combined = combine_trade_quality_aggregates([tq, tq])
+    assert combined["gross_profit_r"] == pytest.approx(2 * tq["gross_profit_r"])
+    assert combined["gross_loss_r"] == pytest.approx(2 * tq["gross_loss_r"])
+    assert combined["expectancy_r_per_trade"] == pytest.approx(tq["cumulative_r"] / tq["closed_trades"])
+    assert combined["profit_factor_r"] == pytest.approx(tq["profit_factor_r"])
+    # Price-per-share fields are unaffected by the R-unit combination.
+    assert combined["expectancy_per_trade"] == pytest.approx(tq["expectancy_per_trade"])
 
 
 def test_combine_two_equal_aggregates_doubles_counts_preserves_ratios():
@@ -253,27 +274,121 @@ def test_symbol_total_pnl_none_is_zero():
     assert symbol_total_pnl(None) == 0.0
 
 
+def test_symbol_total_r_uses_cumulative_r_when_present():
+    stats = {"cumulative_r": 3.5, "winners": 4, "losers": 6, "average_winner_r": 1.0, "average_loser_r": -0.5}
+    assert symbol_total_r(stats) == pytest.approx(3.5)
+
+
+def test_symbol_total_r_reconstructs_from_averages_when_cumulative_r_absent():
+    stats = {"winners": 4, "losers": 6, "average_winner_r": 1.0, "average_loser_r": -0.5}
+    assert symbol_total_r(stats) == pytest.approx(4 * 1.0 + 6 * -0.5)
+
+
+def test_symbol_total_r_none_is_zero():
+    assert symbol_total_r(None) == 0.0
+
+
+def _quarter_row(*, session_date, quarter, r_multiple, realized_pnl="1.00", is_winner=True):
+    return TradeDiagnosticRow(
+        decision={"session_date": session_date.isoformat(), "symbol": "AAA", "quarter": quarter},
+        outcome={
+            "closed": True, "is_winner": is_winner, "is_stopped": False,
+            "realized_pnl": realized_pnl, "r_multiple": r_multiple,
+        },
+    )
+
+
+def test_merge_quarterly_reference_adds_new_p0_only_quarters():
+    p0_rows = [_quarter_row(session_date=date(2023, 4, i + 1), quarter="2023-Q2", r_multiple=1.0) for i in range(8)]
+    result = merge_quarterly_reference(p0_rows)
+    assert "2023-Q2" in result["quarters"]
+    assert result["quarters"]["2023-Q2"]["closed_trades"] == 8
+    # Every quarter already in PRIOR_QUARTERS_REFERENCE survives untouched.
+    for quarter in PRIOR_QUARTERS_REFERENCE:
+        assert quarter in result["quarters"]
+
+
+def test_merge_quarterly_reference_combines_shared_boundary_quarter():
+    # 2024-Q2 exists in PRIOR_QUARTERS_REFERENCE (18 closed trades there);
+    # P0 contributing 2 more trades to the same quarter must produce 20,
+    # not silently overwrite or duplicate.
+    p0_rows = [_quarter_row(session_date=date(2024, 4, 1), quarter="2024-Q2", r_multiple=1.0)] * 2
+    result = merge_quarterly_reference(p0_rows)
+    assert result["quarters"]["2024-Q2"]["closed_trades"] == PRIOR_QUARTERS_REFERENCE["2024-Q2"]["closed_trades"] + 2
+
+
+def test_merge_quarterly_reference_pf_r_fraction_excludes_unknown_not_zero():
+    # Four of PRIOR_QUARTERS_REFERENCE's own quarters have profit_factor_r=None
+    # (no surviving per-trade P1 data) -- they must be excluded from the
+    # PF_R fraction's denominator, never counted as a PF_R<=1 failure.
+    result = merge_quarterly_reference([])
+    unknown = [q for q, s in result["quarters"].items() if s["profit_factor_r"] is None]
+    assert len(unknown) > 0
+    assert result["quarters_with_pf_r_unavailable"] == len(unknown)
+    assert result["quarters_with_pf_r_known"] == result["adequate_quarter_count"] - len(unknown)
+
+
+def test_merge_quarterly_reference_uses_r_based_fraction_keys():
+    result = merge_quarterly_reference([])
+    assert "fraction_adequate_quarters_positive_expectancy_r" in result
+    assert "fraction_adequate_quarters_pf_r_above_1_of_known" in result
+    assert "longest_negative_expectancy_r_streak_quarters" in result
+
+
+def test_symbol_total_r_can_rank_a_different_symbol_than_symbol_total_pnl():
+    # A trade with a huge dollar P&L but a wide stop (small R) vs a trade
+    # with a small dollar P&L but a tight stop (large R) -- the two
+    # rankings can disagree, exactly the scenario R-based ranking exists
+    # to correct for.
+    wide_stop_big_dollar = {"winners": 1, "losers": 0, "average_winner": 100.0, "average_loser": None, "average_winner_r": 0.1, "average_loser_r": None}
+    tight_stop_small_dollar = {"winners": 1, "losers": 0, "average_winner": 2.0, "average_loser": None, "average_winner_r": 2.0, "average_loser_r": None}
+    assert symbol_total_pnl(wide_stop_big_dollar) > symbol_total_pnl(tight_stop_small_dollar)
+    assert symbol_total_r(wide_stop_big_dollar) < symbol_total_r(tight_stop_small_dollar)
+
+
 # ---------------------------------------------------------------------------
 # Predeclared baseline classification.
 # ---------------------------------------------------------------------------
 
 
 def _combined(**overrides):
-    base = {"closed_trades": 300, "expectancy_per_trade": 0.5, "profit_factor": 1.5, "profit_factor_infinite_no_losses": False}
+    # R-based fixture (Issue #322's own correction): `classify_baseline_conclusion`
+    # reads `expectancy_r_per_trade`/`profit_factor_r`, never the
+    # price-per-share `expectancy_per_trade`/`profit_factor` fields.
+    base = {"closed_trades": 300, "expectancy_r_per_trade": 0.5, "profit_factor_r": 1.5, "profit_factor_r_infinite_no_losses": False}
     base.update(overrides)
     return base
 
 
 def test_classify_supported_when_all_seven_criteria_pass():
     result = classify_baseline_conclusion(
-        combined_all_candidates=_combined(expectancy_per_trade=0.5, profit_factor=1.5),
-        combined_one_trade_per_day=_combined(expectancy_per_trade=0.6, profit_factor=1.6),
-        combined_excluding_best_symbol=_combined(expectancy_per_trade=0.2, profit_factor=1.1),
-        period_native_expectancy={"P0": 0.1, "P1": 0.02, "P2": 0.3, "P3": 1.0},
+        combined_all_candidates=_combined(expectancy_r_per_trade=0.5, profit_factor_r=1.5),
+        combined_one_trade_per_day=_combined(expectancy_r_per_trade=0.6, profit_factor_r=1.6),
+        combined_excluding_best_symbol=_combined(expectancy_r_per_trade=0.2, profit_factor_r=1.1),
+        period_native_expectancy_r={"P0": 0.1, "P1": 0.02, "P2": 0.3, "P3": 1.0},
         p0_catastrophic_instability=False, p0_meaningful_mfe_fraction=True,
     )
     assert result["verdict"] == "BASELINE_SUPPORTED_FOR_EXIT_RESEARCH"
     assert all(result["checks"].values())
+
+
+def test_classify_ignores_price_based_fields_entirely():
+    """The exact regression this correction guards against: a fixture with
+    strongly positive price-per-share expectancy/PF but negative/weak R
+    metrics must NOT be classified as supported."""
+    price_positive_r_negative = {
+        "closed_trades": 300, "expectancy_per_trade": 5.0, "profit_factor": 3.0,  # price-based, ignored
+        "expectancy_r_per_trade": -0.5, "profit_factor_r": 0.6, "profit_factor_r_infinite_no_losses": False,
+    }
+    result = classify_baseline_conclusion(
+        combined_all_candidates=price_positive_r_negative,
+        combined_one_trade_per_day=price_positive_r_negative,
+        combined_excluding_best_symbol=price_positive_r_negative,
+        period_native_expectancy_r={"P0": -0.5, "P1": -0.5, "P2": -0.5, "P3": -0.5},
+        p0_catastrophic_instability=False, p0_meaningful_mfe_fraction=True,
+    )
+    assert result["verdict"] != "BASELINE_SUPPORTED_FOR_EXIT_RESEARCH"
+    assert result["checks"]["1_combined_expectancy_r_positive"] is False
 
 
 def test_classify_insufficient_evidence_below_minimum_sample():
@@ -281,7 +396,7 @@ def test_classify_insufficient_evidence_below_minimum_sample():
         combined_all_candidates=_combined(closed_trades=5),
         combined_one_trade_per_day=_combined(),
         combined_excluding_best_symbol=_combined(),
-        period_native_expectancy={"P0": 0.1, "P1": 0.02, "P2": 0.3, "P3": 1.0},
+        period_native_expectancy_r={"P0": 0.1, "P1": 0.02, "P2": 0.3, "P3": 1.0},
         p0_catastrophic_instability=False, p0_meaningful_mfe_fraction=True,
     )
     assert result["verdict"] == "INSUFFICIENT_EVIDENCE"
@@ -289,22 +404,22 @@ def test_classify_insufficient_evidence_below_minimum_sample():
 
 def test_classify_regime_dependence_confirmed_when_combined_positive_but_a_criterion_fails():
     result = classify_baseline_conclusion(
-        combined_all_candidates=_combined(expectancy_per_trade=0.5, profit_factor=1.5),
-        combined_one_trade_per_day=_combined(expectancy_per_trade=0.6, profit_factor=1.6),
-        combined_excluding_best_symbol=_combined(expectancy_per_trade=0.2, profit_factor=1.1),
-        period_native_expectancy={"P0": -0.5, "P1": -0.5, "P2": 0.3, "P3": 1.0},  # only 2 of 4 non-negative
+        combined_all_candidates=_combined(expectancy_r_per_trade=0.5, profit_factor_r=1.5),
+        combined_one_trade_per_day=_combined(expectancy_r_per_trade=0.6, profit_factor_r=1.6),
+        combined_excluding_best_symbol=_combined(expectancy_r_per_trade=0.2, profit_factor_r=1.1),
+        period_native_expectancy_r={"P0": -0.5, "P1": -0.5, "P2": 0.3, "P3": 1.0},  # only 2 of 4 non-negative
         p0_catastrophic_instability=False, p0_meaningful_mfe_fraction=True,
     )
     assert result["verdict"] == "REGIME_DEPENDENCE_CONFIRMED"
-    assert result["checks"]["5_at_least_3_of_4_periods_non_negative"] is False
+    assert result["checks"]["5_at_least_3_of_4_periods_r_non_negative"] is False
 
 
 def test_classify_not_supported_when_combined_expectancy_negative():
     result = classify_baseline_conclusion(
-        combined_all_candidates=_combined(expectancy_per_trade=-0.2, profit_factor=0.8),
-        combined_one_trade_per_day=_combined(expectancy_per_trade=-0.1, profit_factor=0.9),
-        combined_excluding_best_symbol=_combined(expectancy_per_trade=-0.3, profit_factor=0.7),
-        period_native_expectancy={"P0": -0.5, "P1": -0.5, "P2": -0.3, "P3": -0.1},
+        combined_all_candidates=_combined(expectancy_r_per_trade=-0.2, profit_factor_r=0.8),
+        combined_one_trade_per_day=_combined(expectancy_r_per_trade=-0.1, profit_factor_r=0.9),
+        combined_excluding_best_symbol=_combined(expectancy_r_per_trade=-0.3, profit_factor_r=0.7),
+        period_native_expectancy_r={"P0": -0.5, "P1": -0.5, "P2": -0.3, "P3": -0.1},
         p0_catastrophic_instability=False, p0_meaningful_mfe_fraction=True,
     )
     assert result["verdict"] == "BASELINE_NOT_SUPPORTED"
@@ -312,10 +427,10 @@ def test_classify_not_supported_when_combined_expectancy_negative():
 
 def test_classify_not_supported_when_catastrophic_p0_instability():
     result = classify_baseline_conclusion(
-        combined_all_candidates=_combined(expectancy_per_trade=0.5, profit_factor=1.5),
-        combined_one_trade_per_day=_combined(expectancy_per_trade=0.6, profit_factor=1.6),
-        combined_excluding_best_symbol=_combined(expectancy_per_trade=0.2, profit_factor=1.1),
-        period_native_expectancy={"P0": 0.1, "P1": 0.02, "P2": 0.3, "P3": 1.0},
+        combined_all_candidates=_combined(expectancy_r_per_trade=0.5, profit_factor_r=1.5),
+        combined_one_trade_per_day=_combined(expectancy_r_per_trade=0.6, profit_factor_r=1.6),
+        combined_excluding_best_symbol=_combined(expectancy_r_per_trade=0.2, profit_factor_r=1.1),
+        period_native_expectancy_r={"P0": 0.1, "P1": 0.02, "P2": 0.3, "P3": 1.0},
         p0_catastrophic_instability=True, p0_meaningful_mfe_fraction=True,
     )
     assert result["verdict"] != "BASELINE_SUPPORTED_FOR_EXIT_RESEARCH"
@@ -327,16 +442,25 @@ def test_catastrophic_instability_thresholds_fixed():
     assert CATASTROPHIC_PROFIT_FACTOR_THRESHOLD == 0.5
 
 
-def test_is_p0_catastrophically_unstable_false_for_mild_result():
-    assert is_p0_catastrophically_unstable({"expectancy_per_trade": 0.02, "profit_factor": 1.0}) is False
+def test_is_p0_catastrophically_unstable_reads_r_fields():
+    assert is_p0_catastrophically_unstable({"expectancy_r_per_trade": 0.02, "profit_factor_r": 1.0}) is False
 
 
-def test_is_p0_catastrophically_unstable_true_for_deeply_negative_expectancy():
-    assert is_p0_catastrophically_unstable({"expectancy_per_trade": -1.5, "profit_factor": 0.9}) is True
+def test_is_p0_catastrophically_unstable_ignores_price_fields():
+    # Deeply negative price-per-share expectancy but mild R-expectancy must
+    # NOT trigger catastrophic status -- only the R fields matter.
+    assert is_p0_catastrophically_unstable({
+        "expectancy_per_trade": -50.0, "profit_factor": 0.1,
+        "expectancy_r_per_trade": 0.02, "profit_factor_r": 1.0,
+    }) is False
 
 
-def test_is_p0_catastrophically_unstable_true_for_collapsed_profit_factor():
-    assert is_p0_catastrophically_unstable({"expectancy_per_trade": 0.1, "profit_factor": 0.2}) is True
+def test_is_p0_catastrophically_unstable_true_for_deeply_negative_r_expectancy():
+    assert is_p0_catastrophically_unstable({"expectancy_r_per_trade": -1.5, "profit_factor_r": 0.9}) is True
+
+
+def test_is_p0_catastrophically_unstable_true_for_collapsed_r_profit_factor():
+    assert is_p0_catastrophically_unstable({"expectancy_r_per_trade": 0.1, "profit_factor_r": 0.2}) is True
 
 
 def test_four_period_strong_evidence_thresholds_fixed():
@@ -344,12 +468,21 @@ def test_four_period_strong_evidence_thresholds_fixed():
     assert FOUR_PERIOD_STRONG_EVIDENCE_MIN_PROFIT_FACTOR == 1.2
 
 
-def test_four_period_evidence_is_strong_enough_true_above_bar():
-    assert four_period_evidence_is_strong_enough({"expectancy_per_trade": 0.3, "profit_factor": 1.3}) is True
+def test_four_period_evidence_is_strong_enough_reads_r_fields_true_above_bar():
+    assert four_period_evidence_is_strong_enough({"expectancy_r_per_trade": 0.3, "profit_factor_r": 1.3}) is True
 
 
 def test_four_period_evidence_is_strong_enough_false_below_bar():
-    assert four_period_evidence_is_strong_enough({"expectancy_per_trade": 0.05, "profit_factor": 1.05}) is False
+    assert four_period_evidence_is_strong_enough({"expectancy_r_per_trade": 0.05, "profit_factor_r": 1.05}) is False
+
+
+def test_four_period_evidence_is_strong_enough_ignores_price_fields():
+    # Strongly positive price-per-share figures alongside weak R figures
+    # must NOT be judged "strong enough".
+    assert four_period_evidence_is_strong_enough({
+        "expectancy_per_trade": 10.0, "profit_factor": 5.0,
+        "expectancy_r_per_trade": 0.02, "profit_factor_r": 1.05,
+    }) is False
 
 
 def test_default_criteria_minimum_periods_is_3_of_4():
@@ -359,13 +492,13 @@ def test_default_criteria_minimum_periods_is_3_of_4():
 def test_custom_criteria_are_honoured():
     strict = BaselineConclusionCriteria(minimum_periods_non_negative_of_four=4)
     result = classify_baseline_conclusion(
-        combined_all_candidates=_combined(expectancy_per_trade=0.5, profit_factor=1.5),
-        combined_one_trade_per_day=_combined(expectancy_per_trade=0.6, profit_factor=1.6),
-        combined_excluding_best_symbol=_combined(expectancy_per_trade=0.2, profit_factor=1.1),
-        period_native_expectancy={"P0": 0.1, "P1": -0.02, "P2": 0.3, "P3": 1.0},  # only 3 of 4 non-negative
+        combined_all_candidates=_combined(expectancy_r_per_trade=0.5, profit_factor_r=1.5),
+        combined_one_trade_per_day=_combined(expectancy_r_per_trade=0.6, profit_factor_r=1.6),
+        combined_excluding_best_symbol=_combined(expectancy_r_per_trade=0.2, profit_factor_r=1.1),
+        period_native_expectancy_r={"P0": 0.1, "P1": -0.02, "P2": 0.3, "P3": 1.0},  # only 3 of 4 non-negative
         p0_catastrophic_instability=False, p0_meaningful_mfe_fraction=True, criteria=strict,
     )
-    assert result["checks"]["5_at_least_3_of_4_periods_non_negative"] is False
+    assert result["checks"]["5_at_least_3_of_4_periods_r_non_negative"] is False
 
 
 # ---------------------------------------------------------------------------

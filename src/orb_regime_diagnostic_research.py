@@ -421,6 +421,29 @@ def build_diagnostic_rows(
 
 
 def trade_quality_from_rows(rows: Sequence[TradeDiagnosticRow]) -> dict[str, Any]:
+    """Trade-quality aggregate over CLOSED rows, in TWO explicit, distinct
+    units -- never conflate them (Issue #322's own correction):
+
+    PRICE/PER-SHARE metrics (`*_price_per_share`, and the identical-valued
+    legacy `expectancy_per_trade`/`profit_factor`/`average_winner`/
+    `average_loser` kept for backward compatibility with every merged
+    caller that already reads them -- #304/#310/#317/#319 and their tests)
+    are derived from `realized_pnl`: raw dollars per share, NOT
+    risk-normalized. Two trades with identical `realized_pnl` can carry
+    very different risk (`entry_price - initial_stop_price`), so these
+    figures are not comparable across trades with different stop widths
+    and are NOT the right basis for fixed-risk position-sizing decisions.
+
+    R metrics (`*_r`) are derived from `r_multiple` (`realized_pnl` divided
+    by that same trade's own initial risk, already computed by the
+    unmodified simulator in `_outcome_fields` and never recomputed here).
+    `expectancy_r_per_trade` and `profit_factor_r` are risk-normalized and
+    are the PRIMARY metrics for any conclusion about fixed-risk account
+    sizing. The two units can and do disagree in sign -- a period can show
+    positive price-per-share expectancy while its R-expectancy is negative
+    (or vice versa) if larger-risk trades happen to land favorably (or
+    unfavorably) in raw dollar terms; neither figure should be read as a
+    proxy for the other."""
     closed = [r for r in rows if r.outcome["closed"]]
     winners = [r for r in closed if r.outcome["is_winner"]]
     losers = [r for r in closed if not r.outcome["is_winner"]]
@@ -429,6 +452,10 @@ def trade_quality_from_rows(rows: Sequence[TradeDiagnosticRow]) -> dict[str, Any
     gross_profit = sum((p for p in pnls if p > 0), Decimal("0"))
     gross_loss = sum((-p for p in pnls if p <= 0), Decimal("0"))
     r_multiples = [r.outcome["r_multiple"] for r in closed if r.outcome["r_multiple"] is not None]
+    positive_r = [x for x in r_multiples if x > 0]
+    negative_r = [x for x in r_multiples if x <= 0]
+    gross_profit_r = sum(positive_r) if positive_r else 0.0
+    gross_loss_r = -sum(negative_r) if negative_r else 0.0
 
     if gross_loss > 0:
         profit_factor: float | None = float(gross_profit / gross_loss)
@@ -437,17 +464,45 @@ def trade_quality_from_rows(rows: Sequence[TradeDiagnosticRow]) -> dict[str, Any
     else:
         profit_factor = None
 
+    if gross_loss_r > 0:
+        profit_factor_r: float | None = gross_profit_r / gross_loss_r
+        profit_factor_r_infinite_no_losses = False
+    elif gross_profit_r > 0:
+        profit_factor_r = None
+        profit_factor_r_infinite_no_losses = True
+    else:
+        profit_factor_r = None
+        profit_factor_r_infinite_no_losses = False
+
+    average_winner_price_per_share = float(mean([Decimal(r.outcome["realized_pnl"]) for r in winners])) if winners else None
+    average_loser_price_per_share = float(mean([Decimal(r.outcome["realized_pnl"]) for r in losers])) if losers else None
+    expectancy_price_per_share = float((gross_profit - gross_loss) / len(closed)) if closed else None
+
     return {
         "candidate_occurrences": len(rows),
         "closed_trades": len(closed),
         "winners": len(winners),
         "losers": len(losers),
         "win_rate": (len(winners) / len(closed)) if closed else None,
-        "average_winner": float(mean([Decimal(r.outcome["realized_pnl"]) for r in winners])) if winners else None,
-        "average_loser": float(mean([Decimal(r.outcome["realized_pnl"]) for r in losers])) if losers else None,
-        "expectancy_per_trade": float((gross_profit - gross_loss) / len(closed)) if closed else None,
+        # Legacy raw-price fields, unchanged in value -- kept for every existing caller.
+        "average_winner": average_winner_price_per_share,
+        "average_loser": average_loser_price_per_share,
+        "expectancy_per_trade": expectancy_price_per_share,
         "profit_factor": profit_factor,
         "profit_factor_infinite_no_losses": bool(gross_profit > 0 and gross_loss == 0),
+        # Explicit-unit aliases of the same raw-price figures above.
+        "average_winner_price_per_share": average_winner_price_per_share,
+        "average_loser_price_per_share": average_loser_price_per_share,
+        "expectancy_price_per_share": expectancy_price_per_share,
+        "profit_factor_price_per_share": profit_factor,
+        # R (risk-normalized) fields -- PRIMARY for fixed-risk sizing decisions.
+        "average_winner_r": float(mean(positive_r)) if positive_r else None,
+        "average_loser_r": float(mean(negative_r)) if negative_r else None,
+        "expectancy_r_per_trade": float(mean(r_multiples)) if r_multiples else None,
+        "gross_profit_r": float(gross_profit_r),
+        "gross_loss_r": float(gross_loss_r),
+        "profit_factor_r": profit_factor_r,
+        "profit_factor_r_infinite_no_losses": profit_factor_r_infinite_no_losses,
         "stop_out_rate": (len(stopped) / len(closed)) if closed else None,
         "cumulative_r": sum(r_multiples) if r_multiples else None,
         "meets_minimum_sample": len(closed) >= MIN_SAMPLE_CLOSED_TRADES,

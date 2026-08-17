@@ -56,7 +56,7 @@ from src.orb_baseline_fourth_period_research import (
     max_drawdown_and_streak_from_rows,
     merge_quarterly_reference,
     recommend_next_milestone,
-    symbol_total_pnl,
+    symbol_total_r,
     trade_quality_excluding_symbol_from_aggregate,
 )
 from src.orb_baseline_stability_research import (
@@ -286,7 +286,10 @@ def main(argv: list[str] | None = None) -> int:
             created_at=created_at,
         )
         tq = cells[view]["trade_quality"]
-        print(f"P0 {view}: candidates={cells[view]['candidate_occurrences']} closed={tq['closed_trades']} expectancy={tq['expectancy_per_trade']}")
+        print(
+            f"P0 {view}: candidates={cells[view]['candidate_occurrences']} closed={tq['closed_trades']} "
+            f"expectancy_price_per_share={tq['expectancy_per_trade']} expectancy_r_per_trade={tq['expectancy_r_per_trade']}"
+        )
 
     empirical_elapsed_seconds = (datetime.now(timezone.utc) - empirical_start).total_seconds()
 
@@ -297,6 +300,10 @@ def main(argv: list[str] | None = None) -> int:
     p0_catastrophic = is_p0_catastrophically_unstable(p0_native_tq)
 
     # ---- Four-period table (native + cohort + one-trade-per-day) ----
+    # Both units reported explicitly, per Issue #322's own correction:
+    # expectancy_price_per_share/profit_factor_price_per_share (raw dollars
+    # per share -- NOT risk-normalized) alongside expectancy_r_per_trade/
+    # profit_factor_r (risk-normalized -- PRIMARY for fixed-risk decisions).
     four_period_rows = []
     for label, ref in (("P0", None), *((p, PRIOR_PERIODS_REFERENCE[p]) for p in ("P1_THIRD", "P2_OOS", "P3_DISCOVERY"))):
         if label == "P0":
@@ -307,9 +314,10 @@ def main(argv: list[str] | None = None) -> int:
                 ):
                     four_period_rows.append({
                         "period": "P0", "view": view_label, "selection": selection,
-                        "closed_trades": tq["closed_trades"], "expectancy_per_trade": tq["expectancy_per_trade"],
-                        "profit_factor": tq["profit_factor"], "win_rate": tq["win_rate"],
-                        "cumulative_r": tq["cumulative_r"], "maximum_drawdown": dd,
+                        "closed_trades": tq["closed_trades"],
+                        "expectancy_price_per_share": tq["expectancy_per_trade"], "profit_factor_price_per_share": tq["profit_factor"],
+                        "expectancy_r_per_trade": tq["expectancy_r_per_trade"], "profit_factor_r": tq["profit_factor_r"],
+                        "win_rate": tq["win_rate"], "cumulative_r": tq["cumulative_r"], "maximum_drawdown": dd,
                     })
         else:
             for view_key, tq_key, otpd_key in (("native", "native", "native_one_trade_per_day"), ("cohort", "cohort", "cohort_one_trade_per_day")):
@@ -317,9 +325,11 @@ def main(argv: list[str] | None = None) -> int:
                     tq = ref[key]
                     four_period_rows.append({
                         "period": label, "view": view_key, "selection": selection,
-                        "closed_trades": tq["closed_trades"], "expectancy_per_trade": tq["expectancy_per_trade"],
-                        "profit_factor": tq["profit_factor"], "win_rate": tq["win_rate"],
-                        "cumulative_r": tq["cumulative_r"], "maximum_drawdown": "unavailable (reused from #320 aggregates)",
+                        "closed_trades": tq["closed_trades"],
+                        "expectancy_price_per_share": tq["expectancy_per_trade"], "profit_factor_price_per_share": tq["profit_factor"],
+                        "expectancy_r_per_trade": tq["expectancy_r_per_trade"], "profit_factor_r": tq["profit_factor_r"],
+                        "win_rate": tq["win_rate"], "cumulative_r": tq["cumulative_r"],
+                        "maximum_drawdown": "unavailable (reused from #320 aggregates)",
                     })
 
     # ---- Combined full-history view (native, all 4 periods) ----
@@ -341,16 +351,20 @@ def main(argv: list[str] | None = None) -> int:
     ]
     combined_excluding_tsla = combine_trade_quality_aggregates([p0_excl_tsla] + prior_excl_tsla)
 
-    # excluding the single best contributor across all four periods combined
-    p0_symbol_totals = {
-        symbol: symbol_total_pnl(stats)
+    # Excluding the single best contributor across all four periods combined.
+    # R-based ranking (Issue #322's own correction) -- the "best contributor"
+    # for a fixed-risk decision is the largest R contributor, not necessarily
+    # the largest dollar contributor (kept available as `symbol_total_pnl`
+    # for anyone who wants the price-per-share ranking instead).
+    p0_symbol_totals_r = {
+        symbol: symbol_total_r(stats)
         for symbol, stats in symbol_summary(p0_native_rows)["per_symbol"].items()
     }
-    combined_symbol_totals: dict[str, float] = dict(p0_symbol_totals)
+    combined_symbol_totals_r: dict[str, float] = dict(p0_symbol_totals_r)
     for p in ("P1_THIRD", "P2_OOS", "P3_DISCOVERY"):
         for symbol, stats in PRIOR_PERIODS_REFERENCE[p]["symbol_contribution"].items():
-            combined_symbol_totals[symbol] = combined_symbol_totals.get(symbol, 0.0) + symbol_total_pnl(stats)
-    overall_best_symbol = max(combined_symbol_totals, key=lambda s: combined_symbol_totals[s]) if combined_symbol_totals else None
+            combined_symbol_totals_r[symbol] = combined_symbol_totals_r.get(symbol, 0.0) + symbol_total_r(stats)
+    overall_best_symbol = max(combined_symbol_totals_r, key=lambda s: combined_symbol_totals_r[s]) if combined_symbol_totals_r else None
 
     p0_excl_best = excluding_symbol(p0_native_rows, symbol=overall_best_symbol) if overall_best_symbol else p0_native_tq
     prior_excl_best = [
@@ -365,25 +379,29 @@ def main(argv: list[str] | None = None) -> int:
     quarterly = merge_quarterly_reference(p0_native_rows)
 
     # ---- Fraction of adequately sampled PERIODS (not quarters) ----
-    period_native_expectancy = {
-        "P0": p0_native_tq.get("expectancy_per_trade"),
-        "P1_THIRD": PRIOR_PERIODS_REFERENCE["P1_THIRD"]["native"]["expectancy_per_trade"],
-        "P2_OOS": PRIOR_PERIODS_REFERENCE["P2_OOS"]["native"]["expectancy_per_trade"],
-        "P3_DISCOVERY": PRIOR_PERIODS_REFERENCE["P3_DISCOVERY"]["native"]["expectancy_per_trade"],
+    # R-based (Issue #322's own correction): `expectancy_r_per_trade`/
+    # `profit_factor_r`, the risk-normalized fields, not the price-per-share
+    # `expectancy_per_trade`/`profit_factor` this script originally read.
+    period_native_expectancy_r = {
+        "P0": p0_native_tq.get("expectancy_r_per_trade"),
+        "P1_THIRD": PRIOR_PERIODS_REFERENCE["P1_THIRD"]["native"]["expectancy_r_per_trade"],
+        "P2_OOS": PRIOR_PERIODS_REFERENCE["P2_OOS"]["native"]["expectancy_r_per_trade"],
+        "P3_DISCOVERY": PRIOR_PERIODS_REFERENCE["P3_DISCOVERY"]["native"]["expectancy_r_per_trade"],
     }
-    period_native_pf = {
-        "P0": p0_native_tq.get("profit_factor"),
-        "P1_THIRD": PRIOR_PERIODS_REFERENCE["P1_THIRD"]["native"]["profit_factor"],
-        "P2_OOS": PRIOR_PERIODS_REFERENCE["P2_OOS"]["native"]["profit_factor"],
-        "P3_DISCOVERY": PRIOR_PERIODS_REFERENCE["P3_DISCOVERY"]["native"]["profit_factor"],
+    period_native_pf_r = {
+        "P0": p0_native_tq.get("profit_factor_r"),
+        "P1_THIRD": PRIOR_PERIODS_REFERENCE["P1_THIRD"]["native"]["profit_factor_r"],
+        "P2_OOS": PRIOR_PERIODS_REFERENCE["P2_OOS"]["native"]["profit_factor_r"],
+        "P3_DISCOVERY": PRIOR_PERIODS_REFERENCE["P3_DISCOVERY"]["native"]["profit_factor_r"],
     }
-    fraction_periods_positive_expectancy = sum(1 for e in period_native_expectancy.values() if (e or 0) > 0) / 4
-    fraction_periods_pf_above_1 = sum(1 for pf in period_native_pf.values() if (pf or 0) > 1) / 4
+    fraction_periods_positive_expectancy_r = sum(1 for e in period_native_expectancy_r.values() if (e or 0) > 0) / 4
+    fraction_periods_pf_r_above_1 = sum(1 for pf in period_native_pf_r.values() if (pf or 0) > 1) / 4
 
     # ---- Predeclared decision ----
     classification = classify_baseline_conclusion(
         combined_all_candidates=combined_all_candidates, combined_one_trade_per_day=combined_one_trade_per_day,
-        combined_excluding_best_symbol=combined_excluding_best_symbol, period_native_expectancy=period_native_expectancy,
+        combined_excluding_best_symbol=combined_excluding_best_symbol,
+        period_native_expectancy_r=period_native_expectancy_r,
         p0_catastrophic_instability=p0_catastrophic, p0_meaningful_mfe_fraction=p0_mfe_meaningful,
     )
     strong_enough = four_period_evidence_is_strong_enough(combined_all_candidates)
@@ -417,8 +435,8 @@ def main(argv: list[str] | None = None) -> int:
             "excluding_TSLA": combined_excluding_tsla, "excluding_best_symbol": combined_excluding_best_symbol,
             "overall_best_contributing_symbol": overall_best_symbol,
         },
-        "fraction_periods_positive_expectancy": fraction_periods_positive_expectancy,
-        "fraction_periods_pf_above_1": fraction_periods_pf_above_1,
+        "fraction_periods_positive_expectancy_r": fraction_periods_positive_expectancy_r,
+        "fraction_periods_pf_r_above_1": fraction_periods_pf_r_above_1,
         "quarterly_stability": quarterly,
         "baseline_classification": classification,
         "next_milestone": milestone,
