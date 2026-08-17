@@ -127,10 +127,13 @@ Issue #300 or Issue #302 (`tests/test_orb_existing_configs_reevaluation_research
 | GAP_050_RVOL_150 | -0.1009 | -0.0623 | +0.1415 | +0.2156 | +0.0380 | 1.094 |
 | GAP_050_RVOL_125 | -0.1290 | -0.0497 | +0.1390 | +0.2388 | +0.0330 | 1.080 |
 
-**Observation (not a new finding, cross-validates PR #322):** the combined P0 exp_r for
-`GAP_050_RVOL_150` (-0.101 all-candidates) and P1 (-0.022 all-candidates) match the previously
-published PR #322 figures exactly, confirming this fresh empirical run reproduces the earlier
-corrected numbers.
+**Observation (directionally consistent with PR #322 — different execution views, not identical
+figures):** this table's ONE_TRADE_PER_DAY figures for `GAP_050_RVOL_150` are P0=-0.101 and
+P1=-0.062. PR #322's headline per-period figures for the same configuration were computed on the
+ALL_CANDIDATES view: P0≈-0.127, P1≈-0.022. The two views use different trade sets and are not
+expected to match numerically, but both agree in direction (negative `expectancy_r_per_trade` in
+P0 and P1), consistent with PR #322's corrected finding that R-normalized scoring reverses this
+configuration's apparent edge in the earliest periods.
 
 **Pattern**: P0 and P1 are net-negative for nearly every configuration under R-normalized scoring.
 P2 and P3 are net-positive for nearly every configuration. Only configurations with combined
@@ -209,12 +212,12 @@ config had 63).
 
 **0 INSUFFICIENT_EVIDENCE, 8 WEAK_OR_NO_EDGE, 8 PROMISING_BUT_UNSTABLE, 2 CORE_CANDIDATE.**
 
-Note `GAP_050_RVOL_150` (combined exp_r=+0.0380, PF_r=1.094 — numerically the single highest
-combined one/day expectancy of all 18) is classified **PROMISING_BUT_UNSTABLE**, not
-CORE_CANDIDATE, because it fails the period-robustness check (its P0 and P1 combined one/day
-`expectancy_r_per_trade` were both negative, i.e. only 2 of 4 periods non-negative — below the
-3-of-4 bar). This is the predeclared rule working exactly as intended: the highest raw aggregate
-number was deliberately **not** auto-selected in favor of robustness.
+Note `GAP_050_RVOL_150` (combined exp_r=+0.0380, PF_r=1.094 — a positive aggregate result, though
+not the highest of all 18; `GAP_100_RVOL_250` is higher at +0.0544) is classified
+**PROMISING_BUT_UNSTABLE**, not CORE_CANDIDATE, because it fails the period-robustness check (its
+P0 and P1 combined one/day `expectancy_r_per_trade` were both negative, i.e. only 2 of 4 periods
+non-negative — below the 3-of-4 bar). This illustrates the predeclared rule working as intended:
+a positive combined figure alone is not sufficient — period robustness is also required.
 
 ## Decision
 
