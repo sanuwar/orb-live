@@ -62,3 +62,7 @@ artifacts/research-rvol-band-third-period/
 # Research tooling: generated study output (Issue #319) -- reuses the
 # Issue #298 bar-cache above; no separate cache directory of its own.
 artifacts/research-baseline-stability/
+
+# Research tooling: generated study output (Issue #321) -- reuses the
+# Issue #298 bar-cache above; no separate cache directory of its own.
+artifacts/research-baseline-fourth-period/
