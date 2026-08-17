@@ -6,6 +6,23 @@ values, `--cache-only` mode with zero new network calls (see "Data source"
 below). Research-only: no production threshold, universe, or config was
 changed.
 
+> **Metric-unit note (Issue #321/PR #322).** "Expectancy"/"Profit Factor"
+> in the trade-quality table below are computed from raw price-per-share
+> realized P&L (dollars per share) -- they are **NOT** R-normalized.
+> "Cumulative R" in that same table is separately R-normalized; the two
+> are not the same unit and should not be compared as if they were.
+> Risk-normalized expectancy/profit-factor were not computed for this
+> study. The recommendation below is driven primarily by candidate-day
+> frequency and symbol concentration, with expectancy used only as a
+> tiebreaker (not the primary basis) -- but the "Honest reading" and
+> trade-quality discussion do lean on the price-per-share figures, so
+> treat any risk-normalized reading of this study's trade-quality
+> discussion as provisional pending a dedicated R-normalized
+> re-evaluation. No historical trade counts, win rates, or dollar-based
+> figures below have changed -- this is a labeling clarification only,
+> not a rerun. See `docs/research/ORB_BASELINE_FOURTH_PERIOD_VALIDATION.md`
+> for the corrected R-based methodology.
+
 ## Goal
 
 Holding every other `orb_long_v0` rule exactly as configured in

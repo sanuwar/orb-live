@@ -13,6 +13,22 @@ This study's own OOS-side outcome simulation was re-verified independently
 in this run and its closed-trade counts match #314's corrected numbers
 exactly (cross-validation, not reuse of #314's artifact).
 
+> **Metric-unit note (Issue #321/PR #322), independent of the calendar
+> bug above.** Legacy "expectancy" figures throughout this document
+> (including the `PROMISING` classification for the RVOL 1.50-1.99x band,
+> e.g. "expectancy 1.785" / "expectancy 0.784") are computed from raw
+> price-per-share realized P&L -- they are **NOT** R-normalized.
+> Risk-normalized profitability must be evaluated using R-based metrics
+> (`expectancy_r_per_trade`/`profit_factor_r`, introduced by PR #322).
+> **Risk-normalized interpretation of the `PROMISING` verdict below is
+> provisional pending a dedicated R-normalized re-evaluation** -- the
+> same class of price/R sign flip Issue #321's own correction found for
+> that study's P1 period is possible here too and was not checked. No
+> trade counts, win rates, or dollar-based figures in this document have
+> changed -- this is a labeling clarification only, not a rerun. See
+> `docs/research/ORB_BASELINE_FOURTH_PERIOD_VALIDATION.md` for the
+> corrected R-based methodology.
+
 ## Periods and configurations
 
 | | |

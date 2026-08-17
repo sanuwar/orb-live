@@ -17,6 +17,26 @@ merged Issue #310/#315 (PR #316) figures for the equivalent config
 (their "B", 0.50%/1.50x) exactly -- confirming the pipeline is correctly
 wired before interpreting the new P1/decomposition results.
 
+> **Metric-unit note (Issue #321/PR #322).** Legacy "expectancy"/"profit
+> factor" throughout this document (including the `REGIME_DEPENDENT_EDGE`
+> classification below, e.g. P1 "expectancy 0.023", P2 "expectancy
+> 0.258", P3 "expectancy 1.042") are computed from raw price-per-share
+> realized P&L -- they are **NOT** R-normalized. Risk-normalized
+> profitability must be evaluated using R-based metrics
+> (`expectancy_r_per_trade`/`profit_factor_r`, introduced by PR #322).
+> **Risk-normalized interpretation of the `REGIME_DEPENDENT_EDGE`
+> classification below is provisional pending a dedicated R-normalized
+> re-evaluation** -- Issue #321's own follow-up study (the fourth
+> independent period, P0) found that P1's price-based expectancy (+0.023,
+> read as marginally positive here) is actually **negative** in R terms
+> (-0.022), and a materially different four-period R-normalized picture
+> overall; the same reinterpretation risk applies to the P1/P2/P3
+> comparison in this document, which has not itself been rerun in R
+> terms. No trade counts, win rates, or dollar-based figures in this
+> document have changed -- this is a labeling clarification only, not a
+> rerun. See `docs/research/ORB_BASELINE_FOURTH_PERIOD_VALIDATION.md`
+> for the corrected R-based methodology and figures.
+
 ## Periods (fixed, no boundary changes)
 
 | | First | Last | Sessions | Calendar |

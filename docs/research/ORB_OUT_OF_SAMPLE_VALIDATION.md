@@ -14,6 +14,14 @@
 > below as the historical record of what was originally measured and why
 > it was wrong -- not silently rewritten.
 
+> **Metric-unit note (Issue #321/PR #322), independent of the calendar
+> bug above.** "Expectancy"/"Profit Factor" below are computed from raw
+> price-per-share realized P&L -- they are **NOT** R-normalized. This is
+> a separate, later-discovered issue from the SUPERSEDED calendar bug
+> and applies equally to the corrected document
+> (`ORB_OUT_OF_SAMPLE_VALIDATION_CORRECTION.md`). No numbers in this
+> document have been changed by this note.
+
 Research-only. Answers one question: **if ORB-LIVE had actually followed
 the current business logic over a historical period it was never tuned
 on, would it have been profitable?**

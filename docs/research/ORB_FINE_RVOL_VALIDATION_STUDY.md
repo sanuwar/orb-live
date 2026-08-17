@@ -9,6 +9,23 @@ changed.
 **RESEARCH RECOMMENDATION ONLY. This is not a request to change
 `config/strategy_v0.yaml`.**
 
+> **Metric-unit note (Issue #321/PR #322).** "Expectancy"/"Profit Factor"
+> reported below (including "best trade-quality figures in the matrix:
+> expectancy 1.529/trade, profit factor 2.270") are computed from raw
+> price-per-share realized P&L -- they are **NOT** R-normalized.
+> "Cumulative R" (e.g. "18.88R") is separately R-normalized; the two are
+> not the same unit. The `ROBUST_ACROSS_BOTH_HALVES` verdict (goal item F)
+> is frequency-based (candidate-day rate) and is unaffected by this note.
+> The "recommended for further validation" ranking uses expectancy only
+> as a tiebreaker after frequency/concentration, but its supporting
+> trade-quality narrative reads price-per-share figures -- treat any
+> risk-normalized interpretation of that narrative as provisional pending
+> a dedicated R-normalized re-evaluation. No historical trade counts, win
+> rates, or dollar-based figures below have changed -- this is a labeling
+> clarification only, not a rerun. See
+> `docs/research/ORB_BASELINE_FOURTH_PERIOD_VALIDATION.md` for the
+> corrected R-based methodology.
+
 ## Goal
 
 The prior gap x RVOL sensitivity study (Issue #300, merged) found RVOL to be
