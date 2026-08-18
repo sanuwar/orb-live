@@ -69,6 +69,7 @@ from src.orb_profit_protection_exit_research import (
     full_stop_out_rate,
     max_drawdown_r_and_streak_from_rows,
     protection_diagnostics,
+    realized_r_distribution,
 )
 from src.orb_regime_diagnostic_research import MIN_SAMPLE_CLOSED_TRADES, symbol_summary, trade_quality_from_rows
 from src.orb_research_historical_calendar import research_regular_session_bounds, research_trading_sessions_before
@@ -438,6 +439,8 @@ def main(argv: list[str] | None = None) -> int:
         classification = {}
         for arm in PROTECTION_ARMS:
             diag = protection_diagnostics(baseline_rows=tuple(pooled_rows_by_arm[ARM_BASELINE]), arm_rows=tuple(pooled_rows_by_arm[arm]))
+            diag["realized_r_distribution_before"] = realized_r_distribution(pooled_rows_by_arm[ARM_BASELINE])
+            diag["realized_r_distribution_after"] = realized_r_distribution(pooled_rows_by_arm[arm])
             protection_diag[arm] = diag
 
             arm_rows = tuple(pooled_rows_by_arm[arm])
