@@ -74,3 +74,7 @@ artifacts/research-existing-configs-reevaluation/
 # Research tooling: generated study output (local milestone M40) -- reuses
 # the Issue #298 bar-cache above; no separate cache directory of its own.
 artifacts/research-independent-single-trade-core-validation/
+
+# Research tooling: generated study output (Issue #330, M41) -- reuses the
+# Issue #298 bar-cache above; no separate cache directory of its own.
+artifacts/research-candidate-selection-timing/
