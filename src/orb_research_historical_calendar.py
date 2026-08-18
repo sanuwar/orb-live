@@ -52,11 +52,15 @@ independent out-of-sample validation window ("P_MINUS_1") of 252 sessions
 ending immediately before 2023-03-31 (P0's own first session) reaches into
 2022 -- the 2023-01-01 floor covered only 61 sessions before that
 reference day, 191 short. Same sourcing standard again -- no fabricated
-dates. 2022 has no restated New Year's Day holiday of its own within the
-2022 calendar year: 2022-01-01 fell on a Saturday, so NYSE's observance
-fell on 2021-12-31 -- restated in the 2021 table below now that this
-module's floor reaches that far back (see 2021 paragraph). 2022 was also
-the first year NYSE observed Juneteenth as a market holiday.
+dates. 2022-01-01 fell on a Saturday; per `src.exchange_calendar`'s own
+documented rule ("New Year's Day the standing exception, which is why
+there is no entry for a Friday before a Saturday 1 January" --
+`src/exchange_calendar.py`, `FULL_HOLIDAYS`), New Year's Day is NOT
+observed on the preceding Friday the way every other Saturday holiday is,
+so 2021-12-31 is an ordinary trading session, not a closure -- see the
+2021 paragraph and Issue #334 for the correction of an earlier mistake
+here. 2022 was also the first year NYSE observed Juneteenth as a market
+holiday.
 
 2021 was added (local milestone M42, independent 09:50-confirmation
 validation) for the identical reason one year further back again: an
@@ -64,14 +68,16 @@ independent out-of-sample validation window ("P_MINUS_2") of 252 sessions
 ending immediately before 2022-03-30 (P_MINUS_1's own first session)
 reaches into 2021. Same sourcing standard again -- no fabricated dates.
 2021 predates NYSE's first Juneteenth observance (2022), so unlike 2022+
-there is no Juneteenth entry this year. Extending this module's floor to
-2021-01-01 brought one previously-undocumented closure into coverage:
-2021-12-31 (New Year's Day 2022 observed, since 2022-01-01 fell on a
-Saturday) -- restated in `RESEARCH_FULL_HOLIDAYS_2021` even though it is
-nominally "next year's" holiday, matching this file's existing convention
-of keying every entry by the actual calendar date of closure (e.g. the
-2023 table's "Jan 2, 2023 -- New Year's Day observed, Jan 1 was a
-Sunday").
+there is no Juneteenth entry this year. `RESEARCH_FULL_HOLIDAYS_2021`
+originally (incorrectly) included 2021-12-31 as "New Year's Day 2022
+observed" -- corrected by Issue #334 after NYSE historical market-data
+evidence showed real trading activity that day. The mistake was applying
+the general Saturday-holiday-observed-the-preceding-Friday rule to New
+Year's Day, which `src.exchange_calendar.FULL_HOLIDAYS`'s own
+documentation already states is the one holiday that rule does NOT apply
+to (see the 2022 paragraph above). 2021-12-31 is therefore an ordinary
+trading session in this module, matching NYSE's actual historical
+calendar.
 
 For any date already inside `src.exchange_calendar`'s own coverage window,
 this module delegates to the production `regular_session_bounds` unchanged
@@ -117,7 +123,13 @@ _RESEARCH_ONLY_UPPER_BOUND = date(2025, 12, 31)
 #: predates NYSE's first Juneteenth observance (2022), so unlike 2022+
 #: there is no Juneteenth entry this year. 2021-01-01 fell on a Friday, so
 #: New Year's Day is observed on its own date -- no Saturday/Sunday shift
-#: needed, unlike most other years in this file.
+#: needed, unlike most other years in this file. 2021-12-31 is
+#: deliberately absent: 2022-01-01 (New Year's Day 2022) fell on a
+#: Saturday, and per `src.exchange_calendar.FULL_HOLIDAYS`'s own
+#: documented rule, New Year's Day is the one holiday NOT observed on the
+#: preceding Friday -- confirmed by NYSE historical market-data evidence
+#: of real trading activity on 2021-12-31 (Issue #334; an earlier version
+#: of this table incorrectly included it as a closure).
 RESEARCH_FULL_HOLIDAYS_2021: frozenset[date] = frozenset({
     date(2021, 1, 1),   # New Year's Day (Fri)
     date(2021, 1, 18),  # Martin Luther King Jr. Day
@@ -128,10 +140,6 @@ RESEARCH_FULL_HOLIDAYS_2021: frozenset[date] = frozenset({
     date(2021, 9, 6),   # Labor Day
     date(2021, 11, 25), # Thanksgiving
     date(2021, 12, 24), # Christmas observed (Dec 25 was a Saturday)
-    date(2021, 12, 31), # New Year's Day 2022 observed (2022-01-01 was a Saturday) --
-                        # this extension's own floor now reaches back far enough for
-                        # this closure to matter; it was previously outside coverage
-                        # and undocumented.
 })
 
 #: Source: NYSE published 2021 early-close (half-day, 13:00 ET) schedule.
@@ -145,10 +153,12 @@ RESEARCH_EARLY_CLOSE_DAYS_2021: Mapping[date, time] = {
 }
 
 #: Source: NYSE published 2022 holiday calendar. Full-day closures. 2022
-#: has no restated New Year's Day entry: 2022-01-01 fell on a Saturday, so
-#: NYSE's observance fell on 2021-12-31 -- outside this module's coverage
-#: floor and never needed by any study using it. 2022 was also the first
-#: year NYSE observed Juneteenth as a market holiday.
+#: has no restated New Year's Day entry: 2022-01-01 fell on a Saturday,
+#: and per `src.exchange_calendar.FULL_HOLIDAYS`'s own documented rule,
+#: New Year's Day is the one holiday NOT observed on the preceding Friday
+#: -- 2021-12-31 is an ordinary trading session (see the 2021 table's own
+#: comment; Issue #334 corrected an earlier mistake here). 2022 was also
+#: the first year NYSE observed Juneteenth as a market holiday.
 RESEARCH_FULL_HOLIDAYS_2022: frozenset[date] = frozenset({
     date(2022, 1, 17),  # Martin Luther King Jr. Day
     date(2022, 2, 21),  # Washington's Birthday
