@@ -335,7 +335,31 @@ def _no_decision_time_data_outcome() -> dict[str, Any]:
     }
 
 
-def _session_bars(bars: Sequence[MarketBar], *, session_date: date) -> list[MarketBar]:
+@dataclass(frozen=True)
+class IndexedMarketBars:
+    """A one-time date bucketing of a symbol's full `MarketBar` history, for
+    `_session_bars`'s optional `index` parameter. `by_date[d]` holds every
+    bar whose `trading_date` is `d`, already sorted by `event_timestamp` --
+    the identical sort `_session_bars` itself applies -- so a lookup is a
+    direct dict access instead of a full-history rescan+sort per candidate.
+    Built once per symbol in `build_all_entry_and_exit_rows` and reused
+    across every candidate for that symbol."""
+    by_date: dict[date, tuple[MarketBar, ...]]
+
+
+def index_market_bars_by_date(bars: Sequence[MarketBar]) -> IndexedMarketBars:
+    grouped: dict[date, list[MarketBar]] = {}
+    for bar in bars:
+        grouped.setdefault(bar.trading_date, []).append(bar)
+    by_date = {d: tuple(sorted(day_bars, key=lambda b: b.event_timestamp)) for d, day_bars in grouped.items()}
+    return IndexedMarketBars(by_date=by_date)
+
+
+def _session_bars(
+    bars: Sequence[MarketBar], *, session_date: date, index: IndexedMarketBars | None = None,
+) -> list[MarketBar]:
+    if index is not None:
+        return list(index.by_date.get(session_date, ()))
     return sorted((bar for bar in bars if bar.trading_date == session_date), key=lambda bar: bar.event_timestamp)
 
 
@@ -359,6 +383,7 @@ def _current_shadow_decision(
     candidate: CandidateSignal, *, combo_config: Mapping[str, Any], strategy_version: str,
     implementation_digest: str, shadow_run_id: str, created_at: datetime,
     market_bars_by_symbol: Mapping[str, Sequence[MarketBar]],
+    market_bars_index_by_symbol: Mapping[str, IndexedMarketBars] | None = None,
 ) -> tuple[ShadowTradingDecision, list[MarketBar]]:
     symbol, session_date, opening_data, live_data, decision = candidate
     candidate_bars = market_bars_by_symbol[symbol]
@@ -369,7 +394,8 @@ def _current_shadow_decision(
         implementation_digest=implementation_digest, shadow_run_id=shadow_run_id, created_at=created_at,
         candidate_market_bars=candidate_bars, spy_market_bars=spy_bars,
     )
-    session_bars = _session_bars(candidate_bars, session_date=session_date)
+    index = None if market_bars_index_by_symbol is None else market_bars_index_by_symbol.get(symbol)
+    session_bars = _session_bars(candidate_bars, session_date=session_date, index=index)
     subsequent_bars = [b for b in session_bars if b.event_timestamp >= shadow_decision.signal_timestamp]
     return shadow_decision, subsequent_bars
 
@@ -378,6 +404,7 @@ def _waited_shadow_decision(
     candidate: DecisionTimeCandidate, *, combo_config: Mapping[str, Any], strategy_version: str,
     implementation_digest: str, shadow_run_id: str, created_at: datetime,
     market_bars_by_symbol: Mapping[str, Sequence[MarketBar]],
+    market_bars_index_by_symbol: Mapping[str, IndexedMarketBars] | None = None,
 ) -> tuple[ShadowTradingDecision | None, list[MarketBar], bool | None]:
     if candidate.decision_live_data is None:
         return None, [], None
@@ -396,7 +423,8 @@ def _waited_shadow_decision(
         shadow_run_id=shadow_run_id, created_at=created_at,
         candidate_market_bars=candidate_bars, spy_market_bars=spy_bars,
     )
-    session_bars = _session_bars(candidate_bars, session_date=candidate.session_date)
+    index = None if market_bars_index_by_symbol is None else market_bars_index_by_symbol.get(candidate.symbol)
+    session_bars = _session_bars(candidate_bars, session_date=candidate.session_date, index=index)
     subsequent_bars = [b for b in session_bars if b.event_timestamp >= shadow_decision.signal_timestamp]
     return shadow_decision, subsequent_bars, new_decision.approved
 
@@ -405,6 +433,7 @@ def _build_rows_for_current(
     candidates: Sequence[CandidateSignal], *, period: str, market_bars_by_symbol: Mapping[str, Sequence[MarketBar]],
     combo_config: Mapping[str, Any], strategy_version: str, implementation_digest: str, created_at: datetime,
     session_bounds_provider=None, arms: Sequence[str] = EXIT_ARMS,
+    market_bars_index_by_symbol: Mapping[str, IndexedMarketBars] | None = None,
 ) -> dict[str, tuple[TradeDiagnosticRow, ...]]:
     rows_by_arm: dict[str, list[TradeDiagnosticRow]] = {arm: [] for arm in arms}
     shadow_run_id = f"m43-{period}-{ENTRY_CURRENT_FIRST_VALID}-{CONFIG_LABEL}"
@@ -414,7 +443,7 @@ def _build_rows_for_current(
         shadow_decision, subsequent_bars = _current_shadow_decision(
             candidate, combo_config=combo_config, strategy_version=strategy_version,
             implementation_digest=implementation_digest, shadow_run_id=shadow_run_id, created_at=created_at,
-            market_bars_by_symbol=market_bars_by_symbol,
+            market_bars_by_symbol=market_bars_by_symbol, market_bars_index_by_symbol=market_bars_index_by_symbol,
         )
         decision_features = _decision_features(
             period=period, entry_policy=ENTRY_CURRENT_FIRST_VALID, symbol=symbol,
@@ -430,6 +459,7 @@ def _build_rows_for_waited(
     waited_enriched: Sequence[DecisionTimeCandidate], *, period: str, market_bars_by_symbol: Mapping[str, Sequence[MarketBar]],
     combo_config: Mapping[str, Any], strategy_version: str, implementation_digest: str, created_at: datetime,
     session_bounds_provider=None, arms: Sequence[str] = EXIT_ARMS,
+    market_bars_index_by_symbol: Mapping[str, IndexedMarketBars] | None = None,
 ) -> dict[str, tuple[TradeDiagnosticRow, ...]]:
     rows_by_arm: dict[str, list[TradeDiagnosticRow]] = {arm: [] for arm in arms}
     shadow_run_id = f"m43-{period}-{ENTRY_WAITED_FIRST_VALID_0950}-{CONFIG_LABEL}"
@@ -438,7 +468,7 @@ def _build_rows_for_waited(
         shadow_decision, subsequent_bars, wait_approved = _waited_shadow_decision(
             candidate, combo_config=combo_config, strategy_version=strategy_version,
             implementation_digest=implementation_digest, shadow_run_id=shadow_run_id, created_at=created_at,
-            market_bars_by_symbol=market_bars_by_symbol,
+            market_bars_by_symbol=market_bars_by_symbol, market_bars_index_by_symbol=market_bars_index_by_symbol,
         )
         decision_features = _decision_features(
             period=period, entry_policy=ENTRY_WAITED_FIRST_VALID_0950, symbol=candidate.symbol,
@@ -464,7 +494,14 @@ def build_all_entry_and_exit_rows(
     every requested exit arm, from one already-computed full-window
     `ComboEvaluation` + `InputsTable`. No new candidate generation beyond
     what `evaluate_combo` (unmodified) already produced; the WAITED policy
-    reuses M41's own `early_pool`/`enrich_with_decision_time` unmodified."""
+    reuses M41's own `early_pool`/`enrich_with_decision_time` unmodified.
+
+    Each symbol's full `market_bars_by_symbol` history is date-indexed once
+    here via `index_market_bars_by_date` and reused for every candidate on
+    that symbol (`_session_bars`'s optional `index` parameter) -- a candidate
+    count's worth of full-history rescans+sorts collapses to one index build
+    per symbol plus one dict lookup per candidate, with identical results
+    (see `_session_bars`'s own docstring)."""
     if evaluation.combo != CONFIG_ENTRY.combo:
         raise ProfitProtectionExitError("build_all_entry_and_exit_rows requires the frozen GAP_050_RVOL_175 combo")
 
@@ -477,15 +514,21 @@ def build_all_entry_and_exit_rows(
     early_winners = select_first_candidate_per_day(early_signals)
     waited_enriched = tuple(enrich_with_decision_time(c, inputs_table=inputs_table) for c in early_winners)
 
+    market_bars_index_by_symbol = {
+        symbol: index_market_bars_by_date(bars) for symbol, bars in market_bars_by_symbol.items()
+    }
+
     current_rows = _build_rows_for_current(
         current_winners, period=period, market_bars_by_symbol=market_bars_by_symbol, combo_config=combo_config,
         strategy_version=strategy_version, implementation_digest=implementation_digest, created_at=created_at,
         session_bounds_provider=session_bounds_provider, arms=arms,
+        market_bars_index_by_symbol=market_bars_index_by_symbol,
     )
     waited_rows = _build_rows_for_waited(
         waited_enriched, period=period, market_bars_by_symbol=market_bars_by_symbol, combo_config=combo_config,
         strategy_version=strategy_version, implementation_digest=implementation_digest, created_at=created_at,
         session_bounds_provider=session_bounds_provider, arms=arms,
+        market_bars_index_by_symbol=market_bars_index_by_symbol,
     )
     return {ENTRY_CURRENT_FIRST_VALID: current_rows, ENTRY_WAITED_FIRST_VALID_0950: waited_rows}
 

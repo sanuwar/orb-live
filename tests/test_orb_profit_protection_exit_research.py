@@ -8,6 +8,8 @@ from decimal import Decimal
 import pytest
 
 from src.exchange_calendar import EASTERN
+from src.market_data_canonical import MarketBar, MarketDataQuality
+from src.market_data_provider import ALPACA_IEX_SOURCE
 from src.orb_profit_protection_exit_research import (
     ARM_BASELINE,
     ARM_BE_AFTER_050R,
@@ -17,9 +19,14 @@ from src.orb_profit_protection_exit_research import (
     ENTRY_WAITED_FIRST_VALID_0950,
     EXIT_ARMS,
     PROTECTION_ARMS,
+    IndexedMarketBars,
     ProfitProtectionExitError,
+    _build_rows_for_current,
+    _build_rows_for_waited,
+    _session_bars,
     build_all_entry_and_exit_rows,
     full_stop_out_rate,
+    index_market_bars_by_date,
     max_drawdown_r_and_streak_from_rows,
     protection_diagnostics,
     simulate_exit_arm,
@@ -29,7 +36,11 @@ from src.orb_candidate_selection_timing_research import (
     ARM_WAITED_FIRST_VALID_0950,
     CONFIG_ENTRY,
     build_all_arms_rows,
+    early_pool,
+    enrich_with_decision_time,
 )
+from src.orb_gap_rvol_sensitivity_research import sensitivity_config
+from src.orb_out_of_sample_validation_research import select_first_candidate_per_day
 from src.shadow_execution_simulator import ShadowExecutionState
 from tests.test_orb_candidate_selection_timing_research import STRONG_BREAKOUT_HOLDS, _evaluate_single_day
 from tests.test_shadow_execution_simulator import bar, candidate
@@ -371,3 +382,143 @@ def test_protection_arms_do_not_alter_entry_and_remain_paired_with_baseline():
             assert identity == baseline_identity
             diag = protection_diagnostics(baseline_rows=baseline_rows, arm_rows=arm_rows)
             assert diag["paired_trades"] <= len(baseline_rows)
+
+
+# ---------------------------------------------------------------------------
+# M43.5 (Issue #338): date-indexed bar retrieval for `_session_bars`.
+# `index_market_bars_by_date` and `_session_bars`'s optional `index`
+# parameter are a faster retrieval path only -- these tests prove the
+# indexed path returns exactly what the original full-history rescan+sort
+# returns, on the same inputs.
+# ---------------------------------------------------------------------------
+
+
+def _market_bar(symbol, ts, *, open_, high, low, close, volume):
+    return MarketBar(
+        symbol=symbol, exchange_session="REGULAR", trading_date=ts.date(), event_timestamp=ts,
+        end_timestamp=ts + timedelta(minutes=1), receive_timestamp=ts + timedelta(seconds=1),
+        open=Decimal(open_), high=Decimal(high), low=Decimal(low), close=Decimal(close), volume=volume,
+        source=ALPACA_IEX_SOURCE, interval_seconds=60, provider_sequence_id=None, quality=MarketDataQuality.VALID,
+    )
+
+
+def test_index_market_bars_by_date_buckets_by_date_and_sorts_by_event_timestamp():
+    d1 = date(2026, 8, 10)
+    d2 = date(2026, 8, 11)
+    start1 = datetime(2026, 8, 10, 9, 30, tzinfo=EASTERN)
+    start2 = datetime(2026, 8, 11, 9, 30, tzinfo=EASTERN)
+    # Deliberately out of chronological order in the input list -- the index
+    # must sort each date's bucket by event_timestamp regardless of input order.
+    b1_late = _market_bar("AAPL", start1 + timedelta(minutes=1), open_="100", high="100.5", low="99.5", close="100.2", volume=1000)
+    b1_early = _market_bar("AAPL", start1, open_="100", high="100.5", low="99.5", close="100.1", volume=1000)
+    b2 = _market_bar("AAPL", start2, open_="101", high="101.5", low="100.5", close="101.2", volume=1000)
+    bars = [b1_late, b1_early, b2]
+
+    index = index_market_bars_by_date(bars)
+
+    assert index.by_date[d1] == (b1_early, b1_late)  # sorted, not input order
+    assert index.by_date[d2] == (b2,)
+    assert index.by_date.get(date(2026, 8, 12), ()) == ()
+
+
+def test_session_bars_index_parity_with_unindexed():
+    d1 = date(2026, 8, 10)
+    d2 = date(2026, 8, 11)
+    start1 = datetime(2026, 8, 10, 9, 30, tzinfo=EASTERN)
+    start2 = datetime(2026, 8, 11, 9, 30, tzinfo=EASTERN)
+    b1a = _market_bar("AAPL", start1 + timedelta(minutes=2), open_="100", high="100.5", low="99.5", close="100.2", volume=1000)
+    b1b = _market_bar("AAPL", start1, open_="100", high="100.5", low="99.5", close="100.1", volume=1000)
+    b2 = _market_bar("AAPL", start2, open_="101", high="101.5", low="100.5", close="101.2", volume=1000)
+    bars = [b1a, b1b, b2]
+    index = index_market_bars_by_date(bars)
+
+    for session_date in (d1, d2, date(2026, 8, 12)):
+        reference = _session_bars(bars, session_date=session_date)
+        indexed = _session_bars(bars, session_date=session_date, index=index)
+        assert indexed == reference
+
+
+def test_session_bars_missing_date_returns_empty_both_paths():
+    bars = [_market_bar("AAPL", datetime(2026, 8, 10, 9, 30, tzinfo=EASTERN), open_="100", high="100.5", low="99.5", close="100.1", volume=1000)]
+    index = index_market_bars_by_date(bars)
+    missing = date(2026, 8, 25)
+
+    assert _session_bars(bars, session_date=missing) == []
+    assert _session_bars(bars, session_date=missing, index=index) == []
+
+
+def _reference_build_all_entry_and_exit_rows_unindexed(
+    *, period, evaluation, inputs_table, market_bars_by_symbol, base_config, implementation_digest, created_at,
+):
+    """Test-only reference: identical to `build_all_entry_and_exit_rows`
+    except it never builds or passes `market_bars_index_by_symbol`, so
+    `_session_bars` always takes its original full-history rescan+sort path
+    (the still-supported `index=None` default). Not used at runtime; exists
+    solely to prove the indexed production implementation never diverges
+    from it -- the "most important integration test" per Issue #338."""
+    if evaluation.combo != CONFIG_ENTRY.combo:
+        raise ProfitProtectionExitError("requires the frozen GAP_050_RVOL_175 combo")
+    combo_config = sensitivity_config(base_config, gap_percent=CONFIG_ENTRY.combo.gap_percent, rvol_multiple=CONFIG_ENTRY.combo.rvol_multiple)
+    strategy_version = f"{base_config['strategy']['name']}-{base_config['strategy']['version']}"
+    full_signals = evaluation.candidate_signals
+    early_signals = early_pool(full_signals)
+    current_winners = select_first_candidate_per_day(full_signals)
+    early_winners = select_first_candidate_per_day(early_signals)
+    waited_enriched = tuple(enrich_with_decision_time(c, inputs_table=inputs_table) for c in early_winners)
+    current_rows = _build_rows_for_current(
+        current_winners, period=period, market_bars_by_symbol=market_bars_by_symbol, combo_config=combo_config,
+        strategy_version=strategy_version, implementation_digest=implementation_digest, created_at=created_at,
+    )
+    waited_rows = _build_rows_for_waited(
+        waited_enriched, period=period, market_bars_by_symbol=market_bars_by_symbol, combo_config=combo_config,
+        strategy_version=strategy_version, implementation_digest=implementation_digest, created_at=created_at,
+    )
+    return {ENTRY_CURRENT_FIRST_VALID: current_rows, ENTRY_WAITED_FIRST_VALID_0950: waited_rows}
+
+
+def test_build_all_entry_and_exit_rows_index_parity_baseline_and_be_after_050r():
+    """M43's own BASELINE and BE_AFTER_050R outcomes, through the real
+    SignalEngine/simulator/exit-arm pipeline, must be byte-identical whether
+    `_session_bars` is served from the pre-built index (production, always
+    on since Issue #338) or from the original full-history rescan (this
+    test's reference)."""
+    evaluation, inputs_table, market_bars, minute_bars = _evaluate_single_day({"AAPL": STRONG_BREAKOUT_HOLDS})
+    config = __import__("src.config", fromlist=["load_config"]).load_config()
+    created_at = datetime.now(timezone.utc)
+
+    indexed = build_all_entry_and_exit_rows(
+        period="TEST", evaluation=evaluation, inputs_table=inputs_table, market_bars_by_symbol=market_bars,
+        base_config=config, implementation_digest="test-digest", created_at=created_at,
+    )
+    reference = _reference_build_all_entry_and_exit_rows_unindexed(
+        period="TEST", evaluation=evaluation, inputs_table=inputs_table, market_bars_by_symbol=market_bars,
+        base_config=config, implementation_digest="test-digest", created_at=created_at,
+    )
+
+    for entry_policy in (ENTRY_CURRENT_FIRST_VALID, ENTRY_WAITED_FIRST_VALID_0950):
+        for arm in EXIT_ARMS:
+            indexed_outcomes = [_outcome_key(r) for r in indexed[entry_policy][arm]]
+            reference_outcomes = [_outcome_key(r) for r in reference[entry_policy][arm]]
+            assert indexed_outcomes == reference_outcomes, f"parity mismatch: {entry_policy}/{arm}"
+    # Sanity: BASELINE actually entered a real position in this fixture (not
+    # a table of trivially-identical empty results).
+    assert indexed[ENTRY_CURRENT_FIRST_VALID][ARM_BASELINE][0].outcome["state"] == "FILLED_OPEN"
+
+
+def test_build_all_entry_and_exit_rows_index_parity_deterministic_repeated_execution():
+    evaluation, inputs_table, market_bars, minute_bars = _evaluate_single_day({"AAPL": STRONG_BREAKOUT_HOLDS})
+    config = __import__("src.config", fromlist=["load_config"]).load_config()
+    created_at = datetime.now(timezone.utc)
+
+    first = build_all_entry_and_exit_rows(
+        period="TEST", evaluation=evaluation, inputs_table=inputs_table, market_bars_by_symbol=market_bars,
+        base_config=config, implementation_digest="test-digest", created_at=created_at,
+    )
+    second = build_all_entry_and_exit_rows(
+        period="TEST", evaluation=evaluation, inputs_table=inputs_table, market_bars_by_symbol=market_bars,
+        base_config=config, implementation_digest="test-digest", created_at=created_at,
+    )
+
+    for entry_policy in (ENTRY_CURRENT_FIRST_VALID, ENTRY_WAITED_FIRST_VALID_0950):
+        for arm in EXIT_ARMS:
+            assert [_outcome_key(r) for r in first[entry_policy][arm]] == [_outcome_key(r) for r in second[entry_policy][arm]]

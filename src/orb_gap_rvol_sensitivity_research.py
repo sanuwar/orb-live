@@ -54,6 +54,7 @@ from src.orb_universe_expansion_research import (
     SessionEvaluation,
     SessionSignalInputs,
     build_study_report,
+    index_minute_bars_by_date,
     precompute_session_signal_inputs,
     resolve_session_signal,
 )
@@ -196,15 +197,28 @@ def precompute_inputs_table(
     too). Out-of-sample research passes an alternate resolver bound to a
     research-only calendar provider (see
     `src/orb_research_historical_calendar.py`); every existing caller omits
-    this and is unaffected."""
+    this and is unaffected.
+
+    Each symbol's (and SPY's) full bar history is date-indexed once via
+    `index_minute_bars_by_date` before its `session_dates` loop, and that
+    index is forwarded to `precompute_session_signal_inputs`'s optional
+    `candidate_bars_index`/`spy_bars_index` parameters -- this is the one
+    caller that evaluates every session for a symbol, so it is the one
+    caller for which the one-time index-build cost is worth paying. See
+    `precompute_session_signal_inputs`'s own docstring: results are
+    identical to the un-indexed default, just retrieved without a
+    full-history rescan per session."""
     table: InputsTable = {}
     kwargs = {} if session_open_resolver is None else {"session_open_resolver": session_open_resolver}
+    spy_bars_index = index_minute_bars_by_date(spy_minute_bars)
     for symbol in universe:
         candidate_bars = minute_bars_by_symbol[symbol]
+        candidate_bars_index = index_minute_bars_by_date(candidate_bars)
         for session_date in session_dates:
             table[(symbol, session_date)] = precompute_session_signal_inputs(
                 symbol=symbol, session_date=session_date, candidate_bars=candidate_bars,
-                spy_bars=spy_minute_bars, config=base_config, **kwargs,
+                spy_bars=spy_minute_bars, config=base_config,
+                candidate_bars_index=candidate_bars_index, spy_bars_index=spy_bars_index, **kwargs,
             )
     return table
 
