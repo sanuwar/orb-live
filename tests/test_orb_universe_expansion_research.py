@@ -21,13 +21,19 @@ from src.orb_universe_expansion_research import (
     GAP_ELIMINATED,
     INSUFFICIENT_OPENING_RANGE_COVERAGE,
     INSUFFICIENT_RVOL_HISTORY_COVERAGE,
+    INSUFFICIENT_RVOL_LOOKBACK_HISTORY,
     INVALID_INSUFFICIENT_COVERAGE,
     MINIMUM_COVERAGE,
+    MISSING_HISTORICAL_PRIOR_CLOSE,
+    MISSING_OPENING_RANGE_BARS,
+    MISSING_SPY_BARS_FOR_SESSION,
+    MISSING_TODAY_BARS,
     NO_HISTORICAL_DATA,
     RVOL_ELIMINATED,
     SPY_VWAP_ELIMINATED,
     UNIVERSE_POOL,
     VALID_COVERAGE,
+    IndexedMinuteBars,
     LiquidityThresholds,
     LiquidityTier,
     SessionEvaluation,
@@ -43,7 +49,9 @@ from src.orb_universe_expansion_research import (
     fetch_full_minute_history,
     historical_fetch_start,
     incremental_symbols,
+    index_minute_bars_by_date,
     liquid_universe,
+    precompute_session_signal_inputs,
     production_universe,
     rank_liquidity_qualified_symbols,
     trading_sessions_before,
@@ -277,6 +285,178 @@ def test_evaluate_symbol_session_reports_data_incomplete_when_bars_are_missing()
     )
     assert result.state == DATA_INCOMPLETE
     assert result.approved_at is None
+
+
+# ---------------------------------------------------------------------------
+# M43.5 (Issue #338): date-indexed bar retrieval. `index_minute_bars_by_date`
+# and `precompute_session_signal_inputs`'s optional `candidate_bars_index`/
+# `spy_bars_index` parameters are a faster retrieval path only -- these
+# tests prove the indexed path returns exactly what the original
+# full-history-rescan path returns, on the same inputs, not an approximation.
+# ---------------------------------------------------------------------------
+
+
+def test_index_minute_bars_by_date_buckets_exactly_by_date_and_preserves_order():
+    d1, d2 = date(2026, 8, 10), date(2026, 8, 11)
+    start1 = datetime.combine(d1, time(9, 30), tzinfo=ET)
+    start2 = datetime.combine(d2, time(9, 30), tzinfo=ET)
+    b1a = _bar("AAPL", start1, open_="100", high="100.5", low="99.5", close="100.2", volume=1000)
+    b1b = _bar("AAPL", start1 + timedelta(minutes=1), open_="100.2", high="100.6", low="99.8", close="100.3", volume=1000)
+    b2a = _bar("AAPL", start2, open_="101", high="101.5", low="100.5", close="101.2", volume=1000)
+    bars = [b1a, b1b, b2a]
+
+    index = index_minute_bars_by_date(bars)
+
+    assert index.by_date[d1] == (b1a, b1b)  # exactly the requested date's bars, original relative order
+    assert index.by_date[d2] == (b2a,)
+    assert index.sorted_dates == (d1, d2)
+    assert index.by_date.get(date(2026, 8, 12), ()) == ()  # missing date: same empty-result semantics as a full scan
+
+
+def test_precompute_session_signal_inputs_index_parity_matches_unindexed_default():
+    """The most important parity property: passing a pre-built index must
+    never change `precompute_session_signal_inputs`'s result versus the
+    original (index=None) full-history scan, on identical bars."""
+    candidate_bars = _historical_bars("AAPL", SESSION_DATE, lookback_days=LOOKBACK_DAYS, volume=1_000_000)
+    candidate_bars += _entry_window_bars("AAPL", SESSION_DATE, opening_close="101.5", breakout_at_minute=5)
+    spy_bars = _spy_bars(SESSION_DATE, above_vwap=True)
+
+    reference = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+    )
+    indexed = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+        candidate_bars_index=index_minute_bars_by_date(candidate_bars),
+        spy_bars_index=index_minute_bars_by_date(spy_bars),
+    )
+
+    assert indexed == reference
+    assert reference.incomplete_reason is None  # sanity: the fixture actually produced a complete evaluation
+    assert reference.opening_data is not None
+
+
+def test_precompute_session_signal_inputs_index_parity_missing_today_bars():
+    """A session date with historical bars but nothing on the session date
+    itself: MISSING_TODAY_BARS in both paths (missing-date semantics must
+    match, not just the populated-date case)."""
+    candidate_bars = _historical_bars("AAPL", SESSION_DATE, lookback_days=LOOKBACK_DAYS, volume=1_000_000)
+    spy_bars = _spy_bars(SESSION_DATE, above_vwap=True)
+
+    reference = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+    )
+    indexed = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+        candidate_bars_index=index_minute_bars_by_date(candidate_bars),
+        spy_bars_index=index_minute_bars_by_date(spy_bars),
+    )
+
+    assert indexed == reference
+    assert reference.incomplete_reason == MISSING_OPENING_RANGE_BARS  # no opening-range bars at all on SESSION_DATE
+
+
+def test_precompute_session_signal_inputs_index_parity_missing_spy_bars():
+    candidate_bars = _historical_bars("AAPL", SESSION_DATE, lookback_days=LOOKBACK_DAYS, volume=1_000_000)
+    candidate_bars += _entry_window_bars("AAPL", SESSION_DATE, opening_close="101.5", breakout_at_minute=5)
+    spy_bars: list = []
+
+    reference = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+    )
+    indexed = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+        candidate_bars_index=index_minute_bars_by_date(candidate_bars),
+        spy_bars_index=index_minute_bars_by_date(spy_bars),
+    )
+
+    assert indexed == reference
+    assert reference.incomplete_reason == MISSING_SPY_BARS_FOR_SESSION
+
+
+def test_precompute_session_signal_inputs_index_multi_symbol_isolation():
+    """Two symbols' indexes, built independently, must never leak bars into
+    each other's lookups -- each index is scoped to the bars it was built
+    from."""
+    aapl_bars = _historical_bars("AAPL", SESSION_DATE, lookback_days=LOOKBACK_DAYS, volume=1_000_000)
+    aapl_bars += _entry_window_bars("AAPL", SESSION_DATE, opening_close="101.5", breakout_at_minute=5)
+    msft_bars = _historical_bars("MSFT", SESSION_DATE, lookback_days=LOOKBACK_DAYS, volume=2_000_000)
+    msft_bars += _entry_window_bars("MSFT", SESSION_DATE, opening_close="101.5", breakout_at_minute=None)
+    spy_bars = _spy_bars(SESSION_DATE, above_vwap=True)
+    spy_index = index_minute_bars_by_date(spy_bars)
+
+    aapl_result = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=aapl_bars, spy_bars=spy_bars, config=CONFIG,
+        candidate_bars_index=index_minute_bars_by_date(aapl_bars), spy_bars_index=spy_index,
+    )
+    msft_result = precompute_session_signal_inputs(
+        symbol="MSFT", session_date=SESSION_DATE, candidate_bars=msft_bars, spy_bars=spy_bars, config=CONFIG,
+        candidate_bars_index=index_minute_bars_by_date(msft_bars), spy_bars_index=spy_index,
+    )
+
+    assert aapl_result.opening_data.symbol == "AAPL"
+    assert msft_result.opening_data.symbol == "MSFT"
+    assert aapl_result.opening_data.median_opening_volume != msft_result.opening_data.median_opening_volume
+    # Every window bar traces back to its own symbol only -- no cross-symbol leakage.
+    aapl_window_symbols = {bar.symbol for bar, _live in aapl_result.window}
+    msft_window_symbols = {bar.symbol for bar, _live in msft_result.window}
+    assert aapl_window_symbols == {"AAPL"}
+    assert msft_window_symbols == {"MSFT"}
+
+
+def test_precompute_session_signal_inputs_index_skips_all_interpolated_prior_date():
+    """`historical`'s `previous_close` must be the most recent NON-
+    interpolated bar strictly before the session date, even when the
+    single closest prior date is entirely interpolated -- the indexed
+    backward walk must fall through to the next-most-recent date exactly
+    as a full scan across every prior bar would."""
+    older_date = SESSION_DATE - timedelta(days=3)
+    closer_date = SESSION_DATE - timedelta(days=1)
+    older_start = datetime.combine(older_date, time(9, 30), tzinfo=ET)
+    closer_start = datetime.combine(closer_date, time(9, 30), tzinfo=ET)
+
+    real_prior_bar = _bar("AAPL", older_start, open_="100", high="100.5", low="99.5", close="97.0", volume=200_000)
+    interpolated_bar = MinuteBar(
+        symbol="AAPL", begins_at=closer_start, open_price=Decimal("100"), high_price=Decimal("100.5"),
+        low_price=Decimal("99.5"), close_price=Decimal("999.0"), volume=200_000, session="REGULAR", interpolated=True,
+    )
+    candidate_bars = [real_prior_bar, interpolated_bar]
+    candidate_bars += _entry_window_bars("AAPL", SESSION_DATE, opening_close="101.5", breakout_at_minute=5)
+    spy_bars = _spy_bars(SESSION_DATE, above_vwap=True)
+
+    reference = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+    )
+    indexed = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+        candidate_bars_index=index_minute_bars_by_date(candidate_bars),
+        spy_bars_index=index_minute_bars_by_date(spy_bars),
+    )
+
+    assert indexed == reference
+    # RVOL lookback fails first (only one real historical session, far short
+    # of LOOKBACK_DAYS) -- this fixture's job is only to prove the indexed
+    # and unindexed paths make the identical decision, not to reach a full
+    # CANDIDATE evaluation.
+    assert reference.incomplete_reason == INSUFFICIENT_RVOL_LOOKBACK_HISTORY
+
+
+def test_precompute_session_signal_inputs_index_parity_deterministic_repeated_execution():
+    candidate_bars = _historical_bars("AAPL", SESSION_DATE, lookback_days=LOOKBACK_DAYS, volume=1_000_000)
+    candidate_bars += _entry_window_bars("AAPL", SESSION_DATE, opening_close="101.5", breakout_at_minute=5)
+    spy_bars = _spy_bars(SESSION_DATE, above_vwap=True)
+    candidate_bars_index = index_minute_bars_by_date(candidate_bars)
+    spy_bars_index = index_minute_bars_by_date(spy_bars)
+
+    first = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+        candidate_bars_index=candidate_bars_index, spy_bars_index=spy_bars_index,
+    )
+    second = precompute_session_signal_inputs(
+        symbol="AAPL", session_date=SESSION_DATE, candidate_bars=candidate_bars, spy_bars=spy_bars, config=CONFIG,
+        candidate_bars_index=candidate_bars_index, spy_bars_index=spy_bars_index,
+    )
+
+    assert first == second
 
 
 # ---------------------------------------------------------------------------

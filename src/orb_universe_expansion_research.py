@@ -35,6 +35,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from bisect import bisect_left
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -303,6 +304,65 @@ class SessionSignalInputs:
     window: tuple[tuple[MinuteBar, LiveData], ...]
 
 
+@dataclass(frozen=True)
+class IndexedMinuteBars:
+    """A one-time date bucketing of a symbol's (or SPY's) full minute-bar
+    history, for `precompute_session_signal_inputs`'s optional
+    `candidate_bars_index`/`spy_bars_index` parameters. `by_date[d]` holds
+    every bar (interpolated bars included, in original relative order) whose
+    `timestamp_et.date()` is `d`; `sorted_dates` is those keys in ascending
+    order, for `bisect`-based backward/forward traversal. Building this once
+    per symbol and reusing it across every session in a study turns each
+    per-session date lookup below into a direct dict access instead of a
+    full-history rescan -- see `index_minute_bars_by_date`."""
+    by_date: dict[date, tuple[MinuteBar, ...]]
+    sorted_dates: tuple[date, ...]
+
+
+def index_minute_bars_by_date(bars: Sequence[MinuteBar]) -> IndexedMinuteBars:
+    """Bucket `bars` by ET calendar date. Every bar is kept exactly once, in
+    its original relative order within its date's bucket -- including
+    interpolated bars, since callers apply the identical `not
+    bar.interpolated` filtering they already apply today, just against one
+    date's (small) bucket instead of the whole (large) history. Purely a
+    faster retrieval path: which bars are ever selected for any given date
+    is unchanged."""
+    grouped: dict[date, list[MinuteBar]] = {}
+    for bar in bars:
+        grouped.setdefault(bar.timestamp_et.date(), []).append(bar)
+    by_date = {d: tuple(day_bars) for d, day_bars in grouped.items()}
+    return IndexedMinuteBars(by_date=by_date, sorted_dates=tuple(sorted(by_date)))
+
+
+def _indexed_bars_before_date(index: IndexedMinuteBars, *, before: date) -> list[MinuteBar]:
+    """Every bar in `index` whose date is strictly earlier than `before` --
+    the same set `[bar for bar in bars if bar.timestamp_et.date() < before]`
+    would produce, assembled from pre-bucketed per-date lists via direct
+    index lookup instead of re-evaluating every bar's date."""
+    cutoff = bisect_left(index.sorted_dates, before)
+    out: list[MinuteBar] = []
+    for day in index.sorted_dates[:cutoff]:
+        out.extend(index.by_date[day])
+    return out
+
+
+def _indexed_most_recent_prior_close_bar(index: IndexedMinuteBars, *, before: date) -> MinuteBar | None:
+    """The same bar `max(historical, key=lambda bar: bar.begins_at)` would
+    return, where `historical` is every non-interpolated bar dated strictly
+    before `before` -- found by walking dates backward from the cutoff
+    instead of scanning every bar on every prior date. Dates never overlap
+    in `begins_at`, so the first prior date holding any non-interpolated bar
+    necessarily holds the global maximum; only if every bar on that date is
+    interpolated does the walk continue to the previous date, exactly
+    mirroring what a full scan across all prior dates would find."""
+    cutoff = bisect_left(index.sorted_dates, before)
+    for day in reversed(index.sorted_dates[:cutoff]):
+        candidates = [bar for bar in index.by_date[day] if not bar.interpolated]
+        if candidates:
+            return max(candidates, key=lambda bar: bar.begins_at)
+    return None
+
+
 def precompute_session_signal_inputs(
     *,
     symbol: str,
@@ -311,58 +371,98 @@ def precompute_session_signal_inputs(
     spy_bars: Sequence[MinuteBar],
     config: Mapping[str, Any],
     session_open_resolver: Callable[..., time] = session_open_for,
+    candidate_bars_index: IndexedMinuteBars | None = None,
+    spy_bars_index: IndexedMinuteBars | None = None,
 ) -> SessionSignalInputs:
     """`session_open_resolver` defaults to the production
     `src.market_data_canonical.session_open_for` -- every existing caller
     omits it and is therefore unaffected. Out-of-sample research passes a
     partial application of `session_open_for` bound to an alternate
     `session_bounds_provider` (see `src/orb_research_historical_calendar.py`)
-    instead."""
+    instead.
+
+    `candidate_bars_index`/`spy_bars_index` are optional pre-built
+    `index_minute_bars_by_date(candidate_bars)`/`index_minute_bars_by_date
+    (spy_bars)` results. When given, every date-scoped lookup below (the
+    opening range's own bars, the RVOL lookback window, the previous close,
+    today's bars, SPY's bars) is served from the index instead of rescanning
+    `candidate_bars`/`spy_bars`, with identical results -- restricting to
+    `date == session_date` or `date < session_date` before a lookup that
+    already filters on that same predicate internally cannot change which
+    bars are selected. Every existing caller omits these two parameters and
+    is therefore unaffected; `src.orb_gap_rvol_sensitivity_research.
+    precompute_inputs_table` is the one caller that builds and passes them,
+    since it is the one caller that evaluates every session for a symbol
+    (making the one-time index-build cost worth paying)."""
     opening_minutes = int(config["signal"]["opening_range_minutes"])
     lookback_days = int(config["signal"]["relative_volume_lookback_days"])
     session_open = session_open_resolver(session_date)
 
+    opening_range_bars: Sequence[MinuteBar] = (
+        candidate_bars_index.by_date.get(session_date, ()) if candidate_bars_index is not None else candidate_bars
+    )
     try:
         opening_range = calculate_opening_range(
-            candidate_bars, session_date=session_date,
+            opening_range_bars, session_date=session_date,
             opening_range_minutes=opening_minutes, session_open=session_open,
         )
     except ValueError:
         return SessionSignalInputs(MISSING_OPENING_RANGE_BARS, None, ())
 
+    lookback_bars: Sequence[MinuteBar] = (
+        _indexed_bars_before_date(candidate_bars_index, before=session_date)
+        if candidate_bars_index is not None else candidate_bars
+    )
     try:
         median_volume = calculate_median_opening_volume(
-            candidate_bars, before_date=session_date, lookback_days=lookback_days,
+            lookback_bars, before_date=session_date, lookback_days=lookback_days,
             opening_range_minutes=opening_minutes, session_open_for=session_open_resolver,
         )
     except ValueError:
         return SessionSignalInputs(INSUFFICIENT_RVOL_LOOKBACK_HISTORY, None, ())
 
-    historical = [
-        bar for bar in candidate_bars
-        if bar.timestamp_et.date() < session_date and not bar.interpolated
-    ]
-    if not historical:
-        return SessionSignalInputs(MISSING_HISTORICAL_PRIOR_CLOSE, None, ())
-    today_bars = sorted(
-        (
+    if candidate_bars_index is not None:
+        previous_close_bar = _indexed_most_recent_prior_close_bar(candidate_bars_index, before=session_date)
+        if previous_close_bar is None:
+            return SessionSignalInputs(MISSING_HISTORICAL_PRIOR_CLOSE, None, ())
+        previous_close = previous_close_bar.close_price
+        today_bars = sorted(
+            (bar for bar in candidate_bars_index.by_date.get(session_date, ()) if not bar.interpolated),
+            key=lambda bar: bar.begins_at,
+        )
+    else:
+        historical = [
             bar for bar in candidate_bars
-            if bar.timestamp_et.date() == session_date and not bar.interpolated
-        ),
-        key=lambda bar: bar.begins_at,
-    )
+            if bar.timestamp_et.date() < session_date and not bar.interpolated
+        ]
+        if not historical:
+            return SessionSignalInputs(MISSING_HISTORICAL_PRIOR_CLOSE, None, ())
+        previous_close = max(historical, key=lambda bar: bar.begins_at).close_price
+        today_bars = sorted(
+            (
+                bar for bar in candidate_bars
+                if bar.timestamp_et.date() == session_date and not bar.interpolated
+            ),
+            key=lambda bar: bar.begins_at,
+        )
     if not today_bars:
         return SessionSignalInputs(MISSING_TODAY_BARS, None, ())
-    spy_today = sorted(
-        (
-            bar for bar in spy_bars
-            if bar.timestamp_et.date() == session_date and not bar.interpolated
-        ),
-        key=lambda bar: bar.begins_at,
-    )
+
+    if spy_bars_index is not None:
+        spy_today = sorted(
+            (bar for bar in spy_bars_index.by_date.get(session_date, ()) if not bar.interpolated),
+            key=lambda bar: bar.begins_at,
+        )
+    else:
+        spy_today = sorted(
+            (
+                bar for bar in spy_bars
+                if bar.timestamp_et.date() == session_date and not bar.interpolated
+            ),
+            key=lambda bar: bar.begins_at,
+        )
     if not spy_today:
         return SessionSignalInputs(MISSING_SPY_BARS_FOR_SESSION, None, ())
-    previous_close = max(historical, key=lambda bar: bar.begins_at).close_price
     today_open = today_bars[0].open_price
 
     opening_data = OpeningData(

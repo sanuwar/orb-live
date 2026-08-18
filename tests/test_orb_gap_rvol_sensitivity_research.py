@@ -32,6 +32,8 @@ from src.orb_universe_expansion_research import (
     CANDIDATE,
     DATA_INCOMPLETE,
     evaluate_symbol_session_with_signal,
+    index_minute_bars_by_date,
+    precompute_session_signal_inputs,
 )
 
 REPO_ROOT_CONFIG_PATH = "config/strategy_v0.yaml"
@@ -275,6 +277,89 @@ def test_matrix_row_aggregates_max_per_day_and_concentration():
     assert row["candidates_by_symbol"] == {"AAPL": 1, "MSFT": 1}
     assert row["concentration"]["top_1_share"] == pytest.approx(0.5)
     assert row["coverage_status"] in ("VALID", "INVALID_INSUFFICIENT_COVERAGE")
+
+
+# ---------------------------------------------------------------------------
+# M43.5 (Issue #338): `precompute_inputs_table` now always date-indexes each
+# symbol's (and SPY's) bars once and forwards that index to
+# `precompute_session_signal_inputs` -- the one caller for which the
+# one-time index-build cost is worth paying, since it evaluates every
+# session for a symbol. This is the "most important integration test":
+# proving the indexed production path is byte-identical, across multiple
+# symbols and multiple session dates in the same table, to a test-only
+# reference loop that calls `precompute_session_signal_inputs` the original
+# way (no index -- the literal pre-M43.5 implementation, still the default
+# when the two new parameters are omitted).
+# ---------------------------------------------------------------------------
+
+
+def _reference_precompute_inputs_table(*, universe, session_dates, minute_bars_by_symbol, spy_minute_bars, base_config):
+    """Test-only reference: the exact pre-M43.5 `precompute_inputs_table`
+    body, calling `precompute_session_signal_inputs` without an index for
+    every (symbol, session_date) pair -- i.e. always the full-history-rescan
+    path. Not used at runtime; exists solely so the tests below can assert
+    the indexed production implementation never diverges from it."""
+    table = {}
+    for symbol in universe:
+        candidate_bars = minute_bars_by_symbol[symbol]
+        for session_date in session_dates:
+            table[(symbol, session_date)] = precompute_session_signal_inputs(
+                symbol=symbol, session_date=session_date, candidate_bars=candidate_bars,
+                spy_bars=spy_minute_bars, config=base_config,
+            )
+    return table
+
+
+def test_precompute_inputs_table_index_parity_multi_symbol_multi_session():
+    session_dates = [SESSION_DATE, SESSION_DATE + timedelta(days=1)]
+    while session_dates[1].weekday() >= 5:
+        session_dates[1] += timedelta(days=1)
+
+    aapl_bars = synthetic_symbol_bars("AAPL", SESSION_DATE, gap_percent=Decimal("0.60"), rvol_multiple=Decimal("2.0"), lookback_days=LOOKBACK_DAYS, historical_dates=HISTORICAL_DATES)
+    msft_bars = synthetic_symbol_bars("MSFT", SESSION_DATE, gap_percent=Decimal("0.60"), rvol_multiple=Decimal("2.0"), lookback_days=LOOKBACK_DAYS, historical_dates=HISTORICAL_DATES, breakout=False)
+    spy_bars = synthetic_spy_bars(HISTORICAL_DATES + session_dates)
+
+    minute_bars = {
+        "AAPL": [b.to_minute_bar() for b in aapl_bars],
+        "MSFT": [b.to_minute_bar() for b in msft_bars],
+        "SPY": [b.to_minute_bar() for b in spy_bars],
+    }
+
+    reference = _reference_precompute_inputs_table(
+        universe=["AAPL", "MSFT"], session_dates=session_dates, minute_bars_by_symbol=minute_bars,
+        spy_minute_bars=minute_bars["SPY"], base_config=CONFIG,
+    )
+    indexed = precompute_inputs_table(
+        universe=["AAPL", "MSFT"], session_dates=session_dates, minute_bars_by_symbol=minute_bars,
+        spy_minute_bars=minute_bars["SPY"], base_config=CONFIG,
+    )
+
+    assert indexed.keys() == reference.keys()
+    for key in reference:
+        assert indexed[key] == reference[key], f"parity mismatch at {key}"
+    # Sanity: the fixture actually reaches a mix of outcomes, not every key
+    # trivially DATA_INCOMPLETE (a table where every entry is identically
+    # 'missing everything' could pass an equality check without exercising
+    # the indexed lookups at all).
+    assert any(v.incomplete_reason is None for v in reference.values())
+    assert any(v.incomplete_reason is not None for v in reference.values())
+
+
+def test_precompute_inputs_table_index_parity_deterministic_repeated_execution():
+    aapl_bars = synthetic_symbol_bars("AAPL", SESSION_DATE, gap_percent=Decimal("0.60"), rvol_multiple=Decimal("2.0"), lookback_days=LOOKBACK_DAYS, historical_dates=HISTORICAL_DATES)
+    spy_bars = synthetic_spy_bars(HISTORICAL_DATES + [SESSION_DATE])
+    minute_bars = {"AAPL": [b.to_minute_bar() for b in aapl_bars], "SPY": [b.to_minute_bar() for b in spy_bars]}
+
+    first = precompute_inputs_table(
+        universe=["AAPL"], session_dates=[SESSION_DATE], minute_bars_by_symbol=minute_bars,
+        spy_minute_bars=minute_bars["SPY"], base_config=CONFIG,
+    )
+    second = precompute_inputs_table(
+        universe=["AAPL"], session_dates=[SESSION_DATE], minute_bars_by_symbol=minute_bars,
+        spy_minute_bars=minute_bars["SPY"], base_config=CONFIG,
+    )
+
+    assert first == second
 
 
 # ---------------------------------------------------------------------------
