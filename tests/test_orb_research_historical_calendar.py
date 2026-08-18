@@ -169,11 +169,21 @@ def test_2023_weekend_is_closed():
         date(2021, 9, 6),   # Labor Day
         date(2021, 11, 25), # Thanksgiving
         date(2021, 12, 24), # Christmas observed (Dec 25 was a Saturday)
-        date(2021, 12, 31), # New Year's Day 2022 observed (2022-01-01 was a Saturday)
     ],
 )
 def test_2021_full_holidays_are_closed(day):
     assert research_regular_session_bounds(day) is None
+
+
+def test_2021_12_31_is_a_regular_trading_session_not_new_years_2022_observed():
+    # Issue #334: an earlier version of this table incorrectly treated
+    # 2021-12-31 as a closure ("New Year's Day 2022 observed", since
+    # 2022-01-01 fell on a Saturday). NYSE historical market-data evidence
+    # shows real trading activity on 2021-12-31, and
+    # src.exchange_calendar.FULL_HOLIDAYS's own documented rule confirms
+    # New Year's Day is the one holiday NOT observed on the preceding
+    # Friday -- unlike every other Saturday holiday in this file.
+    assert research_regular_session_bounds(date(2021, 12, 31)) == (REGULAR_OPEN, REGULAR_CLOSE)
 
 
 def test_2021_early_close_ends_at_1pm():
@@ -212,7 +222,7 @@ def test_2021_weekend_is_closed():
 
 def test_year_end_boundary_between_2021_and_2022_tables_is_seamless():
     assert research_regular_session_bounds(date(2021, 12, 30)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Thu, ordinary
-    assert research_regular_session_bounds(date(2021, 12, 31)) is None  # New Year's Day 2022 observed
+    assert research_regular_session_bounds(date(2021, 12, 31)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Fri, ordinary (New Year's Day is the standing exception)
     assert research_regular_session_bounds(date(2022, 1, 3)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Mon, ordinary
 
 
@@ -234,10 +244,13 @@ def test_2021_holiday_table_is_disjoint_from_2022_2023_2024_2025():
 def test_p_minus_2_is_exactly_252_sessions_ending_immediately_before_p_minus_1_start():
     # Local milestone M42: P_MINUS_2 must be exactly 252 sessions strictly
     # before P_MINUS_1's own start date (2022-03-30) -- the reason this
-    # module's floor was extended from 2022-01-01 to 2021-01-01.
+    # module's floor was extended from 2022-01-01 to 2021-01-01. Start
+    # date corrected by Issue #334 (2021-12-31 is a regular trading
+    # session, not a closure, so the 252-session count now reaches back
+    # one session less far -- 2021-03-31, not 2021-03-30).
     p_minus_2_sessions = research_trading_sessions_before(date(2022, 3, 30), count=252)
     assert len(p_minus_2_sessions) == 252
-    assert p_minus_2_sessions[0] == date(2021, 3, 30)
+    assert p_minus_2_sessions[0] == date(2021, 3, 31)
     assert p_minus_2_sessions[-1] == date(2022, 3, 29)
     assert p_minus_2_sessions[-1] < date(2022, 3, 30)
 

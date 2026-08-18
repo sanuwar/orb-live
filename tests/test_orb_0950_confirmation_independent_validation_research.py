@@ -155,9 +155,14 @@ def test_p_minus_2_session_count_is_252():
 
 
 def test_p_minus_2_exact_dates():
+    # Corrected by Issue #334: 2021-12-31 is a regular NYSE trading
+    # session (New Year's Day is the one holiday NOT observed on the
+    # preceding Friday -- see src.exchange_calendar.FULL_HOLIDAYS), so the
+    # 252-session count reaches back one session less far than the
+    # original (incorrect) 2021-03-30.
     sessions = derive_p_minus_2_sessions()
     assert len(sessions) == 252
-    assert sessions[0] == date(2021, 3, 30)
+    assert sessions[0] == date(2021, 3, 31)
     assert sessions[-1] == date(2022, 3, 29)
     assert sessions[-1] < P_MINUS_2_REFERENCE_DAY
 
