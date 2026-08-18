@@ -87,7 +87,7 @@ Each period reuses its own already-established universe unchanged: P_MINUS_1 use
 - RANKED_POOL_0950_MAX_RVOL: TSLA, AMD, AAPL
 - RANKED_POOL_0950_EQUAL_RANK_STRENGTH: TSLA, AMD, AAPL
 
-TSLA is the top contributor across every arm — a consistent, not arm-specific, concentration pattern already flagged in prior studies (M40 found the same for both PRIMARY and CHALLENGER on P_MINUS_1 alone).
+TSLA is the top contributor across every M41 arm, so concentration remains an important robustness concern within this study. This is not identical to M40's P_MINUS_1 concentration pattern, where GOOGL was PRIMARY's best contributor and AAPL was CHALLENGER's best contributor.
 
 ## The Three Comparisons (as specified)
 
