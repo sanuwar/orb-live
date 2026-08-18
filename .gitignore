@@ -82,3 +82,9 @@ artifacts/research-candidate-selection-timing/
 # Research tooling: generated study output (Issue #332, M42) -- reuses the
 # Issue #298 bar-cache above; no separate cache directory of its own.
 artifacts/research-0950-confirmation-independent-validation/
+
+# Research tooling: generated study output + per-period simulation
+# checkpoint cache (Issue #336, M43) -- reuses the Issue #298 bar-cache
+# above; the checkpoint cache is a local-only resumability aid, never
+# committed.
+artifacts/research-profit-protection-exit/
