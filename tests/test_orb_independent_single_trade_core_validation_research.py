@@ -116,14 +116,19 @@ def test_coverage_gap_is_none_for_the_actual_p_minus_1_window():
 
 
 def test_coverage_gap_reports_a_real_shortfall_for_an_oversized_window():
-    # A window that reaches past the (now 2022-01-01) calendar floor still
-    # produces a structured gap report -- the detector itself is not
-    # hardcoded to any one year boundary.
+    # A window that reaches past the calendar floor still produces a
+    # structured gap report -- the detector itself is not hardcoded to any
+    # one year boundary. Compared against the live
+    # RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE (not a literal date) so this
+    # test does not go stale the next time the floor is extended further
+    # back by a future milestone (as happened for M42's own extension).
+    from src.orb_research_historical_calendar import RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE
+
     gap = p_minus_1_coverage_gap(reference_day=date(2023, 3, 31), count=2000)
     assert gap is not None
     assert gap.requested_session_count == 2000
     assert gap.reference_day == date(2023, 3, 31)
-    assert gap.calendar_lower_bound == date(2022, 1, 1)
+    assert gap.calendar_lower_bound == RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE
     assert gap.sessions_available_within_calendar_coverage < 2000
     assert gap.sessions_short == 2000 - gap.sessions_available_within_calendar_coverage
     assert gap.sessions_short > 0
