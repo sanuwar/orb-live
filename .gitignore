@@ -88,3 +88,8 @@ artifacts/research-0950-confirmation-independent-validation/
 # above; the checkpoint cache is a local-only resumability aid, never
 # committed.
 artifacts/research-profit-protection-exit/
+
+# Research tooling: generated study output + per-period simulation
+# checkpoint cache (Issue #340, M44) -- same local-only resumability
+# convention as M43 above.
+artifacts/research-fallback-candidate-recovery/
