@@ -98,3 +98,10 @@ artifacts/research-fallback-candidate-recovery/
 # checkpoint cache (Issue #342, M45) -- same local-only resumability
 # convention as M43/M44 above.
 artifacts/research-later-first-entry-recovery/
+
+# Research tooling: M46 small/mid-cap universe-selection pipeline --
+# raw NPORT-P source XML, cached daily bars (2,649 tickers), SEC sector
+# lookups, and generated selection audit/basket CSVs. Reproducibility is
+# carried by the committed SHA-256 hashes and provenance manifest, not by
+# committing the underlying vendor/cache data itself.
+artifacts/research-small-midcap-momentum-lane/
