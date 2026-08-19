@@ -93,3 +93,8 @@ artifacts/research-profit-protection-exit/
 # checkpoint cache (Issue #340, M44) -- same local-only resumability
 # convention as M43 above.
 artifacts/research-fallback-candidate-recovery/
+
+# Research tooling: generated study output + per-period simulation
+# checkpoint cache (Issue #342, M45) -- same local-only resumability
+# convention as M43/M44 above.
+artifacts/research-later-first-entry-recovery/
