@@ -23,7 +23,6 @@ redoing the empirical simulation.
 from __future__ import annotations
 
 import asyncio
-import copy
 import csv
 import json
 import os
@@ -56,6 +55,7 @@ from src.orb_profit_protection_exit_research import (
     realized_r_distribution,
 )
 from src.orb_regime_diagnostic_research import MIN_SAMPLE_CLOSED_TRADES, symbol_summary, trade_quality_from_rows
+from src.orb_small_midcap_momentum_research import research_config_for_universe
 from src.orb_universe_expansion_research import (
     CachingHttpClient,
     DEFAULT_CACHE_DIR,
@@ -74,26 +74,6 @@ FINAL_BASKET_CSV = BASE / "selection" / "final_basket.csv"
 
 P3_REFERENCE_DAY = date(2026, 8, 14)
 P3_SESSION_COUNT = 90
-
-
-def research_config_for_universe(universe: tuple[str, ...]) -> dict:
-    """An in-memory-only copy of the tracked production config with
-    `universe.symbols` overridden to `universe`. Never reads back or
-    writes `config/strategy_v0.yaml`; `strategy.enabled` is left exactly
-    as loaded (False) -- this mirrors the same in-memory-override
-    convention `orb_gap_rvol_sensitivity_research.sensitivity_config` and
-    `orb_profit_protection_exit_research._waited_shadow_decision` already
-    use for gap/RVOL thresholds and `strategy.enabled` respectively.
-
-    Required because `SignalEngine.evaluate` rejects any symbol not in
-    `config["universe"]["symbols"]` regardless of gap/RVOL qualification
-    (src/signal_engine.py: "Symbol is not in the approved universe.") --
-    without this override every one of the 20 SMALL_MID symbols is
-    silently rejected before gap/RVOL is ever evaluated, since none of
-    them are in the tracked production 15-symbol list."""
-    overridden = copy.deepcopy(dict(load_config()))
-    overridden["universe"]["symbols"] = list(universe)
-    return overridden
 
 
 def load_small_mid_basket() -> tuple[tuple[str, ...], dict[str, dict]]:
@@ -145,7 +125,7 @@ async def _run_lane(*, label: str, universe: tuple[str, ...], implementation_dig
     )
     minute_bars_by_symbol = {s: [b.to_minute_bar() for b in bars] for s, bars in market_bars_by_symbol.items()}
 
-    research_config = research_config_for_universe(universe)
+    research_config = research_config_for_universe(load_config(), universe)
 
     inputs_table = precompute_inputs_table(
         universe=universe, session_dates=session_dates, minute_bars_by_symbol=minute_bars_by_symbol,

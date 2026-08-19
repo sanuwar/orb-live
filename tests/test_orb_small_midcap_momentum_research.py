@@ -8,22 +8,38 @@ from __future__ import annotations
 import pytest
 
 from src.orb_small_midcap_momentum_research import (
+    CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS,
+    CONCENTRATION_STATUS_OK,
+    ConcentrationResult,
     DailyBar,
+    FeasibilityMetrics,
     HoldingCandidate,
     LiquidityProfile,
     MAX_PER_SECTOR,
+    MAX_SYMBOL_SHARE_OF_POSITIVE_R,
+    MIN_CLOSED_TRADES_FOR_EVIDENCE,
+    MIN_CLOSED_TRADES_FOR_PROMISING,
     MIN_MATERIAL_POSITION_WEIGHT,
     MIN_MEDIAN_CLOSE_PRICE,
     MIN_MEDIAN_DOLLAR_VOLUME,
     MIN_MEDIAN_SHARE_VOLUME,
+    MIN_PROFIT_FACTOR_R,
+    MIN_SECTORS_WITH_CLOSED_TRADES,
     MIN_VALID_SESSION_COVERAGE_PCT,
     SelectionCandidate,
     TARGET_PER_BUCKET,
     UniverseSelectionError,
+    VERDICT_INSUFFICIENT_EVIDENCE,
+    VERDICT_MIXED,
+    VERDICT_NOT_PROMISING,
+    VERDICT_PROMISING,
+    classify_feasibility,
     compute_liquidity_profile,
     dedupe_share_classes,
     filter_material_positions,
     normalize_issuer_name,
+    positive_contribution_concentration,
+    research_config_for_universe,
     resolve_cross_fund_overlap,
     select_sector_capped_basket,
 )
@@ -312,3 +328,273 @@ def test_selection_is_deterministic_across_repeated_calls():
     r1 = select_sector_capped_basket(pool, target_per_bucket=6, max_per_sector=2)
     r2 = select_sector_capped_basket(list(reversed(pool)), target_per_bucket=6, max_per_sector=2)
     assert [c.ticker for c in r1.selected] == [c.ticker for c in r2.selected]
+
+
+# --------------------------------------------------------------------------
+# research_config_for_universe
+# --------------------------------------------------------------------------
+
+def _controlled_base_config():
+    """A minimal but shape-accurate stand-in for `src.config.load_config()`
+    -- controlled, not the real tracked file, so these tests never touch
+    config/strategy_v0.yaml and never depend on its contents changing."""
+    return {
+        "strategy": {"name": "orb_long_v0", "version": "0.1.0", "timezone": "America/New_York", "enabled": False},
+        "universe": {"symbols": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AVGO", "AMD", "JPM", "XOM", "LLY", "COST", "WMT", "NFLX"]},
+        "signal": {
+            "minimum_gap_percent": 1.0, "opening_range_minutes": 5, "minimum_relative_volume": 3.0,
+            "relative_volume_lookback_days": 20, "require_spy_above_vwap": True,
+            "entry_start": "09:40", "entry_end": "11:00", "one_entry_per_symbol_per_day": True,
+        },
+        "exit": {
+            "initial_stop": "opening_range_low", "move_stop_to_break_even_at_r": 1.0,
+            "full_profit_exit_at_r": 2.0, "time_exit": "15:45", "overnight_positions_allowed": False,
+        },
+        "risk": {"risk_per_trade_usd": 15, "maximum_position_usd": 3000, "maximum_open_positions": 1},
+    }
+
+
+def test_research_config_replaces_only_universe_symbols():
+    base = _controlled_base_config()
+    research_universe = ("SNDK", "LITE", "WDC")
+    overridden = research_config_for_universe(base, research_universe)
+    assert overridden["universe"]["symbols"] == list(research_universe)
+
+
+def test_research_config_deep_copies_and_never_mutates_base():
+    base = _controlled_base_config()
+    original_symbols = list(base["universe"]["symbols"])
+    research_config_for_universe(base, ("SNDK", "LITE"))
+    assert base["universe"]["symbols"] == original_symbols
+
+
+def test_research_config_preserves_strategy_enabled_false():
+    base = _controlled_base_config()
+    overridden = research_config_for_universe(base, ("SNDK",))
+    assert overridden["strategy"]["enabled"] is False
+
+
+def test_research_config_preserves_frozen_signal_and_risk_settings():
+    base = _controlled_base_config()
+    overridden = research_config_for_universe(base, ("SNDK",))
+    assert overridden["signal"] == base["signal"]
+    assert overridden["exit"] == base["exit"]
+    assert overridden["risk"] == base["risk"]
+
+
+def test_research_config_membership_contract_allows_research_symbol():
+    """The whole point of the override: a research-only symbol is allowed
+    under the overridden copy (would otherwise be rejected by
+    SignalEngine's universe-membership gate), while the original
+    production-universe object is completely untouched."""
+    base = _controlled_base_config()
+    overridden = research_config_for_universe(base, ("SNDK",))
+    assert "SNDK" in overridden["universe"]["symbols"]
+    assert "SNDK" not in base["universe"]["symbols"]
+    assert "AAPL" in base["universe"]["symbols"]
+
+
+def test_research_config_rejects_empty_universe():
+    base = _controlled_base_config()
+    with pytest.raises(UniverseSelectionError):
+        research_config_for_universe(base, ())
+
+
+# --------------------------------------------------------------------------
+# positive_contribution_concentration
+# --------------------------------------------------------------------------
+
+def test_concentration_positive_total_lane_computes_correct_share():
+    # A winning lane: HOOD dominates, but positive_total is the sum of
+    # ONLY the positive contributors (BE contributes nothing to the
+    # denominator despite being in the mapping).
+    result = positive_contribution_concentration({"HOOD": 3.0, "BE": 0.5, "WULF": -1.0})
+    assert result.status == CONCENTRATION_STATUS_OK
+    assert result.top_key == "HOOD"
+    assert result.positive_total == pytest.approx(3.5)
+    assert result.share == pytest.approx(3.0 / 3.5)
+
+
+def test_concentration_negative_net_lane_with_positive_contributor_is_not_a_free_pass():
+    # This is exactly Finding 1's bug case: net total is negative, but the
+    # correct denominator is the positive-only sum, and the single positive
+    # contributor is 100% of it -- must NOT report a small/negative share.
+    contributions = {"HOOD": 1.0636420966180742, "BE": 0.0, "SNDK": 0.0, "CRDO": -0.1044,
+                      "APLD": -0.2946, "HIMS": -1.0, "CDE": -1.0, "LITE": -1.0, "WULF": -2.0}
+    result = positive_contribution_concentration(contributions)
+    assert result.status == CONCENTRATION_STATUS_OK
+    assert result.top_key == "HOOD"
+    assert result.positive_total == pytest.approx(1.0636420966180742)
+    assert result.share == pytest.approx(1.0)
+    assert result.share > MAX_SYMBOL_SHARE_OF_POSITIVE_R  # correctly fails the 50% gate
+
+
+def test_concentration_no_positive_contributors_is_explicit_not_a_pass():
+    result = positive_contribution_concentration({"HOOD": -1.0, "BE": -0.5, "WULF": 0.0})
+    assert result.status == CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS
+    assert result.share is None
+    assert result.top_key is None
+
+
+def test_concentration_empty_mapping_is_no_positive_contributors():
+    result = positive_contribution_concentration({})
+    assert result.status == CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS
+
+
+def test_concentration_tie_break_is_deterministic():
+    result = positive_contribution_concentration({"BBB": 1.0, "AAA": 1.0})
+    assert result.top_key == "AAA"
+
+
+def test_concentration_result_ok_requires_share_and_top_key():
+    with pytest.raises(UniverseSelectionError):
+        ConcentrationResult(top_key=None, top_contribution=None, positive_total=1.0, share=None, status=CONCENTRATION_STATUS_OK)
+
+
+def test_concentration_result_no_positive_forbids_top_key():
+    with pytest.raises(UniverseSelectionError):
+        ConcentrationResult(top_key="X", top_contribution=1.0, positive_total=0.0, share=None, status=CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS)
+
+
+# --------------------------------------------------------------------------
+# classify_feasibility
+# --------------------------------------------------------------------------
+
+def _promising_metrics(**overrides):
+    defaults = dict(
+        closed_trades=25, expectancy_r=0.3, profit_factor_r=1.5, trades_per_month=5.0,
+        cumulative_r=6.0, expectancy_r_excluding_best_symbol=0.1, sectors_with_closed_trades=5,
+        symbol_r_contributions={"A": 2.0, "B": 1.5, "C": 1.0, "D": 1.0, "E": 0.5},
+        mfe_pct_reaching_050r=0.6, mfe_pct_reaching_100r=0.3,
+    )
+    defaults.update(overrides)
+    return FeasibilityMetrics(**defaults)
+
+
+def test_classify_insufficient_evidence_below_ten_closed():
+    result = classify_feasibility(
+        small_mid=_promising_metrics(closed_trades=9),
+        large_cap_trades_per_month=2.0, large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["verdict"] == VERDICT_INSUFFICIENT_EVIDENCE
+    assert result["criteria"] == {}
+
+
+def test_classify_fully_passing_synthetic_case_is_promising():
+    result = classify_feasibility(
+        small_mid=_promising_metrics(),
+        large_cap_trades_per_month=2.0, large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["verdict"] == VERDICT_PROMISING
+    assert all(result["criteria"].values())
+    assert result["reasons"] == []
+
+
+def test_classify_mixed_when_positive_expectancy_pf_gt_1_but_secondary_criteria_fail():
+    # PF_R > 1.0 but <= 1.10 (fails c3); expectancy still positive -> MIXED.
+    metrics = _promising_metrics(profit_factor_r=1.05)
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["verdict"] == VERDICT_MIXED
+    assert "c3_pf_r_gt_1_10" in result["reasons"]
+
+
+def test_classify_not_promising_on_negative_expectancy():
+    metrics = _promising_metrics(expectancy_r=-0.2, profit_factor_r=0.5, cumulative_r=-4.0)
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["verdict"] == VERDICT_NOT_PROMISING
+
+
+def test_classify_not_promising_on_pf_r_at_or_below_one():
+    metrics = _promising_metrics(profit_factor_r=1.0)
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["verdict"] == VERDICT_NOT_PROMISING
+
+
+def test_classify_uses_corrected_concentration_for_positive_total_lane():
+    metrics = _promising_metrics(symbol_r_contributions={"A": 2.0, "B": 2.0})  # 50/50, exactly at boundary
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["criteria"]["c8_symbol_share_of_positive_r_le_50pct"] is True
+    assert result["concentration"].share == pytest.approx(0.5)
+
+
+def test_classify_negative_net_r_lane_with_positive_contributor_fails_concentration_correctly():
+    # Reproduces Finding 1 end-to-end through classify_feasibility: net
+    # cumulative_r is negative, but the single positive symbol is 100% of
+    # positive contribution -- c8 must FAIL, not silently pass.
+    metrics = _promising_metrics(
+        expectancy_r=-0.2, profit_factor_r=0.35, cumulative_r=-4.34,
+        symbol_r_contributions={"HOOD": 1.06, "WULF": -2.0, "LITE": -1.0, "HIMS": -1.0, "CDE": -1.0},
+    )
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["concentration"].status == CONCENTRATION_STATUS_OK
+    assert result["concentration"].share == pytest.approx(1.0)
+    assert result["criteria"]["c8_symbol_share_of_positive_r_le_50pct"] is False
+    assert result["verdict"] == VERDICT_NOT_PROMISING
+
+
+def test_classify_one_symbol_exceeding_50pct_of_positive_contribution_fails_c8():
+    metrics = _promising_metrics(symbol_r_contributions={"A": 3.0, "B": 1.0})  # A = 75%
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["criteria"]["c8_symbol_share_of_positive_r_le_50pct"] is False
+    assert result["verdict"] != VERDICT_PROMISING
+
+
+def test_classify_no_positive_contributors_does_not_pass_c8():
+    metrics = _promising_metrics(symbol_r_contributions={"A": -1.0, "B": -2.0})
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["concentration"].status == CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS
+    assert result["criteria"]["c8_symbol_share_of_positive_r_le_50pct"] is False
+
+
+def test_classify_mfe_edge_boundary_is_strict_greater_than():
+    # Exactly equal to LARGE_CAP at both thresholds -> c9 fails (strict >).
+    metrics = _promising_metrics(mfe_pct_reaching_050r=0.4, mfe_pct_reaching_100r=0.1)
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["criteria"]["c9a_mfe_050_edge"] is False
+    assert result["criteria"]["c9b_mfe_100_edge"] is False
+    assert result["criteria"]["c9_mfe_edge_050_or_100"] is False
+
+
+def test_classify_mfe_edge_passes_on_either_threshold_alone():
+    metrics = _promising_metrics(mfe_pct_reaching_050r=0.3, mfe_pct_reaching_100r=0.2)  # only 100R edge clears
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=2.0,
+        large_cap_mfe_pct_reaching_050r=0.4, large_cap_mfe_pct_reaching_100r=0.1,
+    )
+    assert result["criteria"]["c9a_mfe_050_edge"] is False
+    assert result["criteria"]["c9b_mfe_100_edge"] is True
+    assert result["criteria"]["c9_mfe_edge_050_or_100"] is True
+
+
+def test_classify_sector_concentration_is_not_a_gate():
+    """Sector-level concentration is a reporting diagnostic only -- the
+    frozen 9-criterion spec gates on symbol-level concentration alone.
+    classify_feasibility has no sector-share input at all, which is itself
+    the regression guard: it cannot fail on sector concentration."""
+    import inspect
+    params = inspect.signature(classify_feasibility).parameters
+    assert not any("sector_share" in p or "sector_r" in p for p in params)

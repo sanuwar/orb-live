@@ -31,7 +31,12 @@ from src.orb_profit_protection_exit_research import (
     max_drawdown_r_and_streak_from_rows,
     realized_r_distribution,
 )
-from src.orb_regime_diagnostic_research import MIN_SAMPLE_CLOSED_TRADES, symbol_summary, trade_quality_from_rows
+from src.orb_regime_diagnostic_research import symbol_summary, trade_quality_from_rows
+from src.orb_small_midcap_momentum_research import (
+    FeasibilityMetrics,
+    classify_feasibility,
+    positive_contribution_concentration,
+)
 
 BASE = ROOT / "artifacts" / "research-small-midcap-momentum-lane"
 CHECKPOINT_DIR = BASE / "experiment-checkpoint"
@@ -99,7 +104,46 @@ def top_n_excluded(rows, *, symbols: list[str]) -> dict:
     return trade_quality_from_rows(remaining)
 
 
+def symbol_r_contributions(rows) -> dict[str, float]:
+    """Sum of `r_multiple` (R-normalized, NOT dollar P&L) per symbol over
+    CLOSED trades only. This is the correct input to
+    `positive_contribution_concentration` for criterion #8 -- using dollar
+    `realized_pnl` here would silently reintroduce a unit bug alongside the
+    denominator bug (see `orb_small_midcap_momentum_research.
+    positive_contribution_concentration`'s own docstring)."""
+    by_symbol: dict[str, float] = defaultdict(float)
+    for r in rows:
+        if r.outcome["closed"] and r.outcome["r_multiple"] is not None:
+            by_symbol[r.decision["symbol"]] += r.outcome["r_multiple"]
+    return dict(by_symbol)
+
+
+def sector_r_contributions(rows, *, basket_meta: dict[str, dict]) -> dict[str, float]:
+    by_sector: dict[str, float] = defaultdict(float)
+    for r in rows:
+        if r.outcome["closed"] and r.outcome["r_multiple"] is not None:
+            sector = basket_meta.get(r.decision["symbol"], {}).get("sector_major_group", "UNKNOWN")
+            by_sector[sector] += r.outcome["r_multiple"]
+    return dict(by_sector)
+
+
+def _concentration_to_dict(result) -> dict:
+    return {
+        "status": result.status, "top_key": result.top_key, "top_contribution_r": result.top_contribution,
+        "positive_total_r": result.positive_total, "share": result.share,
+    }
+
+
 def sector_diagnostics(rows, *, basket_meta: dict[str, dict]) -> dict:
+    """Sector concentration here is a REPORTING diagnostic only -- it is
+    NOT one of the frozen 9 classification criteria (only symbol-level
+    concentration, criterion #8, gates the verdict). Both the numerator
+    (top sector's R) and denominator (sum of positive-sector R only) are
+    preserved in the output for auditability, using the same corrected
+    positive-contribution-only concentration function as the symbol-level
+    check (see Finding 1 -- dividing by NET total R, which can be
+    negative, silently manufactures a passing "share" for any losing
+    lane)."""
     by_sector: dict[str, list] = defaultdict(list)
     for r in rows:
         sym = r.decision["symbol"]
@@ -114,18 +158,21 @@ def sector_diagnostics(rows, *, basket_meta: dict[str, dict]) -> dict:
             "cumulative_r": tq["cumulative_r"],
             "expectancy_r": tq["expectancy_r_per_trade"],
         }
-    closed_rows = [r for r in rows if r.outcome["closed"]]
-    total_r = sum(r.outcome["r_multiple"] for r in closed_rows if r.outcome["r_multiple"] is not None)
-    sector_r = {s: d["cumulative_r"] or 0.0 for s, d in per_sector.items()}
-    ranked = sorted(sector_r.items(), key=lambda kv: kv[1], reverse=True)
-    best_sector_share = (ranked[0][1] / total_r) if ranked and total_r not in (0, None) else None
-    top2_share = (sum(v for _, v in ranked[:2]) / total_r) if len(ranked) >= 2 and total_r not in (0, None) else None
+
+    sector_r = sector_r_contributions(rows, basket_meta=basket_meta)
+    concentration = positive_contribution_concentration(sector_r)
+
+    ranked_positive = sorted(((k, v) for k, v in sector_r.items() if v > 0), key=lambda kv: -kv[1])
+    positive_total = sum(v for _, v in ranked_positive)
+    top2_share = (sum(v for _, v in ranked_positive[:2]) / positive_total) if positive_total > 0 else None
+
     return {
         "per_sector": per_sector,
         "sectors_with_closed_trades": sum(1 for d in per_sector.values() if d["trade_count"] > 0),
-        "best_sector_share_of_total_r": best_sector_share,
-        "top_2_sector_share_of_total_r": top2_share,
         "sectors_with_positive_cum_r": sum(1 for d in per_sector.values() if (d["cumulative_r"] or 0) > 0),
+        "best_sector_concentration": _concentration_to_dict(concentration),
+        "top_2_sector_share_of_positive_r": top2_share,
+        "note": "sector concentration is a reporting diagnostic only; the frozen classification gates on symbol-level concentration (criterion #8) alone",
     }
 
 
@@ -150,13 +197,17 @@ def full_lane_report(*, label: str, rows, universe: tuple[str, ...], session_dat
     integrity = integrity_checks(rows, universe=universe, session_dates=session_dates)
     ls = long_short_breakdown(rows)
 
-    best_symbol = None
-    top = sym_summ.get("top_profitable_contributors") or []
-    if top:
-        best_symbol = top[0]["symbol"]
+    # best_symbol for "expectancy excluding best symbol" (criterion #6) is
+    # ranked by REALIZED R contribution, not dollar P&L -- both units are
+    # tracked, but the R ranking is what the frozen criteria are stated in
+    # terms of, and the two rankings can disagree (see Finding 1).
+    r_contributions = symbol_r_contributions(rows)
+    symbol_concentration = positive_contribution_concentration(r_contributions)
+    best_symbol = symbol_concentration.top_key
     excl_best = excluding_symbol(rows, symbol=best_symbol) if best_symbol else None
 
-    top3_symbols = [c["symbol"] for c in top[:3]]
+    top3_by_r = sorted(r_contributions.items(), key=lambda kv: -kv[1])[:3]
+    top3_symbols = [s for s, _ in top3_by_r]
     excl_top3 = top_n_excluded(rows, symbols=top3_symbols) if top3_symbols else None
 
     report = {
@@ -168,6 +219,8 @@ def full_lane_report(*, label: str, rows, universe: tuple[str, ...], session_dat
         "mfe_stats": mfe,
         "trades_per_month": tpm,
         "symbol_summary": sym_summ,
+        "symbol_r_contributions": r_contributions,
+        "symbol_concentration": _concentration_to_dict(symbol_concentration),
         "expectancy_excluding_best_symbol": excl_best,
         "expectancy_excluding_top3_symbols": excl_top3,
         "integrity": integrity,
@@ -179,65 +232,43 @@ def full_lane_report(*, label: str, rows, universe: tuple[str, ...], session_dat
 
 
 # ---------------------------------------------------------------------------
-# Predeclared classification (frozen before any P3 result was computed --
-# reproduced verbatim from the M46 specification).
+# Predeclared classification (frozen before any P3 result was computed).
+# Thin adapter only: the actual 9-criteria logic and the corrected
+# positive-contribution concentration math live in the tested pure module
+# (`classify_feasibility` / `positive_contribution_concentration` in
+# src/orb_small_midcap_momentum_research.py) so they are unit-testable
+# without importing this network-oriented script. This function's only job
+# is translating the already-computed lane reports into that module's
+# plain-data `FeasibilityMetrics` input.
 # ---------------------------------------------------------------------------
 
 def classify(*, small_mid: dict, large_cap: dict) -> dict:
     tq = small_mid["trade_quality"]
-    reasons = []
-
-    if tq["closed_trades"] < 10:
-        return {"verdict": "INSUFFICIENT_EVIDENCE", "reasons": [f"SMALL_MID closed_trades={tq['closed_trades']} < 10"]}
-
-    c1 = tq["closed_trades"] >= 20
-    c2 = (tq["expectancy_r_per_trade"] or 0) > 0
-    c3 = (tq["profit_factor_r"] or 0) > 1.10
-    c4 = small_mid["trades_per_month"] > large_cap["trades_per_month"]
-    c5 = (tq["cumulative_r"] or 0) > 0
     excl_best = small_mid["expectancy_excluding_best_symbol"]
-    c6 = excl_best is not None and (excl_best["expectancy_r_per_trade"] or -1) > 0
     sector_diag = small_mid.get("sector_diagnostics", {})
-    c7 = sector_diag.get("sectors_with_closed_trades", 0) >= 4
-    c8 = (sector_diag.get("best_sector_share_of_total_r") is None) or (sector_diag.get("best_sector_share_of_total_r") <= 0.50)
-    # "no single symbol contributes >50% of positive cumulative R"
-    sym_summ = small_mid["symbol_summary"]
-    top3_share = sym_summ.get("top_3_share_of_total_pnl")
-    top1_share = None
-    top = sym_summ.get("top_profitable_contributors") or []
-    if top and sym_summ.get("total_realized_pnl") not in (None, "0"):
-        try:
-            total = Decimal(sym_summ["total_realized_pnl"])
-            top1_share = float(Decimal(top[0]["realized_pnl"]) / total) if total != 0 else None
-        except Exception:
-            top1_share = None
-    c8_symbol = (top1_share is None) or (top1_share <= 0.50)
-
     small_mfe = small_mid["mfe_stats"]
     large_mfe = large_cap["mfe_stats"]
-    c9a = (small_mfe.get("pct_reaching_050R") or 0) > (large_mfe.get("pct_reaching_050R") or 0)
-    c9b = (small_mfe.get("pct_reaching_100R") or 0) > (large_mfe.get("pct_reaching_100R") or 0)
-    c9 = c9a or c9b
 
-    core = {"c1_closed_ge_20": c1, "c2_expectancy_positive": c2, "c3_pf_r_gt_1_10": c3,
-            "c4_trades_per_month_gt_large_cap": c4, "c5_r_per_month_positive": c5,
-            "c6_expectancy_excl_best_positive": c6, "c7_sectors_with_trades_ge_4": c7,
-            "c8_best_sector_share_le_50pct": c8, "c8_symbol_no_single_gt_50pct": c8_symbol,
-            "c9_mfe_edge_050_or_100": c9, "c9a_mfe_050_edge": c9a, "c9b_mfe_100_edge": c9b}
-
-    all_core_pass = c1 and c2 and c3 and c4 and c5 and c6 and c7 and c8 and c8_symbol and c9
-    if all_core_pass:
-        verdict = "PROMISING"
-    else:
-        failed = [k for k, v in core.items() if not v and not k.startswith("c9a") and not k.startswith("c9b")]
-        # MIXED vs NOT_PROMISING: MIXED if expectancy positive & PF_R>1.0 despite missing some secondary criteria.
-        if c2 and (tq["profit_factor_r"] or 0) > 1.0:
-            verdict = "MIXED"
-        else:
-            verdict = "NOT_PROMISING"
-        reasons = failed
-
-    return {"verdict": verdict, "criteria": core, "reasons": reasons}
+    metrics = FeasibilityMetrics(
+        closed_trades=tq["closed_trades"],
+        expectancy_r=tq["expectancy_r_per_trade"],
+        profit_factor_r=tq["profit_factor_r"],
+        trades_per_month=small_mid["trades_per_month"],
+        cumulative_r=tq["cumulative_r"],
+        expectancy_r_excluding_best_symbol=(excl_best or {}).get("expectancy_r_per_trade"),
+        sectors_with_closed_trades=sector_diag.get("sectors_with_closed_trades", 0),
+        symbol_r_contributions=small_mid["symbol_r_contributions"],
+        mfe_pct_reaching_050r=small_mfe.get("pct_reaching_05R"),
+        mfe_pct_reaching_100r=small_mfe.get("pct_reaching_10R"),
+    )
+    result = classify_feasibility(
+        small_mid=metrics, large_cap_trades_per_month=large_cap["trades_per_month"],
+        large_cap_mfe_pct_reaching_050r=large_mfe.get("pct_reaching_05R"),
+        large_cap_mfe_pct_reaching_100r=large_mfe.get("pct_reaching_10R"),
+    )
+    concentration = result.pop("concentration")
+    result["symbol_concentration"] = _concentration_to_dict(concentration) if concentration is not None else None
+    return result
 
 
 def main() -> None:

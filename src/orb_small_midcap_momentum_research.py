@@ -14,14 +14,48 @@ an explicit reason, not silently dropped or picked.
 
 from __future__ import annotations
 
+import copy
 import re
 import statistics
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 class UniverseSelectionError(RuntimeError):
     """Any refusal in the M46 universe-selection pipeline."""
+
+
+# --------------------------------------------------------------------------
+# In-memory-only research universe override for SignalEngine evaluation.
+# --------------------------------------------------------------------------
+
+def research_config_for_universe(base_config: Mapping[str, Any], universe: Sequence[str]) -> dict[str, Any]:
+    """A deep-copied, in-memory-only version of `base_config` with
+    `universe.symbols` replaced by `universe`. This function performs no
+    I/O itself -- it neither loads nor writes any file; the caller loads
+    the tracked config (e.g. `src.config.load_config()`) and passes it in,
+    and nothing here ever persists the result back to
+    `config/strategy_v0.yaml`. `base_config` is deep-copied before the
+    override, so the caller's original object is never mutated -- every
+    other key (`strategy.enabled`, signal thresholds, risk/exit rules) is
+    carried through unchanged. Mirrors the same in-memory-override
+    convention `orb_gap_rvol_sensitivity_research.sensitivity_config` and
+    `orb_profit_protection_exit_research._waited_shadow_decision` already
+    use for gap/RVOL thresholds and `strategy.enabled` respectively.
+
+    Required because `SignalEngine.evaluate` rejects any symbol not in
+    `config["universe"]["symbols"]` regardless of gap/RVOL qualification
+    (`src/signal_engine.py`: "Symbol is not in the approved universe.") --
+    without this override, a symbol outside the tracked production
+    15-symbol universe is silently rejected before gap/RVOL is ever
+    evaluated, which is exactly what happened on the first P3 run against
+    the 20-symbol SMALL_MID basket (zero candidate occurrences, not just
+    zero closed trades, across all 90 sessions)."""
+    if not universe:
+        raise UniverseSelectionError("research universe must not be empty")
+    overridden = copy.deepcopy(dict(base_config))
+    overridden["universe"]["symbols"] = list(universe)
+    return overridden
 
 
 # --------------------------------------------------------------------------
@@ -281,8 +315,168 @@ def select_sector_capped_basket(
     )
 
 
+# --------------------------------------------------------------------------
+# Positive-contribution concentration (symbol- and sector-level).
+#
+# The predeclared M46 criterion is "no single symbol contributes more than
+# 50% of positive cumulative R" -- a statement about how concentrated the
+# WINNING side of the ledger is, not about net P&L. Dividing a top
+# contributor by the NET total is a live bug for any losing lane: net R is
+# negative, a positive numerator divided by a negative denominator produces
+# a negative "share", which trivially clears any <=50% gate regardless of
+# how concentrated the actual gains are. The denominator here is always the
+# sum of POSITIVE contributions only; negative and zero contributors never
+# enter it.
+# --------------------------------------------------------------------------
+
+CONCENTRATION_STATUS_OK = "OK"
+CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS = "NO_POSITIVE_CONTRIBUTORS"
+
+
+@dataclass(frozen=True)
+class ConcentrationResult:
+    """`share` is `top_contribution / positive_total`, computed only from
+    entries with a strictly positive contribution. When no contributor is
+    positive, `status` is `NO_POSITIVE_CONTRIBUTORS` and `share` is `None`
+    -- callers must treat that as non-applicable, never as an automatic
+    pass of a `<=` threshold check (an undefined ratio is not evidence the
+    threshold was cleared)."""
+
+    top_key: str | None
+    top_contribution: float | None
+    positive_total: float
+    share: float | None
+    status: str
+
+    def __post_init__(self) -> None:
+        if self.status == CONCENTRATION_STATUS_OK:
+            if self.top_key is None or self.top_contribution is None or self.share is None:
+                raise UniverseSelectionError("an OK concentration result requires top_key/top_contribution/share")
+        elif self.status == CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS:
+            if self.top_key is not None or self.share is not None:
+                raise UniverseSelectionError("NO_POSITIVE_CONTRIBUTORS must not carry a top_key or share")
+        else:
+            raise UniverseSelectionError(f"unknown concentration status: {self.status!r}")
+
+
+def positive_contribution_concentration(contributions: Mapping[str, float]) -> ConcentrationResult:
+    """Reusable for both symbol-level and sector-level concentration --
+    same math, different grouping key supplied by the caller. Contributions
+    must already be R-multiples (e.g. summed `r_multiple` per symbol/sector
+    over closed trades), never raw dollar P&L: the two units are not
+    interchangeable (see `trade_quality_from_rows`'s own unit warning in
+    `src/orb_regime_diagnostic_research.py`) and mixing them silently would
+    reintroduce a unit bug alongside the denominator bug this function
+    exists to fix."""
+    positive = {k: v for k, v in contributions.items() if v > 0}
+    positive_total = sum(positive.values())
+    if not positive or positive_total <= 0:
+        return ConcentrationResult(
+            top_key=None, top_contribution=None, positive_total=0.0, share=None,
+            status=CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS,
+        )
+    ordered = sorted(positive.items(), key=lambda kv: (-kv[1], kv[0]))
+    top_key, top_contribution = ordered[0]
+    return ConcentrationResult(
+        top_key=top_key, top_contribution=top_contribution, positive_total=positive_total,
+        share=top_contribution / positive_total, status=CONCENTRATION_STATUS_OK,
+    )
+
+
+# --------------------------------------------------------------------------
+# Predeclared feasibility classification (frozen before any P3 result was
+# computed). Exactly the 9 conditions from the M46 specification -- no more,
+# no fewer. Sector-level concentration is reported for diagnostic purposes
+# elsewhere but is NOT one of the 9 gates: only symbol-level concentration
+# (#8) is part of the frozen classification.
+# --------------------------------------------------------------------------
+
+VERDICT_PROMISING = "PROMISING"
+VERDICT_MIXED = "MIXED"
+VERDICT_NOT_PROMISING = "NOT_PROMISING"
+VERDICT_INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+MIN_CLOSED_TRADES_FOR_EVIDENCE = 10
+MIN_CLOSED_TRADES_FOR_PROMISING = 20
+MIN_PROFIT_FACTOR_R = 1.10
+MAX_SYMBOL_SHARE_OF_POSITIVE_R = 0.50
+MIN_SECTORS_WITH_CLOSED_TRADES = 4
+
+
+@dataclass(frozen=True)
+class FeasibilityMetrics:
+    """The minimal, plain-data input `classify_feasibility` needs for one
+    lane (SMALL_MID). Deliberately independent of `TradeDiagnosticRow` and
+    any network-oriented script so this stays trivially unit-testable
+    against synthetic numbers."""
+
+    closed_trades: int
+    expectancy_r: float | None
+    profit_factor_r: float | None
+    trades_per_month: float
+    cumulative_r: float | None
+    expectancy_r_excluding_best_symbol: float | None
+    sectors_with_closed_trades: int
+    symbol_r_contributions: Mapping[str, float]
+    mfe_pct_reaching_050r: float | None
+    mfe_pct_reaching_100r: float | None
+
+
+def classify_feasibility(
+    *, small_mid: FeasibilityMetrics, large_cap_trades_per_month: float,
+    large_cap_mfe_pct_reaching_050r: float | None, large_cap_mfe_pct_reaching_100r: float | None,
+) -> dict:
+    """PROMISING / MIXED / NOT_PROMISING / INSUFFICIENT_EVIDENCE against the
+    9 criteria frozen before the P3 result was computed. Returns a dict with
+    `verdict`, the individual `criteria` booleans (plus the raw
+    `concentration` result for audit), and `reasons` (criteria that failed,
+    only populated for MIXED/NOT_PROMISING)."""
+    if small_mid.closed_trades < MIN_CLOSED_TRADES_FOR_EVIDENCE:
+        return {
+            "verdict": VERDICT_INSUFFICIENT_EVIDENCE,
+            "reasons": [f"closed_trades={small_mid.closed_trades} < {MIN_CLOSED_TRADES_FOR_EVIDENCE}"],
+            "criteria": {}, "concentration": None,
+        }
+
+    concentration = positive_contribution_concentration(small_mid.symbol_r_contributions)
+    c8 = concentration.status == CONCENTRATION_STATUS_OK and concentration.share <= MAX_SYMBOL_SHARE_OF_POSITIVE_R
+
+    c1 = small_mid.closed_trades >= MIN_CLOSED_TRADES_FOR_PROMISING
+    c2 = (small_mid.expectancy_r or 0) > 0
+    c3 = (small_mid.profit_factor_r or 0) > MIN_PROFIT_FACTOR_R
+    c4 = small_mid.trades_per_month > large_cap_trades_per_month
+    c5 = (small_mid.cumulative_r or 0) > 0
+    c6 = (small_mid.expectancy_r_excluding_best_symbol or -1) > 0
+    c7 = small_mid.sectors_with_closed_trades >= MIN_SECTORS_WITH_CLOSED_TRADES
+    c9a = (small_mid.mfe_pct_reaching_050r or 0) > (large_cap_mfe_pct_reaching_050r or 0)
+    c9b = (small_mid.mfe_pct_reaching_100r or 0) > (large_cap_mfe_pct_reaching_100r or 0)
+    c9 = c9a or c9b
+
+    criteria = {
+        "c1_closed_ge_20": c1, "c2_expectancy_positive": c2, "c3_pf_r_gt_1_10": c3,
+        "c4_trades_per_month_gt_large_cap": c4, "c5_cumulative_r_positive": c5,
+        "c6_expectancy_excl_best_positive": c6, "c7_sectors_with_trades_ge_4": c7,
+        "c8_symbol_share_of_positive_r_le_50pct": c8,
+        "c9_mfe_edge_050_or_100": c9, "c9a_mfe_050_edge": c9a, "c9b_mfe_100_edge": c9b,
+    }
+    all_core_pass = c1 and c2 and c3 and c4 and c5 and c6 and c7 and c8 and c9
+
+    if all_core_pass:
+        verdict = VERDICT_PROMISING
+        reasons: list[str] = []
+    else:
+        reasons = [k for k, v in criteria.items() if not v and not k.startswith(("c9a", "c9b"))]
+        if c2 and (small_mid.profit_factor_r or 0) > 1.0:
+            verdict = VERDICT_MIXED
+        else:
+            verdict = VERDICT_NOT_PROMISING
+
+    return {"verdict": verdict, "criteria": criteria, "reasons": reasons, "concentration": concentration}
+
+
 __all__ = [
     "UniverseSelectionError",
+    "research_config_for_universe",
     "normalize_issuer_name",
     "HoldingCandidate",
     "MIN_MATERIAL_POSITION_WEIGHT",
@@ -301,4 +495,19 @@ __all__ = [
     "SelectionCandidate",
     "SelectionResult",
     "select_sector_capped_basket",
+    "CONCENTRATION_STATUS_OK",
+    "CONCENTRATION_STATUS_NO_POSITIVE_CONTRIBUTORS",
+    "ConcentrationResult",
+    "positive_contribution_concentration",
+    "VERDICT_PROMISING",
+    "VERDICT_MIXED",
+    "VERDICT_NOT_PROMISING",
+    "VERDICT_INSUFFICIENT_EVIDENCE",
+    "MIN_CLOSED_TRADES_FOR_EVIDENCE",
+    "MIN_CLOSED_TRADES_FOR_PROMISING",
+    "MIN_PROFIT_FACTOR_R",
+    "MAX_SYMBOL_SHARE_OF_POSITIVE_R",
+    "MIN_SECTORS_WITH_CLOSED_TRADES",
+    "FeasibilityMetrics",
+    "classify_feasibility",
 ]
