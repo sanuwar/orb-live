@@ -2,7 +2,7 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 88667
+- Production LOC: 88674
 - Test LOC: 68812
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
