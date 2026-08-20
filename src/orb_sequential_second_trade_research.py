@@ -25,7 +25,20 @@ baseline's positive trade quality or materially worsening drawdown?
      driven once per (symbol, session_date) by
      `orb_gap_rvol_sensitivity_research.precompute_inputs_table` for the
      whole universe) -- no candidate's gap/RVOL/breakout/approval is ever
-     carried forward from an earlier minute.
+     carried forward from an earlier minute. `SignalEngine.evaluate`
+     rejects any symbol outside `config["universe"]["symbols"]`
+     regardless of gap/RVOL qualification, and several periods' frozen
+     native universes (e.g. BAC/INTC for P_MINUS_2/P_MINUS_1/P1, plus
+     CSCO/KO/NKE/VZ/T for P2 and more for P3) contain symbols outside the
+     tracked *production* 15-symbol universe -- so the second-trade scan's
+     own `SignalEngine` is built from `research_config_for_universe`
+     (M46's helper, reused unmodified) against the exact `universe`
+     parameter already passed to `scan_for_second_candidate`, never the
+     production default. This is scoped to the second-trade scan only:
+     the BASELINE trade's own 09:50 `_waited_shadow_decision` re-check is
+     untouched, reusing the exact same frozen behavior M43/M45 already
+     validated (changing it would not be an additive M47 change but a
+     retroactive edit to already-supported/frozen baseline behavior).
   5. The earliest minute with at least one independently valid symbol
      wins; same-minute ties break by ticker ascending. No ranking by
      RVOL, gap, strength, sector, or expected return.
@@ -44,7 +57,6 @@ same-symbol re-entry research.
 
 from __future__ import annotations
 
-import copy
 import statistics
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -56,6 +68,7 @@ from src.orb_candidate_selection_timing_research import DecisionTimeCandidate
 from src.orb_existing_configs_reevaluation_research import best_contributing_symbol_by_r
 from src.orb_baseline_stability_research import excluding_symbol
 from src.orb_gap_rvol_sensitivity_research import CandidateSignal, InputsTable, build_candidate_shadow_decision
+from src.orb_small_midcap_momentum_research import research_config_for_universe
 from src.orb_profit_protection_exit_research import (
     ARM_BE_AFTER_050R,
     IndexedMarketBars,
@@ -87,7 +100,12 @@ class SequentialSecondTradeError(RuntimeError):
 class SecondScanResult:
     """`status` is one of: `NOT_ELIGIBLE` (first trade did not close before
     10:20, or never closed), `NO_VALID_CANDIDATE` (scan ran, nothing
-    qualified), `SELECTED` (a winning candidate was found)."""
+    qualified), `SELECTED` (a winning candidate was found).
+    `evaluation_universe` is an audit field: the exact `universe.symbols`
+    the scan's own `SignalEngine` was built with, always equal to the
+    `universe` argument this scan was called with -- lets a caller/test
+    assert requested-universe == evaluation-config-universe directly off
+    the result, per period, without re-deriving it."""
 
     status: str
     scan_start: datetime | None = None
@@ -96,6 +114,7 @@ class SecondScanResult:
     selected_timestamp: datetime | None = None
     candidate_signal: CandidateSignal | None = None
     tied_symbols: tuple[str, ...] = ()
+    evaluation_universe: tuple[str, ...] = ()
 
 
 def second_trade_eligibility(*, first_entered: bool, first_closed: bool, first_exit_timestamp: datetime | None) -> tuple[bool, str | None]:
@@ -121,12 +140,19 @@ def scan_for_second_candidate(
     (never an earlier minute's decision). The earliest minute with >=1
     approved symbol wins; ties at that minute break by ticker ascending.
     Deterministic and side-effect-free -- suitable for repeated calls."""
+    evaluation_universe = tuple(universe)
     other_symbols = sorted(s for s in universe if s != first_trade_symbol)
     if not other_symbols:
-        return SecondScanResult(status="NO_VALID_CANDIDATE", scan_start=scan_start_exclusive)
+        return SecondScanResult(status="NO_VALID_CANDIDATE", scan_start=scan_start_exclusive, evaluation_universe=evaluation_universe)
 
-    evaluation_config = copy.deepcopy(dict(combo_config))
+    # The exact frozen native universe for this period, not the tracked
+    # production default -- several periods' native universes contain
+    # symbols (BAC/INTC/CSCO/KO/NKE/VZ/T/... per period) outside the
+    # production 15-symbol list, which `SignalEngine.evaluate` would
+    # otherwise silently reject before gap/RVOL is ever checked.
+    evaluation_config = research_config_for_universe(combo_config, universe)
     evaluation_config["strategy"]["enabled"] = True  # in-memory only; never persisted
+    assert evaluation_config["universe"]["symbols"] == list(universe), "second-trade scan universe mismatch"
     engine = SignalEngine(evaluation_config)
 
     # Collect every (timestamp, symbol) pair in the scan window across all
@@ -158,10 +184,10 @@ def scan_for_second_candidate(
         return SecondScanResult(
             status="SELECTED", scan_start=scan_start_exclusive, selected_symbol=winner_symbol,
             selected_timestamp=ts, candidate_signal=candidate_signal,
-            tied_symbols=tuple(a[0] for a in approved),
+            tied_symbols=tuple(a[0] for a in approved), evaluation_universe=evaluation_universe,
         )
 
-    return SecondScanResult(status="NO_VALID_CANDIDATE", scan_start=scan_start_exclusive)
+    return SecondScanResult(status="NO_VALID_CANDIDATE", scan_start=scan_start_exclusive, evaluation_universe=evaluation_universe)
 
 
 def build_second_shadow_outcome(
@@ -336,10 +362,19 @@ MAX_DRAWDOWN_RATIO = 1.25
 
 
 def second_only_symbol_robustness(rows: Sequence[TradeDiagnosticRow]) -> dict[str, Any]:
-    """Best-symbol concentration using positive-R contribution as the
-    denominator (only symbols with positive cumulative R count toward the
-    share), and expectancy excluding the best R-contributing SECOND_ONLY
-    symbol."""
+    """Best-symbol concentration using each symbol's own NET cumulative R
+    (not individual-trade positive R) as the basis: sum each symbol's
+    closed-trade `r_multiple` values into one net figure per symbol, keep
+    only symbols whose net is positive, and divide the largest positive
+    net symbol contribution by the sum of all positive net symbol
+    contributions. A symbol with, say, three winners and two losers that
+    nets negative contributes nothing to either the numerator or the
+    denominator -- summing each trade's own `max(r, 0)` instead (the
+    prior, incorrect implementation) would count that symbol's winning
+    trades toward the denominator even though the symbol's own net
+    contribution is negative, understating concentration. Matches M46's
+    own convention. Also returns expectancy excluding the best
+    R-contributing SECOND_ONLY symbol."""
     if not rows:
         return {
             "best_r_contributor": None, "best_r_contribution_share": None,
@@ -347,17 +382,14 @@ def second_only_symbol_robustness(rows: Sequence[TradeDiagnosticRow]) -> dict[st
         }
     best_symbol = best_contributing_symbol_by_r(rows)
     tq = trade_quality_from_rows(rows)
-    positive_total_r = sum(
-        max(r.outcome["r_multiple"], 0.0)
-        for r in rows if r.outcome["closed"] and r.outcome["r_multiple"] is not None
-    )
-    per_symbol_r: dict[str, float] = {}
+    per_symbol_net_r: dict[str, float] = {}
     for r in rows:
         if r.outcome["closed"] and r.outcome["r_multiple"] is not None:
-            per_symbol_r[r.decision["symbol"]] = per_symbol_r.get(r.decision["symbol"], 0.0) + r.outcome["r_multiple"]
+            per_symbol_net_r[r.decision["symbol"]] = per_symbol_net_r.get(r.decision["symbol"], 0.0) + r.outcome["r_multiple"]
+    positive_net_total_r = sum(v for v in per_symbol_net_r.values() if v > 0)
     best_contribution_share = None
-    if best_symbol and positive_total_r:
-        best_contribution_share = max(per_symbol_r.get(best_symbol, 0.0), 0.0) / positive_total_r
+    if best_symbol and positive_net_total_r and per_symbol_net_r.get(best_symbol, 0.0) > 0:
+        best_contribution_share = per_symbol_net_r[best_symbol] / positive_net_total_r
     excl_best = excluding_symbol(rows, symbol=best_symbol) if best_symbol else tq
     return {
         "best_r_contributor": best_symbol, "best_r_contribution_share": best_contribution_share,

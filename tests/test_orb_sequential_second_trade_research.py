@@ -62,6 +62,49 @@ def _price_path(*, breakout_at: tuple[int, int] | None, until: tuple[int, int] =
 NEVER_VALID = _price_path(breakout_at=None)
 
 
+def _price_path_stop_after(*, breakout_at: tuple[int, int], crash_at: tuple[int, int], until: tuple[int, int] = (10, 20)):
+    """Breaks out at `breakout_at` and holds (so the 09:50 WAITED re-check
+    stays valid and the trade enters), then crashes hard starting at
+    `crash_at` -- forces a full protective-stop exit shortly after entry,
+    deterministically closing the first trade well before 10:20 ET so the
+    second-trade scan actually runs."""
+    closes: dict[tuple[int, int], str] = {}
+    hh, mm = 9, 40
+    while (hh, mm) <= until:
+        if (hh, mm) >= crash_at:
+            closes[(hh, mm)] = "90.0"
+        elif (hh, mm) >= breakout_at:
+            closes[(hh, mm)] = "105.5"
+        else:
+            closes[(hh, mm)] = "100.6"
+        mm += 1
+        if mm == 60:
+            mm = 0
+            hh += 1
+    return closes
+
+
+def _price_path_revert(*, breakout_at: tuple[int, int], revert_at: tuple[int, int], until: tuple[int, int] = (10, 20)):
+    """Breaks out at `breakout_at` (would be independently valid if
+    evaluated then) but reverts back below the breakout level at
+    `revert_at` -- used to prove the second-trade scan evaluates each
+    minute fresh and never carries an earlier minute's approval forward."""
+    closes: dict[tuple[int, int], str] = {}
+    hh, mm = 9, 40
+    while (hh, mm) <= until:
+        if (hh, mm) >= revert_at:
+            closes[(hh, mm)] = "100.6"
+        elif (hh, mm) >= breakout_at:
+            closes[(hh, mm)] = "105.5"
+        else:
+            closes[(hh, mm)] = "100.6"
+        mm += 1
+        if mm == 60:
+            mm = 0
+            hh += 1
+    return closes
+
+
 def _run(minute_closes_by_symbol, *, session_bounds_provider=None):
     market_bars: dict = {}
     for symbol, minute_closes in minute_closes_by_symbol.items():
@@ -158,30 +201,181 @@ def test_baseline_not_entered_or_not_closed_is_never_second_eligible():
 
 
 def test_first_symbol_excluded_from_second_scan():
-    # AAPL is the baseline trade; a simultaneously-valid AAPL "candidate"
-    # can never occur since AAPL already traded -- verify a distinct
-    # second-eligible symbol (META) is the one actually picked, never AAPL.
-    aapl = _price_path(breakout_at=(9, 40), until=(15, 45))  # stays flat after breakout -> time exit later
-    meta = _price_path(breakout_at=(10, 15), until=(10, 20))
+    # AAPL is the baseline trade (stops out early); META qualifies later.
+    # Non-vacuous: the second trade is unconditionally required to be
+    # selected and to never be AAPL.
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    meta = _price_path(breakout_at=(9, 55), until=(10, 20))
     day_results, *_ = _run({"AAPL": aapl, "META": meta})
     assert len(day_results) == 1
     d = day_results[0]
     assert d.baseline_symbol == "AAPL"
-    if d.second_row is not None:
-        assert d.second_row.decision["symbol"] != "AAPL"
+    assert d.second_scan.status == "SELECTED"
+    assert d.second_row is not None
+    assert d.second_row.decision["symbol"] == "META"
+    assert d.second_row.decision["symbol"] != "AAPL"
 
 
 def test_determinism_across_repeated_runs():
-    aapl = _price_path(breakout_at=(9, 40), until=(15, 45))
-    meta = _price_path(breakout_at=(10, 10), until=(10, 20))
+    # Non-vacuous: this fixture always produces a SELECTED second trade
+    # (verified below), so the determinism check actually exercises that
+    # path on both runs rather than passing trivially on an unselected one.
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    meta = _price_path(breakout_at=(9, 55), until=(15, 45))
     r1, *_ = _run({"AAPL": aapl, "META": meta})
     r2, *_ = _run({"AAPL": aapl, "META": meta})
     assert len(r1) == len(r2) == 1
-    assert r1[0].second_eligible == r2[0].second_eligible
-    if r1[0].second_row is not None:
-        assert r1[0].second_row.outcome == r2[0].second_row.outcome
-        assert r2[0].second_row is not None
-        assert r1[0].second_row.decision["symbol"] == r2[0].second_row.decision["symbol"]
+    assert r1[0].second_eligible == r2[0].second_eligible is True
+    assert r1[0].second_scan.status == r2[0].second_scan.status == "SELECTED"
+    assert r1[0].second_row is not None and r2[0].second_row is not None
+    assert r1[0].second_row.outcome == r2[0].second_row.outcome
+    assert r1[0].second_row.decision["symbol"] == r2[0].second_row.decision["symbol"] == "META"
+
+
+# --------------------------------------------------------------------------
+# Non-vacuous coverage of the SELECTED (second trade actually entered and
+# simulated) path -- the empirical M47 run only ever exercised
+# NO_VALID_CANDIDATE, so these deterministic synthetic fixtures are the
+# only place the SELECTED branch of `build_day_results`/
+# `build_second_shadow_outcome` is exercised at all.
+# --------------------------------------------------------------------------
+
+def test_second_trade_full_lifecycle_entered_and_closed():
+    # AAPL enters at 09:50, is stopped out at 09:52 ET (well before 10:20).
+    # META independently breaks out at 09:55 and stays flat through the
+    # 15:45 time-exit, so its own second trade both enters AND closes.
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    meta = _price_path(breakout_at=(9, 55), until=(15, 45))
+    day_results, *_ = _run({"AAPL": aapl, "META": meta})
+    assert len(day_results) == 1
+    d = day_results[0]
+
+    # First trade: entered, closed, well before 10:20 ET.
+    assert d.baseline_row.outcome["entered"] is True
+    assert d.baseline_row.outcome["closed"] is True
+    first_exit = datetime.fromisoformat(d.baseline_row.outcome["exit_timestamp"])
+    assert first_exit.astimezone(EASTERN).time() < SECOND_SCAN_END_ET
+
+    # Second-trade eligibility and scan.
+    assert d.second_eligible is True
+    assert d.second_scan.status == "SELECTED"
+    assert d.second_scan.selected_symbol == "META"
+    assert d.second_scan.selected_timestamp == datetime(2026, 8, 14, 13, 56, tzinfo=timezone.utc)
+
+    # A real second row: entered, closed, distinct symbol.
+    assert d.second_row is not None
+    assert d.second_row.decision["symbol"] == "META"
+    assert d.second_row.outcome["entered"] is True
+    assert d.second_row.outcome["closed"] is True
+
+    # Second entry strictly later than first exit.
+    second_entry = datetime.fromisoformat(d.second_row.outcome["entry_timestamp"])
+    assert second_entry > first_exit
+    assert d.minutes_between_first_exit_and_second_decision is not None
+    assert d.minutes_between_first_exit_and_second_decision > 0
+
+
+def test_second_trade_scan_excludes_exact_first_exit_timestamp_but_next_minute_qualifies():
+    # NVDA is valid starting exactly at the first-exit minute (09:52 ET) --
+    # the scan is strictly *after* exit, so 09:52 itself must be excluded.
+    # NVDA remains valid at 09:53 too (the very next completed minute),
+    # which must be picked up.
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    nvda = _price_path(breakout_at=(9, 52), until=(10, 20))
+    day_results, *_ = _run({"AAPL": aapl, "NVDA": nvda})
+    assert len(day_results) == 1
+    d = day_results[0]
+    first_exit = datetime.fromisoformat(d.baseline_row.outcome["exit_timestamp"])
+    assert first_exit == datetime(2026, 8, 14, 13, 52, tzinfo=timezone.utc)
+    assert d.second_scan.status == "SELECTED"
+    assert d.second_scan.selected_symbol == "NVDA"
+    assert d.second_scan.selected_timestamp == datetime(2026, 8, 14, 13, 53, tzinfo=timezone.utc)
+    assert d.second_scan.selected_timestamp > first_exit  # strictly after, never equal
+
+
+def test_second_trade_scan_same_minute_tie_break_is_alphabetical():
+    # NVDA and META both become valid at exactly the same minute -- the
+    # frozen tie-break is ticker-ascending, never RVOL/gap/strength.
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    nvda = _price_path(breakout_at=(9, 55), until=(10, 20))
+    meta = _price_path(breakout_at=(9, 55), until=(10, 20))
+    day_results, *_ = _run({"AAPL": aapl, "NVDA": nvda, "META": meta})
+    assert len(day_results) == 1
+    d = day_results[0]
+    assert d.second_scan.status == "SELECTED"
+    assert d.second_scan.selected_symbol == "META"  # META < NVDA alphabetically
+    assert set(d.second_scan.tied_symbols) == {"META", "NVDA"}
+
+
+def test_second_trade_scan_never_carries_forward_a_stale_earlier_approval():
+    # NVDA breaks out early (09:40, same as AAPL) but reverts back below
+    # the breakout level before the scan window opens -- an implementation
+    # that reused an earlier minute's stale approval would wrongly select
+    # NVDA; the real fresh-per-minute SignalEngine evaluation must reject
+    # it and fall through to META (valid later, on its own genuine merits).
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    nvda = _price_path_revert(breakout_at=(9, 40), revert_at=(9, 52), until=(10, 20))
+    meta = _price_path(breakout_at=(9, 55), until=(10, 20))
+    day_results, *_ = _run({"AAPL": aapl, "NVDA": nvda, "META": meta})
+    assert len(day_results) == 1
+    d = day_results[0]
+    assert d.second_scan.status == "SELECTED"
+    assert d.second_scan.selected_symbol == "META"  # not NVDA -- its early approval is stale, not reused
+
+
+def test_second_trade_scan_uses_period_native_universe_not_production_default():
+    # Regression for the universe-membership bug: BAC is not in the
+    # tracked production config's default universe
+    # (src/config.py / config/strategy_v0.yaml), but IS the frozen native
+    # universe for several periods (P_MINUS_2/P_MINUS_1/P1/P2/P3). Before
+    # the fix, SignalEngine rejected it with "Symbol is not in the
+    # approved universe." before gap/RVOL was ever evaluated, regardless
+    # of how genuinely valid its breakout was.
+    assert "BAC" not in CONFIG["universe"]["symbols"]
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    bac = _price_path(breakout_at=(9, 55), until=(10, 20))
+    day_results, *_ = _run({"AAPL": aapl, "BAC": bac})
+    assert len(day_results) == 1
+    d = day_results[0]
+    assert d.second_scan.status == "SELECTED"
+    assert d.second_scan.selected_symbol == "BAC"
+    assert d.second_row is not None
+    assert d.second_row.decision["symbol"] == "BAC"
+
+
+def test_second_trade_scan_evaluation_universe_matches_requested_universe():
+    # Audit field: `evaluation_universe` must always equal the exact
+    # `universe` the scan was called with, for the SELECTED, NO_VALID_
+    # CANDIDATE, and no-other-symbols paths alike.
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    bac = _price_path(breakout_at=(9, 55), until=(10, 20))
+    day_results, *_ = _run({"AAPL": aapl, "BAC": bac})
+    d = day_results[0]
+    assert d.second_scan.evaluation_universe == ("AAPL", "BAC")
+
+    combo_config = sensitivity_config(CONFIG, gap_percent=Decimal("0.50"), rvol_multiple=Decimal("1.75"))
+    no_others = scan_for_second_candidate(
+        session_date=SESSION_DATE, first_trade_symbol="AAPL", universe=("AAPL",),
+        scan_start_exclusive=datetime(2026, 8, 14, 14, 0, tzinfo=timezone.utc),
+        inputs_table={}, combo_config=combo_config,
+    )
+    assert no_others.evaluation_universe == ("AAPL",)
+
+
+def test_second_trade_scan_max_one_second_trade_per_day_even_with_multiple_qualifiers():
+    # NVDA, META, and a third later-qualifying symbol are all
+    # independently valid at different minutes -- exactly one second
+    # trade (the earliest) is ever produced; the scan stops at the first
+    # qualifying minute rather than continuing to look for more.
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    nvda = _price_path(breakout_at=(9, 55), until=(10, 20))
+    meta = _price_path(breakout_at=(10, 0), until=(10, 20))
+    day_results, *_ = _run({"AAPL": aapl, "NVDA": nvda, "META": meta})
+    assert len(day_results) == 1
+    d = day_results[0]
+    assert d.second_scan.status == "SELECTED"
+    assert d.second_scan.selected_symbol == "NVDA"  # earliest, not "best"
+    assert d.second_row is not None  # exactly one row -- the dataclass shape itself forbids a second
 
 
 def test_baseline_row_uses_be_after_050r_exit_arm_semantics():
@@ -226,6 +420,29 @@ def test_scan_for_second_candidate_no_other_symbols_returns_no_candidate():
         inputs_table={}, combo_config=combo_config,
     )
     assert result.status == "NO_VALID_CANDIDATE"
+
+
+def test_exit_arm_outcome_timestamps_propagate_and_serialize_for_both_legs():
+    # The two additive ExitArmOutcome fields (entry_timestamp/
+    # exit_timestamp) must round-trip correctly through _outcome_dict for
+    # BOTH the baseline leg and a real, closed second leg -- not just be
+    # present as keys (already checked elsewhere) but hold the exact
+    # values the simulator computed, correctly ISO-serialized.
+    aapl = _price_path_stop_after(breakout_at=(9, 40), crash_at=(9, 52))
+    meta = _price_path(breakout_at=(9, 55), until=(15, 45))
+    day_results, *_ = _run({"AAPL": aapl, "META": meta})
+    d = day_results[0]
+
+    assert d.baseline_row.outcome["entry_timestamp"] == "2026-08-14T13:50:00+00:00"
+    assert d.baseline_row.outcome["exit_timestamp"] == "2026-08-14T13:52:00+00:00"
+    assert d.second_row.outcome["entry_timestamp"] == "2026-08-14T13:56:00+00:00"
+    assert d.second_row.outcome["exit_timestamp"] == "2026-08-14T19:45:00+00:00"
+
+    for row in (d.baseline_row, d.second_row):
+        entry_ts = datetime.fromisoformat(row.outcome["entry_timestamp"])
+        exit_ts = datetime.fromisoformat(row.outcome["exit_timestamp"])
+        assert entry_ts.tzinfo is not None and exit_ts.tzinfo is not None
+        assert exit_ts >= entry_ts
 
 
 def test_pooled_classification_helpers_produce_r_metrics():
@@ -340,12 +557,62 @@ def test_classify_not_supported_when_second_only_expectancy_negative():
     assert result["verdict"] == "NOT_SUPPORTED"
 
 
-def test_second_only_symbol_robustness_uses_positive_contribution_denominator():
+def test_second_only_symbol_robustness_excludes_net_negative_symbol_from_denominator():
+    # META's every trade is a winner, NVDA's every trade is a loser -- NVDA's
+    # NET contribution is negative, so it contributes nothing to either the
+    # numerator or the denominator, leaving META's share at exactly 1.0.
+    # (This particular fixture happens to agree with the old, incorrect
+    # per-trade-positive-sum formula too, since NVDA has zero winning
+    # trades to sum; see the mixed-win/loss test below for a fixture that
+    # only the corrected NET-per-symbol formula gets right.)
     rows = _synthetic_rows(n=5, symbol="META", r_multiple=1.0) + _synthetic_rows(n=5, symbol="NVDA", r_multiple=-0.5)
     robustness = second_only_symbol_robustness(rows)
     assert robustness["best_r_contributor"] == "META"
-    # Denominator is sum of positive-R contributions only (5.0 from META),
-    # not net cumulative R (5.0 - 2.5 = 2.5) -- so share must be exactly 1.0.
+    assert robustness["best_r_contribution_share"] == pytest.approx(1.0)
+
+
+def test_second_only_symbol_robustness_uses_net_per_symbol_not_per_trade_positive_sum():
+    # Symbol A: 3 winners (+2.0 each) and 3 losers (-1.9 each) -> NET =
+    # +0.3, barely positive. Symbol B: 1 winner (+1.0) and no losers ->
+    # NET = +1.0. The correct convention (each symbol's own NET
+    # cumulative R, keep only positive nets, denominator = sum of those)
+    # gives: positive_net_total = 0.3 + 1.0 = 1.3, best = B (net 1.0),
+    # share = 1.0 / 1.3 ~= 0.769.
+    #
+    # The prior, INCORRECT formula (sum each trade's own max(r, 0),
+    # ignoring per-symbol netting) would instead give: positive_total =
+    # (3 * 2.0) + (1 * 1.0) = 7.0 (A's three losing trades contribute
+    # nothing to the denominator despite A's net edge being tiny), and
+    # share = 1.0 / 7.0 ~= 0.143 -- a materially different, wrong number.
+    # This fixture fails under that old formula and passes under the
+    # corrected one.
+    rows_a = (
+        _synthetic_rows(n=3, symbol="AAA", r_multiple=2.0)
+        + _synthetic_rows(n=3, symbol="AAA", r_multiple=-1.9)
+    )
+    rows_b = _synthetic_rows(n=1, symbol="BBB", r_multiple=1.0)
+    rows = rows_a + rows_b
+    robustness = second_only_symbol_robustness(rows)
+    assert robustness["best_r_contributor"] == "BBB"
+    assert robustness["best_r_contribution_share"] == pytest.approx(1.0 / 1.3, rel=1e-6)
+    assert robustness["best_r_contribution_share"] != pytest.approx(1.0 / 7.0, rel=1e-6)
+
+
+def test_second_only_symbol_robustness_symbol_with_negative_net_contributes_nothing():
+    # A symbol with winners AND losers whose NET is negative must be
+    # excluded from the denominator entirely, even though it has some
+    # individually-positive trades that the old per-trade formula would
+    # have summed in.
+    rows_a = (
+        _synthetic_rows(n=1, symbol="AAA", r_multiple=1.0)  # one winner
+        + _synthetic_rows(n=1, symbol="AAA", r_multiple=-1.5)  # one bigger loser -> net -0.5
+    )
+    rows_b = _synthetic_rows(n=1, symbol="BBB", r_multiple=0.8)
+    rows = rows_a + rows_b
+    robustness = second_only_symbol_robustness(rows)
+    assert robustness["best_r_contributor"] == "BBB"
+    # Denominator is ONLY BBB's positive net (0.8) -- AAA's net-negative
+    # -0.5 contributes zero, not its individual +1.0 winning trade.
     assert robustness["best_r_contribution_share"] == pytest.approx(1.0)
 
 
