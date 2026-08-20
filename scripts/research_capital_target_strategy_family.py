@@ -47,7 +47,16 @@ from src.orb_capital_target_strategy_family_research import (
 )
 
 WARMUP_START = date(2021, 1, 1)
-FETCH_END_EXCLUSIVE = date(2026, 8, 14)  # one day past EVALUATION_END; Alpaca's `end` is exclusive
+#: The `end` boundary passed to Alpaca's bars request. In practice the
+#: fetched daily series DOES include a bar dated 2026-08-14 (one session
+#: past EVALUATION_END) -- Alpaca's daily-bar timestamps evidently fall
+#: before this boundary's midnight-ET cutoff for that session, so this
+#: name is descriptive of the REQUEST parameter only, not a guarantee
+#: that the received data stops at EVALUATION_END. Every place that
+#: needs a specific evaluation-window close MUST resolve it by exact
+#: date (`close_on_exact_date`), never a positional index, precisely
+#: because of this one-session overshoot.
+FETCH_END_EXCLUSIVE = date(2026, 8, 14)
 CACHE_ROOT = ROOT / "artifacts" / "research-capital-target-strategy-family" / "daily-bar-cache"
 RESULTS_DIR = ROOT / "artifacts" / "research-capital-target-strategy-family" / "results"
 PROVENANCE_PATH = RESULTS_DIR / "provenance_manifest.json"
@@ -201,13 +210,31 @@ def build_master_calendar(spy_series: DailySeries) -> tuple[date, ...]:
     return tuple(d for d in spy_series.dates if WARMUP_START <= d <= EVALUATION_END)
 
 
+def close_on_exact_date(series: DailySeries, day: date) -> Decimal:
+    """The exact close for `day`, by date lookup -- never a positional
+    index. The cached daily-bar series may (and, for the 2026-08-14
+    request boundary, does) extend past `day`; a positional `[-1]` would
+    silently return a LATER session's close, a one-session lookahead.
+    Fails closed if `day` is missing or duplicated in the series."""
+    matches = [i for i, d in enumerate(series.dates) if d == day]
+    if not matches:
+        raise CapitalTargetCLIError(f"{series.symbol}: no bar for exact date {day.isoformat()} (fail-closed, no lookahead substitute)")
+    if len(matches) > 1:
+        raise CapitalTargetCLIError(f"{series.symbol}: duplicate bars for exact date {day.isoformat()}")
+    return series.closes[matches[0]]
+
+
+def end_price_by_symbol_for(series_by_symbol: Mapping[str, DailySeries], symbols: Sequence[str], *, end_date: date) -> dict[str, Decimal]:
+    return {s: close_on_exact_date(series_by_symbol[s], end_date) for s in symbols}
+
+
 def _sha256_of_json(value: Any) -> str:
     material = json.dumps(value, sort_keys=True, default=_json_default)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _transaction_ledger_hash(transactions: Sequence[Any]) -> str:
-    rows = [
+def _transaction_rows(transactions: Sequence[Any]) -> list[dict[str, Any]]:
+    return [
         {
             "date": t.date.isoformat(), "arm": t.arm, "symbol": t.symbol, "side": t.side,
             "quantity": t.quantity, "price": str(t.price), "notional": str(t.notional),
@@ -215,13 +242,49 @@ def _transaction_ledger_hash(transactions: Sequence[Any]) -> str:
         }
         for t in transactions
     ]
-    return _sha256_of_json(rows)
 
 
-def _position_equity_ledger_hash(daily_equity: Sequence[tuple[date, Decimal]], daily_position_count: Sequence[tuple[date, int]]) -> str:
+def _strategy_transaction_ledger_hash(transactions: Sequence[Any]) -> str:
+    """Real, strategy-generated transactions only -- never includes an
+    `EVALUATION_END_MARK` row (hashed separately, see
+    `_endpoint_mark_ledger_hash`), so this hash alone reconstructs
+    exactly what the simulation actually traded."""
+    return _sha256_of_json(_transaction_rows(transactions))
+
+
+def _endpoint_mark_ledger_hash(end_mark_transactions: Sequence[Any]) -> str:
+    return _sha256_of_json(_transaction_rows(end_mark_transactions))
+
+
+def _combined_accounting_ledger_hash(transactions: Sequence[Any], end_mark_transactions: Sequence[Any]) -> str:
+    """Every row that ever entered net-P&L/concentration/turnover
+    accounting -- real transactions plus the hypothetical endpoint mark,
+    in that order -- so this single hash reconstructs the exact
+    accounting basis the reported metrics were computed from."""
+    return _sha256_of_json(_transaction_rows(transactions) + _transaction_rows(end_mark_transactions))
+
+
+def _position_equity_ledger_hash(
+    daily_equity: Sequence[tuple[date, Decimal]], daily_position_count: Sequence[tuple[date, int]],
+    daily_position_snapshots: Sequence[Any],
+) -> str:
+    """The COMPLETE daily position/equity ledger: not merely aggregate
+    equity and position counts, but one row per open position per
+    session -- date, symbol, quantity, mark price, market value, and
+    (ARM_A only) planned risk -- so two portfolios with identical equity
+    and position counts but different underlying symbols/quantities
+    hash differently."""
     rows = {
         "daily_equity": [[d.isoformat(), str(e)] for d, e in daily_equity],
         "daily_position_count": [[d.isoformat(), c] for d, c in daily_position_count],
+        "daily_position_snapshots": [
+            {
+                "date": s.date.isoformat(), "symbol": s.symbol, "quantity": s.quantity,
+                "mark_price": str(s.mark_price), "market_value": str(s.market_value),
+                "planned_risk": (str(s.planned_risk) if s.planned_risk is not None else None),
+            }
+            for s in daily_position_snapshots
+        ],
     }
     return _sha256_of_json(rows)
 
@@ -290,13 +353,13 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
         raw_sim[arm] = {}
         for cost_bps in (BASE_COST_BPS, STRESS_COST_BPS):
             if arm == ARM_A:
-                sim = run_arm_a(universe_series[ARM_A], master_dates, cost_bps=cost_bps)
+                sim = run_arm_a(universe_series[ARM_A], master_dates, cost_bps=cost_bps, evaluation_start=EVALUATION_START)
             elif arm == ARM_B:
                 selector = arm_b_selector(universe_series[ARM_B], sma200_by_arm_symbol[ARM_B])
-                sim = run_monthly_rebalance_arm(universe_series[ARM_B], master_dates, arm=ARM_B, selector=selector, cost_bps=cost_bps)
+                sim = run_monthly_rebalance_arm(universe_series[ARM_B], master_dates, arm=ARM_B, selector=selector, cost_bps=cost_bps, evaluation_start=EVALUATION_START)
             else:
                 selector = arm_c_selector(universe_series[ARM_C], sma200_by_arm_symbol[ARM_C])
-                sim = run_monthly_rebalance_arm(universe_series[ARM_C], master_dates, arm=ARM_C, selector=selector, cost_bps=cost_bps)
+                sim = run_monthly_rebalance_arm(universe_series[ARM_C], master_dates, arm=ARM_C, selector=selector, cost_bps=cost_bps, evaluation_start=EVALUATION_START)
             raw_sim[arm][cost_bps] = sim
 
     orb_monthly = load_orb_monthly_r_series()
@@ -304,13 +367,17 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
     spy_monthly_pct_pairs = [(d, v) for d, v in spy_monthly_pct_pairs if EVALUATION_START <= d <= EVALUATION_END]
 
     per_arm_output: dict[str, Any] = {}
+    ledger_hashes: dict[str, Any] = {}
     for arm in ARMS:
         base_sim = raw_sim[arm][BASE_COST_BPS]
         stress_sim = raw_sim[arm][STRESS_COST_BPS]
 
         # Hypothetical-liquidation marks at the TRUE fixed evaluation
-        # endpoint only -- never for an interim segment boundary.
-        end_price_by_symbol = {s: series_by_symbol[s].closes[-1] for s in UNIVERSE_BY_ARM[arm]}
+        # endpoint only -- never for an interim segment boundary. Resolved
+        # by EXACT date (never a positional [-1]): the cached series runs
+        # through 2026-08-14, one session past EVALUATION_END, so a
+        # positional lookup would silently use a later close.
+        end_price_by_symbol = end_price_by_symbol_for(series_by_symbol, UNIVERSE_BY_ARM[arm], end_date=EVALUATION_END)
         base_end_marks = evaluation_end_mark_transactions(
             open_positions_at_end=base_sim.open_positions_at_end, end_date=EVALUATION_END,
             end_price_by_symbol=end_price_by_symbol, cost_bps=BASE_COST_BPS, arm=arm,
@@ -320,12 +387,24 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
             end_price_by_symbol=end_price_by_symbol, cost_bps=STRESS_COST_BPS, arm=arm,
         )
 
+        for cost_label, sim, end_marks in (("base_5bps", base_sim, base_end_marks), ("stress_10bps", stress_sim, stress_end_marks)):
+            ledger_hashes[f"{arm}__{cost_label}"] = {
+                "strategy_transaction_ledger_sha256": _strategy_transaction_ledger_hash(sim.transactions),
+                "endpoint_mark_ledger_sha256": _endpoint_mark_ledger_hash(end_marks),
+                "combined_accounting_ledger_sha256": _combined_accounting_ledger_hash(sim.transactions, end_marks),
+                "position_equity_ledger_sha256": _position_equity_ledger_hash(sim.daily_equity, sim.daily_position_count, sim.daily_position_snapshots),
+                "strategy_transaction_count": len(sim.transactions),
+                "endpoint_mark_transaction_count": len(end_marks),
+                "combined_transaction_count": len(sim.transactions) + len(end_marks),
+            }
+
         base_metrics = compute_arm_metrics(
             arm=arm, closed_trades=base_sim.closed_trades, daily_equity=base_sim.daily_equity,
             starting_capital=base_sim.starting_capital, total_cost_paid=base_sim.total_cost_paid,
             evaluation_start=EVALUATION_START, evaluation_end=EVALUATION_END,
             open_positions_at_end=base_sim.open_positions_at_end, transactions=base_sim.transactions,
             end_mark_transactions=base_end_marks, daily_position_count=base_sim.daily_position_count,
+            rebalance_events=getattr(base_sim, "rebalance_events", ()),
         )
         stress_metrics = compute_arm_metrics(
             arm=arm, closed_trades=stress_sim.closed_trades, daily_equity=stress_sim.daily_equity,
@@ -333,6 +412,7 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
             evaluation_start=EVALUATION_START, evaluation_end=EVALUATION_END,
             open_positions_at_end=stress_sim.open_positions_at_end, transactions=stress_sim.transactions,
             end_mark_transactions=stress_end_marks, daily_position_count=stress_sim.daily_position_count,
+            rebalance_events=getattr(stress_sim, "rebalance_events", ()),
         )
 
         segment_metrics = {}
@@ -351,6 +431,7 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
                 evaluation_start=seg_dates[0], evaluation_end=seg_dates[-1],
                 open_positions_at_end=base_sim.open_positions_at_end, transactions=base_sim.transactions,
                 end_mark_transactions=seg_end_marks, daily_position_count=base_sim.daily_position_count,
+                rebalance_events=getattr(base_sim, "rebalance_events", ()),
             )
 
         arm_monthly_pct_pairs = base_metrics["monthly_return_pct_series"]
@@ -366,6 +447,20 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
                 risk_views[label] = {
                     "gross_pnl": sum((t.gross_pnl for t in scaled_trades if EVALUATION_START <= t.exit_date <= EVALUATION_END), Decimal(0)),
                     "net_pnl": sum((t.net_pnl for t in scaled_trades if EVALUATION_START <= t.exit_date <= EVALUATION_END), Decimal(0)),
+                    "fixed_notional_30k_monthly_dollar_pnl_available": False,
+                    "note": (
+                        "Only realized gross/net P&L can be validly derived post-hoc "
+                        "by linearly rescaling each closed trade's quantity to this "
+                        "risk cap. A fixed-$30,000-notional monthly-dollar figure at "
+                        "this risk cap is NOT reported here: position sizing, cash "
+                        "constraints, and the concurrent-position limit are all "
+                        "risk-cap-dependent, so a valid fixed-notional monthly series "
+                        "at either $150 or $300 risk-per-position requires rerunning "
+                        "the full "
+                        "simulation at that risk cap, not a post-hoc rescale of the "
+                        "$300-cap trade list. The primary $300-cap fixed-$30K monthly "
+                        "figure is reported in base_cost/stress_cost above."
+                    ),
                 }
 
         best_share = base_metrics["concentration"]["best_contribution_share"]
@@ -399,16 +494,6 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
             cross_arm_correlation[f"{a}__{b}"] = corr
 
     spy_buy_and_hold = compute_spy_buy_and_hold(series_by_symbol["SPY"], master_dates)
-
-    ledger_hashes: dict[str, Any] = {}
-    for arm in ARMS:
-        for cost_label, cost_bps in (("base_5bps", BASE_COST_BPS), ("stress_10bps", STRESS_COST_BPS)):
-            sim = raw_sim[arm][cost_bps]
-            ledger_hashes[f"{arm}__{cost_label}"] = {
-                "transaction_ledger_sha256": _transaction_ledger_hash(sim.transactions),
-                "position_equity_ledger_sha256": _position_equity_ledger_hash(sim.daily_equity, sim.daily_position_count),
-                "transaction_count": len(sim.transactions),
-            }
 
     results["arms"] = per_arm_output
     results["cross_arm_correlation"] = cross_arm_correlation
@@ -457,15 +542,47 @@ def _git_head_sha() -> str | None:
         return None
 
 
+def _git_working_tree_clean() -> bool | None:
+    """`True` only if `git status --porcelain` is empty -- i.e. HEAD
+    genuinely IS the exact code that generated this run, with no
+    uncommitted edit sitting on top of it. `None` if git itself could
+    not be queried (never silently reported as clean in that case)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True, timeout=10, check=True)
+        return out.stdout.strip() == ""
+    except Exception:
+        return None
+
+
+SOURCE_FILES_FOR_HASHING = (
+    ROOT / "src" / "orb_capital_target_strategy_family_research.py",
+    ROOT / "scripts" / "research_capital_target_strategy_family.py",
+)
+
+
+def _source_file_hashes() -> dict[str, str]:
+    return {
+        str(p.relative_to(ROOT).as_posix()): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in SOURCE_FILES_FOR_HASHING
+    }
+
+
 def build_committed_hashes_document(*, manifest: Mapping[str, Any], results: Mapping[str, Any], results_path: Path, feed: str) -> dict[str, Any]:
     """The small, COMMITTED (never-gitignored), non-vendor-data record
     Issue #348 requires: exact feed/timeframe/adjustment parameters, the
     per-symbol normalized-series hashes, the master-calendar hash, every
     arm/cost-case transaction- and position/equity-ledger hash, the
-    `study_results.json` file hash, the exact evaluation window, and the
-    generating implementation's git HEAD SHA. Contains no raw OHLCV, no
-    full vendor response, and no secret -- only SHA-256 digests and
-    already-public parameters/counts."""
+    `study_results.json` file hash, the exact evaluation window, the
+    generating implementation's git HEAD SHA, and the exact SHA-256 of
+    the two source files that generated it. `generation_git_head_sha`
+    only identifies the actual generating implementation when
+    `generation_working_tree_clean` is `True` -- callers must generate
+    from a clean checkout of an already-committed implementation-only
+    commit (never a dirty working tree) for that SHA to be meaningful.
+    Contains no raw OHLCV, no full vendor response, and no secret --
+    only SHA-256 digests and already-public parameters/counts."""
     return {
         "feed": feed, "timeframe": "1Day", "adjustment": "all",
         "evaluation_start": EVALUATION_START.isoformat(), "evaluation_end": EVALUATION_END.isoformat(),
@@ -476,6 +593,8 @@ def build_committed_hashes_document(*, manifest: Mapping[str, Any], results: Map
         "ledger_hashes": results["ledger_hashes"],
         "study_results_json_sha256": hashlib.sha256(results_path.read_bytes()).hexdigest(),
         "generation_git_head_sha": _git_head_sha(),
+        "generation_working_tree_clean": _git_working_tree_clean(),
+        "generation_source_file_sha256": _source_file_hashes(),
         "retrieval_timestamp_utc": manifest["retrieval_timestamp_utc"],
     }
 

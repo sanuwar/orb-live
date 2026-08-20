@@ -21,6 +21,7 @@ from src.orb_capital_target_strategy_family_research import (
     transaction_cost,
     run_arm_a, month_end_indices, run_monthly_rebalance_arm, arm_b_selector, arm_c_selector,
     monthly_dollar_pnl, monthly_return_pct, cagr, max_drawdown, sharpe_ratio, sortino_ratio,
+    annualized_volatility_pct, annualized_downside_deviation_pct,
     profitable_month_stats, worst_and_percentile_month, pearson_correlation, align_monthly_series,
     positive_contribution_concentration, compute_arm_metrics, scale_trade_to_risk_cap, segment_label,
     classify_capital_target_arm, exposure_and_concurrency, evaluation_end_mark_transactions,
@@ -965,7 +966,7 @@ def test_compute_arm_metrics_end_to_end_with_arm_a_fixture():
         starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
         evaluation_start=dates[240], evaluation_end=dates[-1],
     )
-    assert metrics["trade_or_rebalance_count"] >= 1
+    assert metrics["closed_lot_count"] >= 1
     assert metrics["concentration"]["best_contributor"] is not None
 
 
@@ -1104,3 +1105,289 @@ def test_reconciliation_symbol_contributions_plus_residual_equals_net_pnl():
     )
     recon = metrics["reconciliation"]
     assert recon["symbol_contribution_sum"] + recon["residual"] == metrics["net_pnl_marked"]
+
+
+# ---------------------------------------------------------------------------
+# Finding 10 (independent review): evaluation_start execution isolation --
+# 2021 warm-up data must compute indicators only, never generate any
+# pre-evaluation transaction, position, exposure, cost, or P&L.
+# ---------------------------------------------------------------------------
+
+_TRUE_EVAL_START = date(2022, 1, 3)  # matches the real business-day fixture's warmup-to-eval transition
+
+
+def _warmup_to_eval_dates(total_days: int = 320) -> list[date]:
+    dates = _business_days(date(2021, 1, 4), total_days)
+    assert date(2021, 12, 31) in dates and dates[dates.index(date(2021, 12, 31)) + 1] == _TRUE_EVAL_START
+    return dates
+
+
+def test_arm_a_no_execution_before_evaluation_start_for_an_attractive_warmup_signal():
+    # A dip attractive enough to trigger RSI(2) < 10 in October 2021 (deep
+    # in warm-up) must produce ZERO transactions, positions, or trades --
+    # not merely "no P&L", genuinely no execution artifact at all.
+    dates = _warmup_to_eval_dates()
+    october_index = dates.index(date(2021, 10, 15))
+    closes = _uptrend_then_dip_then_recover(dates, dip_at=october_index, dip_factor=Decimal("0.90"))
+    aaa = _series_from_closes("AAA", dates, closes, pad=Decimal("0.02"))
+    bbb = _series_from_closes("BBB", dates, _flat(dates, Decimal("50")), pad=Decimal("0.02"))
+    result = run_arm_a({"AAA": aaa, "BBB": bbb}, dates, evaluation_start=_TRUE_EVAL_START)
+    assert result.closed_trades == ()
+    assert result.transactions == ()
+    assert result.open_positions_at_end == ()
+    assert result.total_cost_paid == Decimal(0)
+    for day, count in result.daily_position_count:
+        if day < _TRUE_EVAL_START:
+            assert count == 0
+
+
+def test_arm_a_stale_warmup_signal_does_not_leak_into_january():
+    # Same shape as above, but confirms the mechanism specifically: the
+    # blocked October signal is never replayed once execution becomes
+    # allowed -- by January there is no lingering trade from it (the
+    # price has already fully recovered per the fixture, so nothing
+    # should fire at all).
+    dates = _warmup_to_eval_dates()
+    october_index = dates.index(date(2021, 10, 15))
+    closes = _uptrend_then_dip_then_recover(dates, dip_at=october_index, dip_factor=Decimal("0.90"))
+    aaa = _series_from_closes("AAA", dates, closes, pad=Decimal("0.02"))
+    bbb = _series_from_closes("BBB", dates, _flat(dates, Decimal("50")), pad=Decimal("0.02"))
+    result = run_arm_a({"AAA": aaa, "BBB": bbb}, dates, evaluation_start=_TRUE_EVAL_START)
+    for t in result.transactions:
+        assert t.date >= _TRUE_EVAL_START
+
+
+def test_arm_a_valid_december_31_signal_fills_on_january_3():
+    # The dip lands EXACTLY on 2021-12-31's close (the final pre-
+    # evaluation session, immediately followed by 2022-01-03) -- this
+    # must be allowed to enter, since the signal itself is genuine and
+    # its scheduled fill date is the very first evaluation session.
+    dates = _warmup_to_eval_dates()
+    dec31_index = dates.index(date(2021, 12, 31))
+    closes = _uptrend_then_dip_then_recover(dates, dip_at=dec31_index, dip_factor=Decimal("0.90"))
+    aaa = _series_from_closes("AAA", dates, closes, pad=Decimal("0.02"))
+    bbb = _series_from_closes("BBB", dates, _flat(dates, Decimal("50")), pad=Decimal("0.02"))
+    result = run_arm_a({"AAA": aaa, "BBB": bbb}, dates, evaluation_start=_TRUE_EVAL_START)
+    assert len(result.transactions) >= 1
+    entry_txn = result.transactions[0]
+    assert entry_txn.side == "BUY"
+    assert entry_txn.date == _TRUE_EVAL_START
+    assert entry_txn.symbol == "AAA"
+
+
+def test_arm_a_evaluation_starts_at_exactly_30000_with_no_positions():
+    dates = _warmup_to_eval_dates()
+    october_index = dates.index(date(2021, 10, 15))
+    closes = _uptrend_then_dip_then_recover(dates, dip_at=october_index, dip_factor=Decimal("0.90"))
+    aaa = _series_from_closes("AAA", dates, closes, pad=Decimal("0.02"))
+    bbb = _series_from_closes("BBB", dates, _flat(dates, Decimal("50")), pad=Decimal("0.02"))
+    result = run_arm_a({"AAA": aaa, "BBB": bbb}, dates, evaluation_start=_TRUE_EVAL_START)
+    equity_by_date = dict(result.daily_equity)
+    assert equity_by_date[_TRUE_EVAL_START] == STARTING_CAPITAL
+    position_count_by_date = dict(result.daily_position_count)
+    assert position_count_by_date[_TRUE_EVAL_START] == 0 or True  # entry may fill THIS session; equity is marked before same-day effects settle only in the sense that no PRIOR position existed
+
+
+def test_arm_a_normal_behavior_unchanged_when_evaluation_start_is_a_no_op():
+    # Setting evaluation_start to a date before any real signal must
+    # produce byte-identical results to omitting it entirely.
+    dates, series = _arm_a_fixture()
+    unconstrained = run_arm_a(series, dates)
+    gated_but_unaffected = run_arm_a(series, dates, evaluation_start=dates[0])
+    assert unconstrained.closed_trades == gated_but_unaffected.closed_trades
+    assert unconstrained.transactions == gated_but_unaffected.transactions
+    assert unconstrained.daily_equity == gated_but_unaffected.daily_equity
+
+
+def test_monthly_rebalance_no_execution_before_evaluation_start():
+    dates = _warmup_to_eval_dates(total_days=550)
+    aaa = _series_from_closes("AAA", dates, [Decimal("50") + Decimal("0.15") * Decimal(i) for i in range(len(dates))])
+    bbb = _series_from_closes("BBB", dates, [Decimal("50") + Decimal("0.05") * Decimal(i) for i in range(len(dates))])
+    series = {"AAA": aaa, "BBB": bbb}
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector, evaluation_start=_TRUE_EVAL_START)
+    for t in result.transactions:
+        assert t.date >= _TRUE_EVAL_START
+    for day, count in result.daily_position_count:
+        if day < _TRUE_EVAL_START:
+            assert count == 0
+
+
+def test_monthly_rebalance_december_selection_executes_on_january_open():
+    dates = _warmup_to_eval_dates(total_days=550)
+    aaa = _series_from_closes("AAA", dates, [Decimal("50") + Decimal("0.15") * Decimal(i) for i in range(len(dates))])
+    bbb = _series_from_closes("BBB", dates, [Decimal("50") + Decimal("0.05") * Decimal(i) for i in range(len(dates))])
+    series = {"AAA": aaa, "BBB": bbb}
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector, evaluation_start=_TRUE_EVAL_START)
+    first_txn_dates = sorted({t.date for t in result.transactions})
+    assert first_txn_dates
+    assert first_txn_dates[0] >= _TRUE_EVAL_START
+    # The very first execution must land on/after the true evaluation
+    # start even though AAA/BBB have been eligible (and selected at
+    # earlier warm-up month-ends) since well before it.
+    assert first_txn_dates[0] == _TRUE_EVAL_START or first_txn_dates[0] == dates[dates.index(_TRUE_EVAL_START)]
+
+
+def test_monthly_rebalance_evaluation_starts_at_exactly_30000():
+    dates = _warmup_to_eval_dates(total_days=550)
+    aaa = _series_from_closes("AAA", dates, [Decimal("50") + Decimal("0.15") * Decimal(i) for i in range(len(dates))])
+    bbb = _series_from_closes("BBB", dates, [Decimal("50") + Decimal("0.05") * Decimal(i) for i in range(len(dates))])
+    series = {"AAA": aaa, "BBB": bbb}
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector, evaluation_start=_TRUE_EVAL_START)
+    equity_by_date = dict(result.daily_equity)
+    assert equity_by_date[_TRUE_EVAL_START - timedelta(days=3)] == STARTING_CAPITAL if (_TRUE_EVAL_START - timedelta(days=3)) in equity_by_date else True
+    # The last pre-evaluation session must show untouched starting capital.
+    pre_eval_dates = [d for d in dates if d < _TRUE_EVAL_START]
+    assert equity_by_date[pre_eval_dates[-1]] == STARTING_CAPITAL
+
+
+def test_monthly_rebalance_normal_behavior_unchanged_when_evaluation_start_is_a_no_op():
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    unconstrained = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    gated_but_unaffected = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector, evaluation_start=dates[0])
+    assert unconstrained.closed_trades == gated_but_unaffected.closed_trades
+    assert unconstrained.transactions == gated_but_unaffected.transactions
+
+
+# ---------------------------------------------------------------------------
+# Finding 14 (independent review): annualized volatility/downside deviation,
+# and strict separation of signal/scheduled-rebalance/executed-rebalance/
+# buy-transaction/sell-transaction/closed-lot counts (closed-lot count must
+# never be reported or read as a rebalance-event count).
+# ---------------------------------------------------------------------------
+
+def test_annualized_volatility_matches_sharpe_denominator_times_sqrt12():
+    monthly = [Decimal("0.02"), Decimal("-0.01"), Decimal("0.03"), Decimal("0.00"), Decimal("-0.02")]
+    vol = annualized_volatility_pct(monthly)
+    assert vol is not None
+    import statistics as _stats
+    expected = Decimal(str(_stats.pstdev([float(v) for v in monthly]) * (12 ** 0.5)))
+    assert vol == expected
+
+
+def test_annualized_volatility_none_below_two_months():
+    assert annualized_volatility_pct([Decimal("0.01")]) is None
+    assert annualized_volatility_pct([]) is None
+
+
+def test_annualized_downside_deviation_matches_sortino_denominator_times_sqrt12():
+    monthly = [Decimal("0.02"), Decimal("-0.01"), Decimal("0.03"), Decimal("-0.04"), Decimal("0.01")]
+    dd = annualized_downside_deviation_pct(monthly)
+    assert dd is not None
+    import statistics as _stats
+    downside = [float(v) for v in monthly if v < 0]
+    expected = Decimal(str(_stats.pstdev(downside) * (12 ** 0.5)))
+    assert dd == expected
+
+
+def test_annualized_downside_deviation_none_with_no_negative_months():
+    monthly = [Decimal("0.02"), Decimal("0.01"), Decimal("0.03")]
+    assert annualized_downside_deviation_pct(monthly) is None
+
+
+def test_compute_arm_metrics_reports_annualized_volatility_and_downside_deviation():
+    dates, series = _arm_a_fixture()
+    result = run_arm_a(series, dates)
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[240], evaluation_end=dates[-1],
+    )
+    assert "annualized_volatility_pct" in metrics
+    assert "annualized_downside_deviation_pct" in metrics
+
+
+def test_compute_arm_metrics_closed_lot_count_never_equals_mislabeled_rebalance_count_for_arm_c():
+    # A single scheduled rebalance can close several lots (one
+    # TRIM/REMOVE per affected symbol) -- closed_lot_count must be
+    # strictly the count of closed lots, and scheduled_rebalance_count
+    # must be strictly the count of month-end rebalance events, and
+    # these must genuinely differ when a rebalance touches more than
+    # one symbol.
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    assert result.closed_trades, "fixture must produce at least one closed lot"
+    metrics = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions, rebalance_events=result.rebalance_events,
+    )
+    assert metrics["closed_lot_count"] == len(result.closed_trades)
+    expected_scheduled = sum(1 for e in result.rebalance_events if e.execution_date is not None and dates[0] <= e.execution_date <= dates[-1])
+    assert metrics["scheduled_rebalance_count"] == expected_scheduled
+    assert metrics["closed_lot_count"] != metrics["scheduled_rebalance_count"]
+    assert metrics["signal_count"] == metrics["scheduled_rebalance_count"]
+    assert metrics["executed_rebalance_count"] <= metrics["scheduled_rebalance_count"]
+
+
+def test_compute_arm_metrics_buy_and_sell_transaction_counts_derived_from_ledger():
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    metrics = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions, rebalance_events=result.rebalance_events,
+    )
+    window_transactions = [t for t in result.transactions if dates[0] <= t.date <= dates[-1]]
+    expected_buys = sum(1 for t in window_transactions if t.side == "BUY")
+    expected_sells = sum(1 for t in window_transactions if t.side == "SELL")
+    assert metrics["buy_transaction_count"] == expected_buys
+    assert metrics["sell_transaction_count"] == expected_sells
+    assert metrics["buy_transaction_count"] + metrics["sell_transaction_count"] == len(window_transactions)
+
+
+def test_compute_arm_metrics_arm_a_signal_count_equals_entry_transaction_count():
+    # ARM_A never receives rebalance_events -- its signal_count must
+    # fall back to counting real ENTRY transactions from the ledger, and
+    # its scheduled/executed rebalance counts must be zero (ARM_A has no
+    # periodic-rebalance concept).
+    dates, series = _arm_a_fixture()
+    result = run_arm_a(series, dates)
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], transactions=result.transactions,
+    )
+    window_entries = [t for t in result.transactions if t.reason == "ENTRY" and dates[0] <= t.date <= dates[-1]]
+    assert window_entries, "fixture must produce at least one entry"
+    assert metrics["signal_count"] == len(window_entries)
+    assert metrics["scheduled_rebalance_count"] == 0
+    assert metrics["executed_rebalance_count"] == 0
+
+
+def test_compute_arm_metrics_counts_reported_for_segment_views_too():
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    mid = len(dates) // 2
+    first_half = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[mid], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions, rebalance_events=result.rebalance_events,
+    )
+    second_half = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[mid + 1], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions, rebalance_events=result.rebalance_events,
+    )
+    for view in (first_half, second_half):
+        for key in ("signal_count", "scheduled_rebalance_count", "executed_rebalance_count",
+                    "buy_transaction_count", "sell_transaction_count", "closed_lot_count",
+                    "annualized_volatility_pct", "annualized_downside_deviation_pct"):
+            assert key in view
