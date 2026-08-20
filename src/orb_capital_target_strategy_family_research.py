@@ -493,6 +493,7 @@ class ArmASimulationResult:
     transactions: tuple[Transaction, ...] = ()
     daily_position_count: tuple[tuple[date, int], ...] = ()
     daily_position_snapshots: tuple[PositionSnapshot, ...] = ()
+    segment_end_open_positions: tuple[tuple[str, tuple[OpenPosition, ...]], ...] = ()
 
 
 def run_arm_a(
@@ -540,6 +541,7 @@ def run_arm_a(
     daily_position_snapshots: list[PositionSnapshot] = []
     pending_entries: list[str] = []
     transactions: list[Transaction] = []
+    segment_end_open_positions: dict[str, tuple[OpenPosition, ...]] = {}
 
     for i in range(n):
         day = master_dates[i]
@@ -675,6 +677,18 @@ def run_arm_a(
                 date=day, symbol=symbol, quantity=pos.quantity, mark_price=mark_price,
                 market_value=mark_price * pos.quantity, planned_risk=pos.planned_risk,
             ))
+        # Finding 19 (independent review): capture the FULL open-position
+        # state (with entry price/cost, not merely the mark-only
+        # PositionSnapshot) at the end of every calendar segment
+        # encountered -- not just the study's true final end -- so a
+        # segment's own concentration/contribution accounting can
+        # consistently mark any position still open at ITS OWN boundary,
+        # exactly like `open_positions_at_end` already does for the true
+        # evaluation end. Purely a bookkeeping capture of state the loop
+        # already holds; never re-derives or re-simulates anything.
+        seg = segment_label(day)
+        if seg is not None and (i == n - 1 or segment_label(master_dates[i + 1]) != seg):
+            segment_end_open_positions[seg] = tuple(open_positions[s] for s in sorted(open_positions))
 
     return ArmASimulationResult(
         arm=ARM_A, closed_trades=tuple(closed_trades), daily_equity=tuple(daily_equity),
@@ -682,6 +696,7 @@ def run_arm_a(
         open_positions_at_end=tuple(open_positions.values()), total_cost_paid=total_cost_paid,
         transactions=tuple(transactions), daily_position_count=tuple(daily_position_count),
         daily_position_snapshots=tuple(daily_position_snapshots),
+        segment_end_open_positions=tuple(sorted(segment_end_open_positions.items())),
     )
 
 
@@ -769,6 +784,7 @@ class MonthlyRebalanceSimulationResult:
     transactions: tuple[Transaction, ...] = ()
     daily_position_count: tuple[tuple[date, int], ...] = ()
     daily_position_snapshots: tuple[PositionSnapshot, ...] = ()
+    segment_end_open_positions: tuple[tuple[str, tuple[RebalanceHolding, ...]], ...] = ()
 
 
 def month_end_indices(master_dates: Sequence[date]) -> list[int]:
@@ -812,6 +828,7 @@ def run_monthly_rebalance_arm(
     daily_position_snapshots: list[PositionSnapshot] = []
     rebalance_events: list[RebalanceEvent] = []
     transactions: list[Transaction] = []
+    segment_end_open_positions: dict[str, tuple[RebalanceHolding, ...]] = {}
 
     pending_target: tuple[str, ...] | None = None
     pending_execution_index: int | None = None
@@ -967,6 +984,13 @@ def run_monthly_rebalance_arm(
                 date=day, symbol=symbol, quantity=pos.quantity, mark_price=mark_price,
                 market_value=mark_price * pos.quantity, planned_risk=None,
             ))
+        # Finding 19 (independent review): see run_arm_a's identical
+        # capture for the full rationale -- record the FULL open-holding
+        # state (with entry price/cost) at the end of every calendar
+        # segment encountered, not just the study's true final end.
+        seg = segment_label(day)
+        if seg is not None and (i == n - 1 or segment_label(master_dates[i + 1]) != seg):
+            segment_end_open_positions[seg] = tuple(open_positions[s] for s in sorted(open_positions))
 
     return MonthlyRebalanceSimulationResult(
         arm=arm, closed_trades=tuple(closed_trades), daily_equity=tuple(daily_equity),
@@ -975,6 +999,7 @@ def run_monthly_rebalance_arm(
         rebalance_events=tuple(rebalance_events), transactions=tuple(transactions),
         daily_position_count=tuple(daily_position_count),
         daily_position_snapshots=tuple(daily_position_snapshots),
+        segment_end_open_positions=tuple(sorted(segment_end_open_positions.items())),
     )
 
 
@@ -1170,18 +1195,38 @@ def sharpe_ratio(monthly_returns: Sequence[Decimal]) -> Decimal | None:
     return Decimal(str(statistics.fmean(values) / stdev * (12 ** 0.5)))
 
 
+def _downside_deviation_monthly(values: Sequence[float], *, mar: float = 0.0) -> float:
+    """`sqrt(mean(min(r - MAR, 0)^2 over ALL observations))` -- the
+    standard downside-deviation definition under a fixed 0% minimum
+    acceptable return (Finding 17, independent review). Deliberately
+    NOT population stdev of only the negative subset: that prior
+    (incorrect) approach divided by the COUNT OF NEGATIVE MONTHS ONLY
+    (excluding every non-negative month from the denominator entirely)
+    and centered on the negative subset's OWN mean rather than the 0%
+    MAR -- which silently returns exactly zero for two or more IDENTICAL
+    negative months (their spread around their own, negative, mean is
+    zero), even though those months represent a real, nonzero downside.
+    This formula instead divides by every month (a non-negative month
+    contributes an explicit zero shortfall term rather than being
+    excluded), so repeated identical losses are correctly captured."""
+    shortfalls_squared = [min(v - mar, 0.0) ** 2 for v in values]
+    return statistics.fmean(shortfalls_squared) ** 0.5
+
+
 def sortino_ratio(monthly_returns: Sequence[Decimal]) -> Decimal | None:
     """Annualized Sortino (0% risk-free / 0% MAR): mean monthly return
-    divided by the downside deviation (stdev of only the negative
-    monthly returns), annualized by sqrt(12). `None` if there are fewer
-    than 2 months or no negative months (undefined downside deviation)."""
+    divided by the downside deviation (`_downside_deviation_monthly`,
+    the standard `sqrt(mean(min(r-MAR,0)^2))` definition over ALL
+    months), annualized by sqrt(12). `None` if there are fewer than 2
+    months, or the downside deviation is exactly zero (no month fell
+    below the 0% MAR -- division by zero, genuinely undefined, not
+    merely "no downside data": see `annualized_downside_deviation_pct`,
+    which reports that same all-non-negative case as a well-defined
+    zero rather than `None`)."""
     values = _to_float_list(monthly_returns)
     if len(values) < 2:
         return None
-    downside = [v for v in values if v < 0]
-    if not downside:
-        return None
-    downside_dev = statistics.pstdev(downside) if len(downside) > 1 else abs(downside[0])
+    downside_dev = _downside_deviation_monthly(values)
     if downside_dev == 0:
         return None
     return Decimal(str(statistics.fmean(values) / downside_dev * (12 ** 0.5)))
@@ -1198,18 +1243,19 @@ def annualized_volatility_pct(monthly_returns: Sequence[Decimal]) -> Decimal | N
 
 
 def annualized_downside_deviation_pct(monthly_returns: Sequence[Decimal]) -> Decimal | None:
-    """Annualized downside deviation: `stdev(negative monthly) *
-    sqrt(12)` -- the same convention `sortino_ratio` uses for its
-    denominator. `None` if fewer than 2 months or no negative months
-    (undefined downside deviation)."""
+    """Annualized downside deviation under the frozen 0% MAR definition
+    (Finding 17, independent review): `_downside_deviation_monthly(...)
+    * sqrt(12)` -- the same `sqrt(mean(min(r-MAR,0)^2 over ALL months))`
+    convention `sortino_ratio` uses for its own denominator, annualized
+    the same way `annualized_volatility_pct` annualizes stdev. `None`
+    only if there are fewer than 2 months; a series with NO negative
+    months has a genuine, well-defined downside deviation of exactly
+    zero -- not undefined. Only the RATIO `sortino_ratio` becomes
+    undefined (returns `None`) when its own denominator is zero."""
     values = _to_float_list(monthly_returns)
     if len(values) < 2:
         return None
-    downside = [v for v in values if v < 0]
-    if not downside:
-        return None
-    downside_dev = statistics.pstdev(downside) if len(downside) > 1 else abs(downside[0])
-    return Decimal(str(downside_dev * (12 ** 0.5)))
+    return Decimal(str(_downside_deviation_monthly(values) * (12 ** 0.5)))
 
 
 def profitable_month_stats(monthly_pnl: Sequence[Decimal]) -> dict[str, Any]:
@@ -1599,6 +1645,9 @@ def exposure_and_concurrency_from_daily_counts(
     }
 
 
+_EMPTY_MAPPING: Mapping[str, Decimal] = {}  # never mutated; a safe shared empty-default sentinel
+
+
 def compute_arm_metrics(
     *, arm: str, closed_trades: Sequence[Any], daily_equity: Sequence[tuple[date, Decimal]],
     starting_capital: Decimal, total_cost_paid: Decimal, evaluation_start: date, evaluation_end: date,
@@ -1606,6 +1655,7 @@ def compute_arm_metrics(
     end_mark_transactions: Sequence[Transaction] = (), fixed_notional: Decimal = STARTING_CAPITAL,
     daily_position_count: Sequence[tuple[date, int]] = (),
     rebalance_events: Sequence[Any] = (),
+    segment_carry_unrealized_net: Mapping[str, Decimal] = _EMPTY_MAPPING,
 ) -> dict[str, Any]:
     """The full required-output set for one arm/cost-case, computed over
     `[evaluation_start, evaluation_end]` only (warm-up-period equity
@@ -1634,7 +1684,27 @@ def compute_arm_metrics(
     (`len(window_trades)`): a single scheduled rebalance can close
     several lots (one TRIM/REMOVE per continuing or removed symbol), so
     closed-lot count must never be reported or read as a rebalance-event
-    count."""
+    count. `signal_count` is a genuine pre-fill signal count for
+    ARM_B/ARM_C (the month-end selector runs unconditionally, whether or
+    not it later executes) but is `None` for ARM_A, which currently has
+    no comparable signal ledger; ARM_A instead reports
+    `filled_entry_count` (a fill count, honestly labeled as such -- never
+    mislabeled as a raw signal count).
+    `segment_carry_unrealized_net` (Finding 19, independent review) is a
+    pre-computed `{symbol: unrealized_net_dollars}` mapping for a
+    SEGMENT window only (never the pooled/true-final window, which
+    already uses `end_mark_transactions`/`open_positions_at_end`) --
+    folded into `pnl_by_symbol`/concentration so a segment's own
+    contribution accounting stays consistent with its own equity-based
+    net P&L, which already reflects any carrying position's unrealized
+    movement during that segment. Computed by the CALLER (see
+    `segment_carry_unrealized_by_symbol` in the CLI script), which can
+    only resolve this unambiguously for a position untouched during the
+    segment or one that entered fresh with no later topup/trim; any
+    other case is deliberately left out here too (same as always) so no
+    fabricated number is ever reported -- the gap remains fully visible
+    via this function's own `reconciliation.residual`, never hidden.
+    never mislabeled as a raw signal count)."""
     window_equity = slice_to_window(daily_equity, start=evaluation_start, end=evaluation_end)
     window_trades = [t for t in closed_trades if evaluation_start <= t.exit_date <= evaluation_end]
     window_transactions = [t for t in transactions if evaluation_start <= t.date <= evaluation_end]
@@ -1646,7 +1716,30 @@ def compute_arm_metrics(
     prior_before_window = [e for d, e in daily_equity if d < evaluation_start]
     if prior_before_window:
         baseline_equity = prior_before_window[-1]
-    anchored_equity = [(evaluation_start, baseline_equity)] + window_equity if window_equity[0][0] != evaluation_start else window_equity
+    # Finding 16 (independent review, BLOCKER): the opening-equity anchor
+    # must ALWAYS be prepended, unconditionally. `window_equity[0]` is
+    # the CLOSING mark of the first window session (after that session's
+    # own execution) -- both engines mark equity once per session, at
+    # the end of step 5, and `slice_to_window` is inclusive of
+    # `evaluation_start`, so `window_equity[0][0] == evaluation_start`
+    # is always true in practice. Using `window_equity[0]` itself as the
+    # baseline (the prior, buggy `... else window_equity` branch, always
+    # taken) silently drops the first window session's own P&L/costs
+    # from every monthly-return-derived metric (monthly return/dollar
+    # series, Sharpe/Sortino/volatility/downside-deviation, CAGR,
+    # drawdown, profitable-month stats) -- while `net_pnl_equity` below
+    # (computed directly from `baseline_equity`, never from
+    # `anchored_equity`) already correctly included it, so the two views
+    # could silently disagree. `baseline_equity` -- the prior session's
+    # actual closing equity, or `starting_capital` if there is no prior
+    # session at all (the pooled window's own true first session) -- is
+    # prepended at the SAME date as `evaluation_start`, deliberately
+    # placed BEFORE `window_equity[0]` in list order so it serves purely
+    # as a same-day opening-balance reference point and is never itself
+    # mistaken for a month-end mark (`monthly_equity_marks` only treats
+    # the LAST mark of a given calendar month as a mark, and this pair
+    # shares a month with `window_equity[0]` by construction).
+    anchored_equity = [(evaluation_start, baseline_equity), *window_equity]
 
     monthly_pct_pairs = monthly_return_pct(anchored_equity)
     monthly_pct = [v for _, v in monthly_pct_pairs]
@@ -1677,6 +1770,8 @@ def compute_arm_metrics(
         unrealized_gross = (mark.price - pos.entry_price) * pos.quantity
         unrealized_net = unrealized_gross - pos.entry_cost - mark.cost
         pnl_by_symbol[pos.symbol] = pnl_by_symbol.get(pos.symbol, Decimal(0)) + unrealized_net
+    for symbol, carry_net in segment_carry_unrealized_net.items():
+        pnl_by_symbol[symbol] = pnl_by_symbol.get(symbol, Decimal(0)) + carry_net
     concentration = positive_contribution_concentration(pnl_by_symbol)
 
     trade_notionals = [t.notional for t in window_transactions] + [t.notional for t in end_mark_transactions]
@@ -1716,15 +1811,28 @@ def compute_arm_metrics(
     scheduled_rebalance_count = len(window_rebalance_events)
     executed_transaction_dates = {t.date for t in window_transactions}
     executed_rebalance_count = sum(1 for e in window_rebalance_events if e.execution_date in executed_transaction_dates)
-    # For ARM_A (no rebalance_events passed) a "signal" is every entry
-    # actually filled; for ARM_B/ARM_C a "signal" is every month-end
-    # selector call that got scheduled to execute in this window.
-    signal_count = scheduled_rebalance_count if rebalance_events else sum(1 for t in window_transactions if t.reason == "ENTRY")
+    # Finding 18 (independent review, CORRECTION): `signal_count` must
+    # never be populated from FILLED orders -- a fill is not a raw
+    # signal (it is what happened to a signal after cash/slot/risk-cap
+    # filtering). For ARM_B/ARM_C, `rebalance_events` genuinely IS a raw
+    # signal log (the month-end selector runs and records a target
+    # basket unconditionally, whether or not it later executes), so
+    # `signal_count` is honestly populated there. ARM_A currently has no
+    # comparable pre-fill signal ledger (no record of an RSI(2)<10
+    # candidate that was scanned but never filled, e.g. because the
+    # 3-position cap was already reached) -- reporting a filled-entry
+    # count under the "signal_count" label would misrepresent it as a
+    # raw signal count, so ARM_A instead reports `filled_entry_count`
+    # (honestly labeled as fills) and leaves `signal_count` as `None`
+    # (no genuine signal-ledger data available, not fabricated as zero).
+    signal_count = scheduled_rebalance_count if rebalance_events else None
+    filled_entry_count = sum(1 for t in window_transactions if t.reason == "ENTRY") if not rebalance_events else None
 
     return {
         "arm": arm,
         "closed_lot_count": closed_lot_count,
         "signal_count": signal_count,
+        "filled_entry_count": filled_entry_count,
         "scheduled_rebalance_count": scheduled_rebalance_count,
         "executed_rebalance_count": executed_rebalance_count,
         "buy_transaction_count": buy_transaction_count,

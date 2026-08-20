@@ -45,6 +45,7 @@ from src.orb_capital_target_strategy_family_research import (
     monthly_return_pct, pearson_correlation, align_monthly_series, classify_capital_target_arm,
     max_drawdown, evaluation_end_mark_transactions, fill_missing_months_with_zero,
     CLASSIFICATION_POSITIVE_BUT_INSUFFICIENT, compute_combination_plausibility_upper_bound,
+    Transaction, PositionSnapshot,
 )
 
 WARMUP_START = date(2021, 1, 1)
@@ -227,6 +228,72 @@ def close_on_exact_date(series: DailySeries, day: date) -> Decimal:
 
 def end_price_by_symbol_for(series_by_symbol: Mapping[str, DailySeries], symbols: Sequence[str], *, end_date: date) -> dict[str, Decimal]:
     return {s: close_on_exact_date(series_by_symbol[s], end_date) for s in symbols}
+
+
+def segment_carry_unrealized_by_symbol(
+    *, segment_end_positions: Sequence[Any], transactions: Sequence[Transaction],
+    daily_position_snapshots: Sequence[PositionSnapshot], evaluation_start: date, evaluation_end: date,
+    series_by_symbol: Mapping[str, DailySeries],
+) -> dict[str, Decimal]:
+    """Finding 19 (independent review): for a SEGMENT window ONLY (never
+    the pooled/true-final window, which already uses
+    `evaluation_end_mark_transactions`/`open_positions_at_end`), computes
+    each still-open-at-segment-end position's own unrealized net
+    contribution for THIS segment specifically -- so segment-level
+    concentration/contribution accounting stays consistent with the
+    segment's own equity-based net P&L (`compute_arm_metrics`'s
+    `net_pnl`/`net_pnl_marked`), which already includes this movement.
+    Uses ONLY the existing position/transaction ledgers -- never reruns
+    or re-derives anything about the simulation itself.
+
+    Correctly (and unambiguously) resolved for exactly two cases:
+      (a) a position open BEFORE this segment and untouched (no BUY/SELL
+          transaction for that symbol) DURING it -- pure mark-to-market
+          since the last snapshot before the segment began.
+      (b) a position that entered FRESH during this segment (its only
+          transaction here is a single ENTRY/REBALANCE_BUY) and was
+          never topped up or trimmed afterward -- mark-to-market since
+          that one entry.
+    A position topped up or trimmed while STILL remaining open at the
+    segment's own end is intentionally left OUT here: the shared,
+    running weighted-average cost basis both simulation engines
+    maintain cannot be unambiguously split into "gained before this
+    segment" vs. "gained during this segment" without per-lot cost
+    history the current ledger does not track. Any such gap is never
+    silently hidden -- it remains fully visible via
+    `compute_arm_metrics`'s own `reconciliation.residual` for that
+    segment."""
+    window_transactions_by_symbol: dict[str, list[Transaction]] = {}
+    for t in transactions:
+        if evaluation_start <= t.date <= evaluation_end:
+            window_transactions_by_symbol.setdefault(t.symbol, []).append(t)
+
+    snapshot_value_by_symbol_and_date: dict[tuple[str, date], Decimal] = {
+        (s.symbol, s.date): s.market_value for s in daily_position_snapshots
+    }
+    pre_window_dates_by_symbol: dict[str, list[date]] = {}
+    for s in daily_position_snapshots:
+        if s.date < evaluation_start:
+            pre_window_dates_by_symbol.setdefault(s.symbol, []).append(s.date)
+
+    out: dict[str, Decimal] = {}
+    for pos in segment_end_positions:
+        symbol = pos.symbol
+        end_price = close_on_exact_date(series_by_symbol[symbol], evaluation_end)
+        market_value_end = end_price * pos.quantity
+        txns = window_transactions_by_symbol.get(symbol, [])
+        if not txns:
+            pre_dates = pre_window_dates_by_symbol.get(symbol)
+            if not pre_dates:
+                continue  # no pre-window snapshot -- ambiguous; left to the residual
+            reference_value = snapshot_value_by_symbol_and_date[(symbol, max(pre_dates))]
+            out[symbol] = market_value_end - reference_value
+        elif len(txns) == 1 and txns[0].side == "BUY" and txns[0].reason in ("ENTRY", "REBALANCE_BUY"):
+            entry_txn = txns[0]
+            out[symbol] = market_value_end - entry_txn.notional - entry_txn.cost
+        # else: topped up/trimmed while remaining open this segment --
+        # deliberately left out; the residual absorbs it, never hidden.
+    return out
 
 
 def _sha256_of_json(value: Any) -> str:
@@ -416,24 +483,53 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
             rebalance_events=getattr(stress_sim, "rebalance_events", ()),
         )
 
-        segment_metrics = {}
-        for seg in CALENDAR_SEGMENTS:
-            seg_dates = [d for d in master_dates if segment_label(d) == seg and EVALUATION_START <= d <= EVALUATION_END]
-            if not seg_dates:
-                continue
-            # Only the segment whose own end IS the true evaluation end
-            # (2026_YTD) gets the hypothetical endpoint mark; earlier
-            # segment boundaries are interim reporting cuts, not real or
-            # hypothetical liquidation events.
-            seg_end_marks = base_end_marks if seg_dates[-1] == EVALUATION_END else ()
-            segment_metrics[seg] = compute_arm_metrics(
-                arm=arm, closed_trades=base_sim.closed_trades, daily_equity=base_sim.daily_equity,
-                starting_capital=base_sim.starting_capital, total_cost_paid=base_sim.total_cost_paid,
-                evaluation_start=seg_dates[0], evaluation_end=seg_dates[-1],
-                open_positions_at_end=base_sim.open_positions_at_end, transactions=base_sim.transactions,
-                end_mark_transactions=seg_end_marks, daily_position_count=base_sim.daily_position_count,
-                rebalance_events=getattr(base_sim, "rebalance_events", ()),
-            )
+        # Finding 19 (independent review): required outputs are per arm,
+        # cost case, calendar segment, AND pooled -- segment metrics were
+        # previously computed only for the base-cost simulation. Both
+        # base and stress segment metrics are built here, each from its
+        # OWN simulation (base/stress cost can diverge in exactly which
+        # trades execute, not merely their cost, so each needs its own
+        # ledgers/snapshots/segment-end positions).
+        base_segment_end_positions = dict(getattr(base_sim, "segment_end_open_positions", ()))
+        stress_segment_end_positions = dict(getattr(stress_sim, "segment_end_open_positions", ()))
+
+        def _build_segment_metrics(sim: Any, end_marks: Any, segment_end_positions: dict[str, Any]) -> dict[str, Any]:
+            out: dict[str, Any] = {}
+            for seg in CALENDAR_SEGMENTS:
+                seg_dates = [d for d in master_dates if segment_label(d) == seg and EVALUATION_START <= d <= EVALUATION_END]
+                if not seg_dates:
+                    continue
+                # Only the segment whose own end IS the true evaluation
+                # end (2026_YTD) gets the hypothetical endpoint mark;
+                # earlier segment boundaries are interim reporting cuts,
+                # not real or hypothetical liquidation events -- those
+                # instead get the Finding 19 carry-unrealized attribution
+                # so their own concentration/contribution accounting
+                # stays consistent with their own equity-based net P&L.
+                is_true_end_segment = seg_dates[-1] == EVALUATION_END
+                seg_end_marks = end_marks if is_true_end_segment else ()
+                seg_carry_unrealized = (
+                    {} if is_true_end_segment else
+                    segment_carry_unrealized_by_symbol(
+                        segment_end_positions=segment_end_positions.get(seg, ()), transactions=sim.transactions,
+                        daily_position_snapshots=sim.daily_position_snapshots,
+                        evaluation_start=seg_dates[0], evaluation_end=seg_dates[-1],
+                        series_by_symbol=series_by_symbol,
+                    )
+                )
+                out[seg] = compute_arm_metrics(
+                    arm=arm, closed_trades=sim.closed_trades, daily_equity=sim.daily_equity,
+                    starting_capital=sim.starting_capital, total_cost_paid=sim.total_cost_paid,
+                    evaluation_start=seg_dates[0], evaluation_end=seg_dates[-1],
+                    open_positions_at_end=sim.open_positions_at_end, transactions=sim.transactions,
+                    end_mark_transactions=seg_end_marks, daily_position_count=sim.daily_position_count,
+                    rebalance_events=getattr(sim, "rebalance_events", ()),
+                    segment_carry_unrealized_net=seg_carry_unrealized,
+                )
+            return out
+
+        segment_metrics = _build_segment_metrics(base_sim, base_end_marks, base_segment_end_positions)
+        stress_segment_metrics = _build_segment_metrics(stress_sim, stress_end_marks, stress_segment_end_positions)
 
         arm_monthly_pct_pairs = base_metrics["monthly_return_pct_series"]
         aligned_orb = align_monthly_series(arm_monthly_pct_pairs, orb_monthly)
@@ -477,7 +573,8 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
         )
 
         per_arm_output[arm] = {
-            "base_cost": base_metrics, "stress_cost": stress_metrics, "segments": segment_metrics,
+            "base_cost": base_metrics, "stress_cost": stress_metrics,
+            "segments": segment_metrics, "stress_segments": stress_segment_metrics,
             "risk_views": risk_views, "correlation_to_orb": correlation_to_orb, "correlation_to_spy": correlation_to_spy,
             "classification": classification,
         }

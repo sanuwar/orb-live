@@ -9,7 +9,7 @@ from decimal import Decimal
 import pytest
 
 import scripts.research_capital_target_strategy_family as cli
-from src.orb_capital_target_strategy_family_research import DailySeries, PositionSnapshot, Transaction
+from src.orb_capital_target_strategy_family_research import DailySeries, PositionSnapshot, Transaction, RebalanceHolding
 
 
 def _business_days(start: date, count: int) -> list[date]:
@@ -266,12 +266,20 @@ def test_full_study_reports_finding_14_counts_and_volatility_for_every_arm():
     results = cli.run_full_study(series, master_dates)
     for arm in cli.ARMS:
         base = results["arms"][arm]["base_cost"]
-        for key in ("signal_count", "scheduled_rebalance_count", "executed_rebalance_count",
+        for key in ("signal_count", "filled_entry_count", "scheduled_rebalance_count", "executed_rebalance_count",
                     "buy_transaction_count", "sell_transaction_count", "closed_lot_count",
                     "annualized_volatility_pct", "annualized_downside_deviation_pct"):
             assert key in base
         assert "closed_lot_count" in base
         assert "trade_or_rebalance_count" not in base
+        # Finding 18: ARM_A must never have a filled-entry count
+        # mislabeled as a raw signal count, and vice versa for ARM_B/C.
+        if arm == cli.ARM_A:
+            assert base["signal_count"] is None
+            assert base["filled_entry_count"] is not None
+        else:
+            assert base["signal_count"] is not None
+            assert base["filled_entry_count"] is None
 
 
 def test_full_study_reports_combination_plausibility_when_all_arms_insufficient():
@@ -286,6 +294,99 @@ def test_full_study_reports_combination_plausibility_when_all_arms_insufficient(
         assert len(combo["top_two_arms"]) == 2
     else:
         assert combo is None
+
+
+def test_segment_carry_unrealized_untouched_position_is_pure_mark_to_market():
+    # Finding 19 (independent review): a position open BEFORE the
+    # segment and untouched (no transaction) DURING it must contribute
+    # exactly (mark-value at segment end) - (mark-value at the last
+    # pre-segment snapshot) -- pure mark-to-market, no cash-flow
+    # adjustment needed.
+    pre_date = date(2022, 12, 30)
+    dates = _business_days(pre_date, 25)
+    seg_start = dates[1]
+    seg_end = dates[-1]
+    closes = [Decimal("50")] * len(dates)
+    closes[-1] = Decimal("55")  # segment-end close
+    series = _series_with_post_end_bar("AAA", dates, closes)
+
+    snapshots = (PositionSnapshot(date=pre_date, symbol="AAA", quantity=100, mark_price=Decimal("50"), market_value=Decimal("5000"), planned_risk=None),)
+    segment_end_positions = (RebalanceHolding(symbol="AAA", entry_date=pre_date, entry_index=0, entry_price=Decimal("48"), quantity=100, entry_cost=Decimal("5")),)
+
+    result = cli.segment_carry_unrealized_by_symbol(
+        segment_end_positions=segment_end_positions, transactions=(),
+        daily_position_snapshots=snapshots, evaluation_start=seg_start, evaluation_end=seg_end,
+        series_by_symbol={"AAA": series},
+    )
+    assert result == {"AAA": Decimal("55") * 100 - Decimal("5000")}
+
+
+def test_segment_carry_unrealized_fresh_entry_this_segment():
+    dates = _business_days(date(2023, 1, 3), 20)
+    seg_start = dates[0]
+    seg_end = dates[-1]
+    closes = [Decimal("40")] * len(dates)
+    closes[-1] = Decimal("45")
+    series = _series_with_post_end_bar("BBB", dates, closes)
+
+    entry_txn = Transaction(
+        date=seg_start, arm="ARM_C", symbol="BBB", side="BUY", quantity=50,
+        price=Decimal("40"), notional=Decimal("2000"), cost=Decimal("2"), reason="REBALANCE_BUY",
+    )
+    segment_end_positions = (RebalanceHolding(symbol="BBB", entry_date=seg_start, entry_index=0, entry_price=Decimal("40"), quantity=50, entry_cost=Decimal("2")),)
+
+    result = cli.segment_carry_unrealized_by_symbol(
+        segment_end_positions=segment_end_positions, transactions=(entry_txn,),
+        daily_position_snapshots=(), evaluation_start=seg_start, evaluation_end=seg_end,
+        series_by_symbol={"BBB": series},
+    )
+    assert result == {"BBB": Decimal("45") * 50 - Decimal("2000") - Decimal("2")}
+
+
+def test_segment_carry_unrealized_touched_mid_segment_is_left_out():
+    # A position topped up (or trimmed) WHILE remaining open at the
+    # segment's own end cannot be unambiguously attributed from the
+    # current ledger -- it must be left out entirely, not guessed at.
+    dates = _business_days(date(2023, 1, 3), 20)
+    seg_start = dates[0]
+    seg_end = dates[-1]
+    closes = [Decimal("40")] * len(dates)
+    series = _series_with_post_end_bar("CCC", dates, closes)
+
+    entry_txn = Transaction(
+        date=seg_start, arm="ARM_C", symbol="CCC", side="BUY", quantity=50,
+        price=Decimal("40"), notional=Decimal("2000"), cost=Decimal("2"), reason="REBALANCE_BUY",
+    )
+    topup_txn = Transaction(
+        date=dates[10], arm="ARM_C", symbol="CCC", side="BUY", quantity=10,
+        price=Decimal("41"), notional=Decimal("410"), cost=Decimal("1"), reason="REBALANCE_TOPUP",
+    )
+    segment_end_positions = (RebalanceHolding(symbol="CCC", entry_date=seg_start, entry_index=0, entry_price=Decimal("40.17"), quantity=60, entry_cost=Decimal("3")),)
+
+    result = cli.segment_carry_unrealized_by_symbol(
+        segment_end_positions=segment_end_positions, transactions=(entry_txn, topup_txn),
+        daily_position_snapshots=(), evaluation_start=seg_start, evaluation_end=seg_end,
+        series_by_symbol={"CCC": series},
+    )
+    assert result == {}
+
+
+def test_full_study_reports_stress_segments_for_every_arm():
+    # Finding 19: required outputs are per arm, cost case, calendar
+    # segment, AND pooled -- stress-cost segment metrics must exist, not
+    # just base-cost.
+    series, dates = _full_synthetic_series_by_symbol()
+    master_dates = tuple(d for d in dates if cli.WARMUP_START <= d <= cli.EVALUATION_END)
+    results = cli.run_full_study(series, master_dates)
+    for arm in cli.ARMS:
+        assert "stress_segments" in results["arms"][arm]
+        base_segments = results["arms"][arm]["segments"]
+        stress_segments = results["arms"][arm]["stress_segments"]
+        assert set(stress_segments.keys()) == set(base_segments.keys())
+        assert stress_segments, "fixture must produce at least one reported segment"
+        for seg, metrics in stress_segments.items():
+            assert "net_pnl_marked" in metrics
+            assert "concentration" in metrics
 
 
 def test_fetch_end_exclusive_is_documented_not_a_hard_guarantee():

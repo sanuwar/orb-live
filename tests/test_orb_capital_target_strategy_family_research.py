@@ -1188,7 +1188,11 @@ def test_arm_a_evaluation_starts_at_exactly_30000_with_no_positions():
     equity_by_date = dict(result.daily_equity)
     assert equity_by_date[_TRUE_EVAL_START] == STARTING_CAPITAL
     position_count_by_date = dict(result.daily_position_count)
-    assert position_count_by_date[_TRUE_EVAL_START] == 0 or True  # entry may fill THIS session; equity is marked before same-day effects settle only in the sense that no PRIOR position existed
+    # This specific fixture (dip in October 2021, well before the true
+    # evaluation start) produces no signal right at the evaluation
+    # boundary -- so the very first evaluation session genuinely closes
+    # with zero open positions, not merely "0 or vacuously anything".
+    assert position_count_by_date[_TRUE_EVAL_START] == 0
 
 
 def test_arm_a_normal_behavior_unchanged_when_evaluation_start_is_a_no_op():
@@ -1243,9 +1247,11 @@ def test_monthly_rebalance_evaluation_starts_at_exactly_30000():
     selector = arm_c_selector(series, sma200)
     result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector, evaluation_start=_TRUE_EVAL_START)
     equity_by_date = dict(result.daily_equity)
-    assert equity_by_date[_TRUE_EVAL_START - timedelta(days=3)] == STARTING_CAPITAL if (_TRUE_EVAL_START - timedelta(days=3)) in equity_by_date else True
-    # The last pre-evaluation session must show untouched starting capital.
+    # The last pre-evaluation session (2021-12-31, a real trading day
+    # immediately preceding the 2022-01-03 evaluation start -- see
+    # `_warmup_to_eval_dates`) must show untouched starting capital.
     pre_eval_dates = [d for d in dates if d < _TRUE_EVAL_START]
+    assert pre_eval_dates[-1] == _TRUE_EVAL_START - timedelta(days=3)
     assert equity_by_date[pre_eval_dates[-1]] == STARTING_CAPITAL
 
 
@@ -1281,18 +1287,24 @@ def test_annualized_volatility_none_below_two_months():
 
 
 def test_annualized_downside_deviation_matches_sortino_denominator_times_sqrt12():
+    # Finding 17 (independent review): downside deviation is
+    # sqrt(mean(min(r-0,0)^2 over ALL months)) * sqrt(12), not
+    # population stdev of only the negative subset -- see the dedicated
+    # Finding 17 test section below for the full hand-calculated
+    # coverage of this corrected formula.
     monthly = [Decimal("0.02"), Decimal("-0.01"), Decimal("0.03"), Decimal("-0.04"), Decimal("0.01")]
     dd = annualized_downside_deviation_pct(monthly)
     assert dd is not None
-    import statistics as _stats
-    downside = [float(v) for v in monthly if v < 0]
-    expected = Decimal(str(_stats.pstdev(downside) * (12 ** 0.5)))
-    assert dd == expected
+    shortfalls_squared = [0.0, 0.01 ** 2, 0.0, 0.04 ** 2, 0.0]
+    expected = Decimal(str(((sum(shortfalls_squared) / 5) ** 0.5) * (12 ** 0.5)))
+    assert abs(dd - expected) < Decimal("0.0000001")
 
 
-def test_annualized_downside_deviation_none_with_no_negative_months():
+def test_annualized_downside_deviation_zero_not_none_with_no_negative_months():
+    # Finding 17: a series with no month below the 0% MAR has a
+    # well-defined downside deviation of exactly zero, not None.
     monthly = [Decimal("0.02"), Decimal("0.01"), Decimal("0.03")]
-    assert annualized_downside_deviation_pct(monthly) is None
+    assert annualized_downside_deviation_pct(monthly) == Decimal("0")
 
 
 def test_compute_arm_metrics_reports_annualized_volatility_and_downside_deviation():
@@ -1331,6 +1343,9 @@ def test_compute_arm_metrics_closed_lot_count_never_equals_mislabeled_rebalance_
     assert metrics["closed_lot_count"] != metrics["scheduled_rebalance_count"]
     assert metrics["signal_count"] == metrics["scheduled_rebalance_count"]
     assert metrics["executed_rebalance_count"] <= metrics["scheduled_rebalance_count"]
+    # ARM_C has no comparable "filled entry" concept -- must not be
+    # fabricated (Finding 18).
+    assert metrics["filled_entry_count"] is None
 
 
 def test_compute_arm_metrics_buy_and_sell_transaction_counts_derived_from_ledger():
@@ -1352,11 +1367,14 @@ def test_compute_arm_metrics_buy_and_sell_transaction_counts_derived_from_ledger
     assert metrics["buy_transaction_count"] + metrics["sell_transaction_count"] == len(window_transactions)
 
 
-def test_compute_arm_metrics_arm_a_signal_count_equals_entry_transaction_count():
-    # ARM_A never receives rebalance_events -- its signal_count must
-    # fall back to counting real ENTRY transactions from the ledger, and
-    # its scheduled/executed rebalance counts must be zero (ARM_A has no
-    # periodic-rebalance concept).
+def test_compute_arm_metrics_arm_a_filled_entry_count_never_mislabeled_as_signal_count():
+    # Finding 18 (independent review): ARM_A never receives
+    # rebalance_events, so it has no genuine pre-fill signal ledger --
+    # its FILLED-entry count must be reported under the honestly-named
+    # `filled_entry_count`, and `signal_count` (which would otherwise
+    # silently relabel a fill count as a raw signal count) must be
+    # `None`, not fabricated. Its scheduled/executed rebalance counts
+    # must be zero (ARM_A has no periodic-rebalance concept).
     dates, series = _arm_a_fixture()
     result = run_arm_a(series, dates)
     metrics = compute_arm_metrics(
@@ -1366,7 +1384,8 @@ def test_compute_arm_metrics_arm_a_signal_count_equals_entry_transaction_count()
     )
     window_entries = [t for t in result.transactions if t.reason == "ENTRY" and dates[0] <= t.date <= dates[-1]]
     assert window_entries, "fixture must produce at least one entry"
-    assert metrics["signal_count"] == len(window_entries)
+    assert metrics["filled_entry_count"] == len(window_entries)
+    assert metrics["signal_count"] is None
     assert metrics["scheduled_rebalance_count"] == 0
     assert metrics["executed_rebalance_count"] == 0
 
@@ -1390,7 +1409,7 @@ def test_compute_arm_metrics_counts_reported_for_segment_views_too():
         transactions=result.transactions, rebalance_events=result.rebalance_events,
     )
     for view in (first_half, second_half):
-        for key in ("signal_count", "scheduled_rebalance_count", "executed_rebalance_count",
+        for key in ("signal_count", "filled_entry_count", "scheduled_rebalance_count", "executed_rebalance_count",
                     "buy_transaction_count", "sell_transaction_count", "closed_lot_count",
                     "annualized_volatility_pct", "annualized_downside_deviation_pct"):
             assert key in view
@@ -1448,3 +1467,193 @@ def test_combination_upper_bound_boundary_is_inclusive_at_exact_target():
     result = compute_combination_plausibility_upper_bound(arm_means)
     assert result["generous_upper_bound_monthly_dollars"] == COMBINATION_TARGET_MONTHLY_DOLLARS
     assert result["verdict"] == COMBINATION_MATHEMATICALLY_PLAUSIBLE
+
+
+# ---------------------------------------------------------------------------
+# Finding 16 (independent review, BLOCKER): compute_arm_metrics must anchor
+# every pooled/segment window at its TRUE opening equity (the preceding
+# session's closing equity, or starting_capital when there is no preceding
+# session) -- never at the first window session's OWN closing equity --
+# so that session's movement and costs are counted exactly once, never
+# silently dropped from every monthly-return-derived metric.
+# ---------------------------------------------------------------------------
+
+def test_compute_arm_metrics_first_session_movement_counted_in_monthly_return():
+    prior_date = date(2021, 12, 31)
+    eval_start = date(2022, 1, 3)
+    month_end = date(2022, 1, 31)
+    daily_equity = [
+        (prior_date, Decimal("30000")),
+        (eval_start, Decimal("29900")),  # first evaluation session closes down $100
+        (month_end, Decimal("30000")),  # round-trips back to the opening balance
+    ]
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=(), daily_equity=daily_equity,
+        starting_capital=Decimal("30000"), total_cost_paid=Decimal(0),
+        evaluation_start=eval_start, evaluation_end=month_end,
+    )
+    # The month must report exactly $0 / 0% -- NOT +$100/$29,900
+    # (~+0.33%), which is what results if the first session's own
+    # closing equity is wrongly used as its own baseline.
+    assert metrics["monthly_return_pct_series"] == [(month_end, Decimal("0"))]
+    assert metrics["monthly_dollar_pnl_fixed_30k_series"] == [(month_end, Decimal("0"))]
+    assert metrics["mean_monthly_return_pct"] == Decimal("0")
+
+
+def test_compute_arm_metrics_first_session_dip_visible_in_drawdown():
+    prior_date = date(2021, 12, 31)
+    eval_start = date(2022, 1, 3)
+    month_end = date(2022, 1, 31)
+    daily_equity = [
+        (prior_date, Decimal("30000")),
+        (eval_start, Decimal("29900")),
+        (month_end, Decimal("30000")),
+    ]
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=(), daily_equity=daily_equity,
+        starting_capital=Decimal("30000"), total_cost_paid=Decimal(0),
+        evaluation_start=eval_start, evaluation_end=month_end,
+    )
+    # The $100 first-session dip below the true $30,000 opening balance
+    # must be a visible drawdown. Without the opening-equity anchor the
+    # visible series is $29,900 -> $30,000 -- monotonically
+    # non-decreasing, i.e. zero drawdown, which would silently hide it.
+    assert metrics["max_drawdown_dollars"] == Decimal("100")
+    assert metrics["max_drawdown_pct"] == Decimal("100") / Decimal("30000")
+
+
+def test_compute_arm_metrics_cagr_anchored_at_true_opening_equity():
+    prior_date = date(2021, 12, 31)
+    eval_start = date(2022, 1, 3)
+    evaluation_end = date(2023, 1, 3)
+    daily_equity = [
+        (prior_date, Decimal("30000")),
+        (eval_start, Decimal("29900")),
+        (evaluation_end, Decimal("33000")),
+    ]
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=(), daily_equity=daily_equity,
+        starting_capital=Decimal("30000"), total_cost_paid=Decimal(0),
+        evaluation_start=eval_start, evaluation_end=evaluation_end,
+    )
+    # CAGR must compound from the true $30,000 opening balance across
+    # the full one-year window (33000/30000 => +10%), never from the
+    # diminished $29,900 first-session close.
+    assert metrics["cagr"] is not None
+    assert abs(metrics["cagr"] - Decimal("0.1")) < Decimal("0.0001")
+
+
+def test_compute_arm_metrics_pooled_window_opening_is_exactly_starting_capital():
+    # With no preceding session at all (the true study start), the
+    # opening anchor must fall back to starting_capital exactly -- and
+    # the first month's return must be measured against IT, not against
+    # that month's own first-session close.
+    eval_start = date(2022, 1, 3)
+    month_end = date(2022, 1, 31)
+    daily_equity = [
+        (eval_start, Decimal("29500")),
+        (month_end, Decimal("30500")),
+    ]
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=(), daily_equity=daily_equity,
+        starting_capital=Decimal("30000"), total_cost_paid=Decimal(0),
+        evaluation_start=eval_start, evaluation_end=month_end,
+    )
+    assert metrics["starting_capital"] == Decimal("30000")
+    # +$500 on a true $30,000 opening balance is +1.667%, not
+    # +$1,000/$29,500 (~+3.39%) against the first session's own close.
+    expected_pct = (Decimal("30500") - Decimal("30000")) / Decimal("30000")
+    assert metrics["monthly_return_pct_series"] == [(month_end, expected_pct)]
+
+
+def test_compute_arm_metrics_yearly_segment_anchors_at_preceding_years_close():
+    # A calendar-segment call (e.g. one year) must anchor its own
+    # opening equity at the PRECEDING session's actual closing equity
+    # (the last session of the prior year) -- never at that year's own
+    # first session's closing equity.
+    dec_30_2022 = date(2022, 12, 30)
+    jan_3_2023 = date(2023, 1, 3)
+    jan_31_2023 = date(2023, 1, 31)
+    daily_equity = [
+        (dec_30_2022, Decimal("31000")),
+        (jan_3_2023, Decimal("30800")),  # 2023's first session dips $200
+        (jan_31_2023, Decimal("31000")),  # round-trips back
+    ]
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=(), daily_equity=daily_equity,
+        starting_capital=Decimal("30000"), total_cost_paid=Decimal(0),
+        evaluation_start=jan_3_2023, evaluation_end=jan_31_2023,
+    )
+    assert metrics["starting_capital"] == Decimal("31000")
+    assert metrics["monthly_return_pct_series"] == [(jan_31_2023, Decimal("0"))]
+
+
+# ---------------------------------------------------------------------------
+# Finding 17 (independent review, CORRECTION): downside deviation must use
+# the frozen 0% MAR definition -- sqrt(mean(min(r-0,0)^2 over ALL months))
+# * sqrt(12) -- not population stdev of only the negative observations.
+# ---------------------------------------------------------------------------
+
+def test_downside_deviation_identical_negative_months_is_nonzero():
+    # The prior (incorrect) implementation -- population stdev of only
+    # the negative subset -- returns exactly ZERO for repeated identical
+    # losses, since their spread around their own mean is zero. The
+    # correct formula must NOT do this: three identical -5% months carry
+    # a real, nonzero downside.
+    monthly = [Decimal("-0.05"), Decimal("-0.05"), Decimal("-0.05")]
+    dd = annualized_downside_deviation_pct(monthly)
+    assert dd is not None
+    assert dd > Decimal("0")
+    # Hand-calculated: sqrt(mean([0.0025, 0.0025, 0.0025])) * sqrt(12)
+    # = 0.05 * sqrt(12)
+    expected = Decimal(str(0.05 * (12 ** 0.5)))
+    assert abs(dd - expected) < Decimal("0.0000001")
+
+
+def test_downside_deviation_mixed_positive_zero_negative_hand_calculated():
+    monthly = [Decimal("0.10"), Decimal("0.00"), Decimal("-0.05"), Decimal("0.02"), Decimal("-0.03")]
+    dd = annualized_downside_deviation_pct(monthly)
+    assert dd is not None
+    # Every month contributes a shortfall term (0 for non-negative
+    # months) and the mean divides by ALL FIVE months, not just the two
+    # negative ones.
+    shortfalls_squared = [0.0, 0.0, 0.05 ** 2, 0.0, 0.03 ** 2]
+    expected_monthly = (sum(shortfalls_squared) / 5) ** 0.5
+    expected = Decimal(str(expected_monthly * (12 ** 0.5)))
+    assert abs(dd - expected) < Decimal("0.0000001")
+
+
+def test_downside_deviation_no_negative_months_is_zero_not_none():
+    # A series with no month below the 0% MAR has a genuine,
+    # well-defined downside deviation of exactly zero -- this is NOT the
+    # same as "undefined"/None.
+    monthly = [Decimal("0.05"), Decimal("0.02"), Decimal("0.00"), Decimal("0.10")]
+    dd = annualized_downside_deviation_pct(monthly)
+    assert dd == Decimal("0")
+
+
+def test_downside_deviation_fewer_than_two_months_is_none():
+    assert annualized_downside_deviation_pct([Decimal("-0.05")]) is None
+    assert annualized_downside_deviation_pct([]) is None
+
+
+def test_sortino_no_negative_months_is_none_division_by_zero_denominator():
+    # Sortino itself (the ratio) is undefined when the downside
+    # deviation is exactly zero, even though the deviation itself is a
+    # well-defined zero -- this is a genuine div-by-zero, not "no data".
+    monthly = [Decimal("0.05"), Decimal("0.02"), Decimal("0.10")]
+    assert annualized_downside_deviation_pct(monthly) == Decimal("0")
+    assert sortino_ratio(monthly) is None
+
+
+def test_sortino_identical_negative_months_produces_finite_ratio():
+    # The prior bug (zero downside deviation for identical losses) would
+    # have made Sortino divide by zero (None) here too -- it must not.
+    monthly = [Decimal("0.10"), Decimal("-0.05"), Decimal("-0.05"), Decimal("0.10")]
+    result = sortino_ratio(monthly)
+    assert result is not None
+    # Hand-calculated: mean=0.025; downside_dev=sqrt(mean([0,0.0025,0.0025,0]))=sqrt(0.00125)
+    mean_monthly = 0.025
+    downside_dev = (sum([0.0, 0.05 ** 2, 0.05 ** 2, 0.0]) / 4) ** 0.5
+    expected = Decimal(str(mean_monthly / downside_dev * (12 ** 0.5)))
+    assert abs(result - expected) < Decimal("0.0000001")
