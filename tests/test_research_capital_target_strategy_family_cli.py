@@ -274,6 +274,20 @@ def test_full_study_reports_finding_14_counts_and_volatility_for_every_arm():
         assert "trade_or_rebalance_count" not in base
 
 
+def test_full_study_reports_combination_plausibility_when_all_arms_insufficient():
+    series, dates = _full_synthetic_series_by_symbol()
+    master_dates = tuple(d for d in dates if cli.WARMUP_START <= d <= cli.EVALUATION_END)
+    results = cli.run_full_study(series, master_dates)
+    verdicts = {arm: results["arms"][arm]["classification"]["verdict"] for arm in cli.ARMS}
+    combo = results["combination_plausibility"]
+    if all(v == cli.CLASSIFICATION_POSITIVE_BUT_INSUFFICIENT for v in verdicts.values()):
+        assert combo is not None
+        assert "verdict" in combo
+        assert len(combo["top_two_arms"]) == 2
+    else:
+        assert combo is None
+
+
 def test_fetch_end_exclusive_is_documented_not_a_hard_guarantee():
     # The constant name/comment must not claim the fetched data stops at
     # EVALUATION_END -- the real cached series extends one session past

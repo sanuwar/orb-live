@@ -27,6 +27,9 @@ from src.orb_capital_target_strategy_family_research import (
     classify_capital_target_arm, exposure_and_concurrency, evaluation_end_mark_transactions,
     CLASSIFICATION_DIRECT_TARGET_FEASIBLE, CLASSIFICATION_PROMISING_PORTFOLIO_CONTRIBUTOR,
     CLASSIFICATION_POSITIVE_BUT_INSUFFICIENT, CLASSIFICATION_NOT_PROMISING,
+    compute_combination_plausibility_upper_bound, ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK,
+    COMBINATION_TARGET_MONTHLY_DOLLARS, COMBINATION_MATHEMATICALLY_PLAUSIBLE,
+    COMBINATION_NOT_MATHEMATICALLY_PLAUSIBLE,
 )
 from src.market_data_canonical import MarketBar, MarketDataQuality
 from src.market_data_provider import ALPACA_IEX_SOURCE
@@ -1391,3 +1394,57 @@ def test_compute_arm_metrics_counts_reported_for_segment_views_too():
                     "buy_transaction_count", "sell_transaction_count", "closed_lot_count",
                     "annualized_volatility_pct", "annualized_downside_deviation_pct"):
             assert key in view
+
+
+# ---------------------------------------------------------------------------
+# Finding 15 (independent review): the frozen decision tree's required
+# combination-plausibility upper bound when every arm classifies
+# POSITIVE_BUT_INSUFFICIENT.
+# ---------------------------------------------------------------------------
+
+def test_combination_upper_bound_picks_the_two_highest_arms_only():
+    arm_means = {
+        ARM_A: Decimal("78.53"),
+        ARM_B: Decimal("196.72"),
+        ARM_C: Decimal("177.26"),
+    }
+    result = compute_combination_plausibility_upper_bound(arm_means)
+    picked_arms = {row["arm"] for row in result["top_two_arms"]}
+    assert picked_arms == {ARM_B, ARM_C}
+    assert ARM_A not in picked_arms
+
+
+def test_combination_upper_bound_sums_orb_plus_top_two_arms_exactly():
+    arm_means = {ARM_A: Decimal("78.53"), ARM_B: Decimal("196.72"), ARM_C: Decimal("177.26")}
+    result = compute_combination_plausibility_upper_bound(arm_means)
+    expected = ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK + Decimal("196.72") + Decimal("177.26")
+    assert result["generous_upper_bound_monthly_dollars"] == expected
+    assert result["orb_monthly_dollars_at_one_pct_risk"] == ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK
+    assert result["target_monthly_dollars"] == COMBINATION_TARGET_MONTHLY_DOLLARS
+
+
+def test_combination_upper_bound_classifies_not_plausible_when_below_target():
+    # ORB ($108.90) + two modest arms clearly can't reach $1,000/month.
+    arm_means = {ARM_A: Decimal("78.53"), ARM_B: Decimal("196.72"), ARM_C: Decimal("177.26")}
+    result = compute_combination_plausibility_upper_bound(arm_means)
+    assert result["generous_upper_bound_monthly_dollars"] < COMBINATION_TARGET_MONTHLY_DOLLARS
+    assert result["verdict"] == COMBINATION_NOT_MATHEMATICALLY_PLAUSIBLE
+
+
+def test_combination_upper_bound_classifies_plausible_when_at_or_above_target():
+    arm_means = {ARM_A: Decimal("100"), ARM_B: Decimal("500"), ARM_C: Decimal("500")}
+    result = compute_combination_plausibility_upper_bound(arm_means)
+    assert result["generous_upper_bound_monthly_dollars"] >= COMBINATION_TARGET_MONTHLY_DOLLARS
+    assert result["verdict"] == COMBINATION_MATHEMATICALLY_PLAUSIBLE
+
+
+def test_combination_upper_bound_boundary_is_inclusive_at_exact_target():
+    # ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK is $108.90; choose two arm
+    # values that sum with it to EXACTLY $1,000.00 to pin down the
+    # boundary as inclusive ( >= target counts as plausible).
+    remaining = COMBINATION_TARGET_MONTHLY_DOLLARS - ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK
+    half = remaining / 2
+    arm_means = {ARM_A: Decimal("1"), ARM_B: half, ARM_C: half}
+    result = compute_combination_plausibility_upper_bound(arm_means)
+    assert result["generous_upper_bound_monthly_dollars"] == COMBINATION_TARGET_MONTHLY_DOLLARS
+    assert result["verdict"] == COMBINATION_MATHEMATICALLY_PLAUSIBLE

@@ -1411,6 +1411,55 @@ def classify_capital_target_arm(
 
 
 # ---------------------------------------------------------------------------
+# Finding 15 (independent review): the frozen decision tree's required
+# answer when every M48 arm classifies POSITIVE_BUT_INSUFFICIENT -- a
+# deliberately generous mathematical combination-plausibility upper
+# bound, computed WITHOUT running any M49 portfolio-combination
+# simulation.
+# ---------------------------------------------------------------------------
+
+#: 0.363 R/month at $300 risk-per-trade (1% of the $30,000 target
+#: capital) -- the established ORB monthly-dollar reference figure this
+#: milestone was handed for the combination check, independent of and
+#: not recomputed from M48's own `load_orb_monthly_r_series()` (a
+#: different ORB confirmation-policy pickle used only for the
+#: correlation-to-ORB metric elsewhere in this module).
+ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK = Decimal("108.90")
+COMBINATION_TARGET_MONTHLY_DOLLARS = Decimal("1000")
+COMBINATION_MATHEMATICALLY_PLAUSIBLE = "COMBINATION_MATHEMATICALLY_PLAUSIBLE"
+COMBINATION_NOT_MATHEMATICALLY_PLAUSIBLE = "COMBINATION_NOT_MATHEMATICALLY_PLAUSIBLE"
+
+
+def compute_combination_plausibility_upper_bound(arm_mean_monthly_dollars: Mapping[str, Decimal]) -> dict[str, Any]:
+    """Only reached when every M48 arm classifies
+    POSITIVE_BUT_INSUFFICIENT on its own. Sums `ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK`
+    with the TWO highest of `arm_mean_monthly_dollars` (each arm's own
+    fixed-$30,000 primary monthly-dollar figure). This is deliberately
+    GENEROUS, not a claim of real combined achievability: it treats ORB
+    and each of the two chosen arms as though each could independently
+    draw on its own full capital, when in reality a single real $30,000
+    account would have to be SPLIT between whichever of these strategies
+    are actually run together, diluting each one's dollar contribution
+    below its solo-$30k figure. Because this upper bound can only
+    OVERSTATE true combined achievability, never understate it: if it
+    still falls short of `COMBINATION_TARGET_MONTHLY_DOLLARS`, no
+    less-generous (capital-split) combination could reach the target
+    either, and no M49 portfolio-combination simulation is warranted."""
+    ranked = sorted(arm_mean_monthly_dollars.items(), key=lambda kv: kv[1], reverse=True)
+    top_two = ranked[:2]
+    top_two_sum = sum((v for _, v in top_two), Decimal(0))
+    upper_bound = ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK + top_two_sum
+    verdict = COMBINATION_MATHEMATICALLY_PLAUSIBLE if upper_bound >= COMBINATION_TARGET_MONTHLY_DOLLARS else COMBINATION_NOT_MATHEMATICALLY_PLAUSIBLE
+    return {
+        "orb_monthly_dollars_at_one_pct_risk": ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK,
+        "top_two_arms": [{"arm": arm, "mean_monthly_dollar_pnl_fixed_30k": value} for arm, value in top_two],
+        "generous_upper_bound_monthly_dollars": upper_bound,
+        "target_monthly_dollars": COMBINATION_TARGET_MONTHLY_DOLLARS,
+        "verdict": verdict,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Calendar segmentation and the top-level per-arm metrics aggregator.
 # ---------------------------------------------------------------------------
 
@@ -1753,6 +1802,9 @@ __all__ = [
     "MAX_SINGLE_SYMBOL_POSITIVE_SHARE", "REQUIRED_POSITIVE_SEGMENTS", "ALL_FIVE_CALENDAR_SEGMENTS",
     "CONTRIBUTOR_MIN_NONNEGATIVE_SEGMENTS", "CONTRIBUTOR_MIN_POSITIVE_SEGMENTS",
     "classify_capital_target_arm",
+    "ORB_MONTHLY_DOLLARS_AT_ONE_PCT_RISK", "COMBINATION_TARGET_MONTHLY_DOLLARS",
+    "COMBINATION_MATHEMATICALLY_PLAUSIBLE", "COMBINATION_NOT_MATHEMATICALLY_PLAUSIBLE",
+    "compute_combination_plausibility_upper_bound",
     "CALENDAR_SEGMENTS", "segment_label", "slice_to_window", "scale_trade_to_risk_cap", "compute_arm_metrics",
     "exposure_and_concurrency", "exposure_and_concurrency_from_daily_counts",
     "Transaction", "evaluation_end_mark_transactions", "fixed_notional_monthly_dollar_pnl",

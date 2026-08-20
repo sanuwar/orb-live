@@ -44,6 +44,7 @@ from src.orb_capital_target_strategy_family_research import (
     simple_moving_average, compute_arm_metrics, scale_trade_to_risk_cap, segment_label,
     monthly_return_pct, pearson_correlation, align_monthly_series, classify_capital_target_arm,
     max_drawdown, evaluation_end_mark_transactions, fill_missing_months_with_zero,
+    CLASSIFICATION_POSITIVE_BUT_INSUFFICIENT, compute_combination_plausibility_upper_bound,
 )
 
 WARMUP_START = date(2021, 1, 1)
@@ -495,12 +496,31 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
 
     spy_buy_and_hold = compute_spy_buy_and_hold(series_by_symbol["SPY"], master_dates)
 
+    # Finding 15 (independent review): the frozen decision tree's
+    # required next step when every arm classifies
+    # POSITIVE_BUT_INSUFFICIENT on its own -- a deliberately generous
+    # mathematical combination-plausibility upper bound, computed here
+    # directly rather than by running any M49 portfolio-combination
+    # simulation.
+    all_insufficient = all(
+        per_arm_output[arm]["classification"]["verdict"] == CLASSIFICATION_POSITIVE_BUT_INSUFFICIENT
+        for arm in ARMS
+    )
+    combination_plausibility = None
+    if all_insufficient:
+        arm_means = {
+            arm: Decimal(str(per_arm_output[arm]["base_cost"]["mean_monthly_dollar_pnl_fixed_30k"] or 0))
+            for arm in ARMS
+        }
+        combination_plausibility = compute_combination_plausibility_upper_bound(arm_means)
+
     results["arms"] = per_arm_output
     results["cross_arm_correlation"] = cross_arm_correlation
     results["spy_buy_and_hold_benchmark"] = spy_buy_and_hold
     results["orb_monthly_r_series"] = [(d.isoformat(), str(r)) for d, r in orb_monthly]
     results["ledger_hashes"] = ledger_hashes
     results["master_calendar_sha256"] = _master_calendar_hash(master_dates)
+    results["combination_plausibility"] = combination_plausibility
     return results
 
 
