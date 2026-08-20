@@ -1,0 +1,96 @@
+{
+  "adjustment": "all",
+  "evaluation_end": "2026-08-13",
+  "evaluation_start": "2022-01-03",
+  "feed": "sip",
+  "generation_git_head_sha": "f04b68bd46f6b2dc8a6773ebafcddd28b43dfee9",
+  "generation_source_file_sha256": {
+    "scripts/research_capital_target_strategy_family.py": "437328fc2f8b0ea1900ba8ee0e3d388dfc7bf38b208ef0097aa2f3ce7db62127",
+    "src/orb_capital_target_strategy_family_research.py": "2653c75f86a12feb6801ca01e71109da204ed8171f5825fcd08667939bd7dba7"
+  },
+  "generation_working_tree_clean": true,
+  "ledger_hashes": {
+    "DIVERSIFIED_TREND_12M__base_5bps": {
+      "combined_accounting_ledger_sha256": "6b66e12ed3d39f3616e1e4481d0d326c6786dddafa844bf84a58b2510ef6b450",
+      "combined_transaction_count": 240,
+      "endpoint_mark_ledger_sha256": "d7a36cc91a05ba8a7a4ac90530d71470a6f92b945355b49e1330efa8348b99a1",
+      "endpoint_mark_transaction_count": 5,
+      "position_equity_ledger_sha256": "60e614edc6a75f3904af20aff81b5fd477e51c239defa5c1268270d74bfe9dd3",
+      "strategy_transaction_count": 235,
+      "strategy_transaction_ledger_sha256": "0dfca99b0457205028cd4e37ab3a3a579f8be8eace02de40b68f968300aa247c"
+    },
+    "DIVERSIFIED_TREND_12M__stress_10bps": {
+      "combined_accounting_ledger_sha256": "540f6774679d0ff52f37a8512d31a7729a4cca1db24112a1ad5e53be9ca107e4",
+      "combined_transaction_count": 239,
+      "endpoint_mark_ledger_sha256": "cfd213b9ca7d1de760b6ab894baeefab52d518a65189c0e8510e75e797874a86",
+      "endpoint_mark_transaction_count": 5,
+      "position_equity_ledger_sha256": "fd60994e617ee5b85b145a77fa1c00d6651baac3826b61f8f3cf3fd33c11e34f",
+      "strategy_transaction_count": 234,
+      "strategy_transaction_ledger_sha256": "53c3efcda215aaa151cf86b46b5247d745e5ca323f5d86ee5d466689793d5ed2"
+    },
+    "ETF_PULLBACK_RSI2__base_5bps": {
+      "combined_accounting_ledger_sha256": "da515f2faba8d346f24f2069b5494467baa24b00a4c8aed45ce12ee575b1de16",
+      "combined_transaction_count": 708,
+      "endpoint_mark_ledger_sha256": "d9f42dab760f4d5b0ae128272b9ae20ebaa896a46f56c0350a8a7c36867a2237",
+      "endpoint_mark_transaction_count": 1,
+      "position_equity_ledger_sha256": "f885c9381c73d7a473b934e73b0af0e65662815e9e5dec320601b826f7bdae16",
+      "strategy_transaction_count": 707,
+      "strategy_transaction_ledger_sha256": "a52338e5afcbe629868f6562a0047eddd63f6775217d380e028f87fb9b3da848"
+    },
+    "ETF_PULLBACK_RSI2__stress_10bps": {
+      "combined_accounting_ledger_sha256": "d96c58e179737aa6baf11f417eb15813706cc03fdaea3baa9d40e246de12b49e",
+      "combined_transaction_count": 708,
+      "endpoint_mark_ledger_sha256": "d7fda9a284811cf9216d646c86f1f0a15a5e3e5daebf693af07fac70f0579836",
+      "endpoint_mark_transaction_count": 1,
+      "position_equity_ledger_sha256": "3068c36fce9d3263d613a30062680c94d384491d452e8cb8a8a22c8a5c284236",
+      "strategy_transaction_count": 707,
+      "strategy_transaction_ledger_sha256": "28c89c8c7757b3c0ebe07a42f76bd84f89b86a2c7a3ae396d623dbd64de4c3d9"
+    },
+    "SECTOR_MOMENTUM_12_1__base_5bps": {
+      "combined_accounting_ledger_sha256": "2fa8ffa33f4d083fa167eefc9c948ab2b885d0870f63095e21f56f8bc28f00d8",
+      "combined_transaction_count": 182,
+      "endpoint_mark_ledger_sha256": "5cf00755aa663a879747651831e86fce43772cf42c319836ab73bd8261e649ef",
+      "endpoint_mark_transaction_count": 3,
+      "position_equity_ledger_sha256": "06b020d78947b5fbfa0c42deb7e490aedb2db7dc880fc3da19331d6c48018d48",
+      "strategy_transaction_count": 179,
+      "strategy_transaction_ledger_sha256": "f186739d0dece2bf1727269a51908946747e5594f6ca486c65e01b5f1e169f86"
+    },
+    "SECTOR_MOMENTUM_12_1__stress_10bps": {
+      "combined_accounting_ledger_sha256": "533696418541fc2f10642882de293ca08410f05453762c48ae2344d9f34f012f",
+      "combined_transaction_count": 180,
+      "endpoint_mark_ledger_sha256": "5a654b1af46d355c793862713d923eec2dc5cd3bdf8f58712e41f2a640644457",
+      "endpoint_mark_transaction_count": 3,
+      "position_equity_ledger_sha256": "82a71a7e414d682947078ded6804ac51baa6dacd64eba59edc9aa945e4cd7be7",
+      "strategy_transaction_count": 177,
+      "strategy_transaction_ledger_sha256": "792a2d2746b430e14029b9ed51b6d45f9256018aff08183512a0aa4fe036cb18"
+    }
+  },
+  "master_calendar_session_count": 1409,
+  "master_calendar_sha256": "bd61d697aa704f6f4f418eeda97fd43743cc335b5c0e198ef7cf28ca231fc174",
+  "per_symbol_series_sha256": {
+    "DBC": "590bf19d914bc8803b0d2c99ce4671b60ad021b13879de879c0cb14e895ace44",
+    "DIA": "0dbad3d495ee7e2e42b96a31154eb7b75f6e9f2bbcd3e35858971959b5878db6",
+    "GLD": "35f88ebf334e83932ea069d46c9d6b4efea78fc0df972f916b9ce360aebaeef8",
+    "IEF": "93c9e716590f7abde13c7f392ed43246e3af2c9a371b7b8c8ba7a85dea64a3a9",
+    "IWM": "2aadac19f7f80848848647f9b6e06994e6fb6cbd546b70a09af3ffa675a9804f",
+    "QQQ": "9070e577e11c3c1d3d4413a2a63b1be79fdf91518fb700fc86975ae210fbdb51",
+    "SPY": "1d72bac2d327a52a441ab5e318c94657a3302dedb5798f0cf8063170e1869fe0",
+    "TLT": "31709adc74b7c30e5cde48200181ba63af3e646e41d627974deafe1d23faa630",
+    "VNQ": "3ac2efd796eb4141db9e49b2fd0061f875cf694dc945f81cf926048b5beec721",
+    "XLB": "cdee48297eaddd655e6aa7ebc0806d7fd041d7fecd796358ac4d9c00895b0e2a",
+    "XLC": "34842e2f7655839da68598b3cd829def49678a4e2adcb1ea0b954fab0e606d55",
+    "XLE": "4bcc3c2834c831b65aa9e9dcd9927be20e2a3c0b75f254b92ac13a570a5dec42",
+    "XLF": "c3a8164bfcbcfa884571d319e4ce006926a37276f855e6a9b741700141d793f7",
+    "XLI": "ef81f856cef1805dc9df60737517fb7fcc9d50cbf8cf137cdc85bbfece2d7eba",
+    "XLK": "fa4febb8c75fc2779213cb787b2034f8feea0e2452ec4e7912c119da2646f005",
+    "XLP": "c0e8cdb07451d4b451237ccbbdbedc660476acab43fdc3480f382b042282d739",
+    "XLRE": "cac23bc2cad455392aceab9d627b0f34d356b0599ca38cec9099d8a7b46e9a79",
+    "XLU": "50286ec256e8b1813446f45f6e02193bd8d333708c1ede5a71aadc4b1a220687",
+    "XLV": "0368da60e34f68cad8b61ad4b16aebecf755e2b44e974eb2ba799ac9d7f94ef8",
+    "XLY": "e8c8ad4427fbfe2458dbf62309db2d053d877362f78a61c0c6d7c6b2556a1869"
+  },
+  "retrieval_timestamp_utc": "2026-08-20T18:41:04.654652+00:00",
+  "study_results_json_sha256": "3d6f79b14919249242deaf8de79ea354b92ef51014a6f7a8a4ab4c983fd84dc8",
+  "timeframe": "1Day",
+  "warmup_start": "2021-01-01"
+}

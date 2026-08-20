@@ -110,3 +110,10 @@ artifacts/research-small-midcap-momentum-lane/
 # checkpoint cache (Issue #346, M47) -- same local-only resumability
 # convention as M43/M45 above.
 artifacts/research-sequential-second-trade/
+
+# Research tooling: M48 $30K capital-target ETF strategy-family study --
+# raw daily-bar Alpaca cache and generated results/provenance manifest
+# (Issue #348). Reproducibility is carried by the committed SHA-256
+# hashes in the provenance manifest and the results tables in the
+# committed report, not by committing the underlying vendor data.
+artifacts/research-capital-target-strategy-family/
