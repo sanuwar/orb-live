@@ -23,7 +23,7 @@ from src.orb_capital_target_strategy_family_research import (
     monthly_dollar_pnl, monthly_return_pct, cagr, max_drawdown, sharpe_ratio, sortino_ratio,
     profitable_month_stats, worst_and_percentile_month, pearson_correlation, align_monthly_series,
     positive_contribution_concentration, compute_arm_metrics, scale_trade_to_risk_cap, segment_label,
-    classify_capital_target_arm,
+    classify_capital_target_arm, exposure_and_concurrency,
     CLASSIFICATION_DIRECT_TARGET_FEASIBLE, CLASSIFICATION_PROMISING_PORTFOLIO_CONTRIBUTOR,
     CLASSIFICATION_POSITIVE_BUT_INSUFFICIENT, CLASSIFICATION_NOT_PROMISING,
 )
@@ -756,6 +756,34 @@ def test_scale_trade_to_risk_cap_never_scales_up():
     assert scaled.quantity < trade.quantity
     scaled_up_attempt = scale_trade_to_risk_cap(trade, risk_cap=Decimal("600"))
     assert scaled_up_attempt.quantity == trade.quantity  # never scaled above what was actually taken
+
+
+def test_exposure_and_concurrency_counts_overlapping_positions():
+    dates = _business_days(date(2022, 1, 3), 10)
+    pairs = [(dates[0], dates[2]), (dates[1], dates[4]), (dates[6], None)]
+    result = exposure_and_concurrency(entry_exit_pairs=pairs, window_dates=dates)
+    # day0: {A} =1; day1: {A,B}=2; day2: {A,B}=2; day3: {B}=1; day4: {B}=1; day5: {}=0; day6-9: {C}=1
+    assert result["exposure_pct"] == Decimal(9) / Decimal(10)  # only day5 has zero positions
+    expected_avg = Decimal(str((1 + 2 + 2 + 1 + 1 + 0 + 1 + 1 + 1 + 1) / 10))
+    assert result["average_concurrent_positions"] == expected_avg
+
+
+def test_exposure_and_concurrency_empty_window():
+    result = exposure_and_concurrency(entry_exit_pairs=[], window_dates=[])
+    assert result["exposure_pct"] is None
+
+
+def test_compute_arm_metrics_includes_exposure_fields():
+    dates, series = _arm_a_fixture()
+    result = run_arm_a(series, dates)
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[240], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+    )
+    assert metrics["exposure_pct"] is not None
+    assert metrics["average_concurrent_positions"] is not None
+    assert 0 <= metrics["exposure_pct"] <= 1
 
 
 def test_compute_arm_metrics_end_to_end_with_arm_a_fixture():

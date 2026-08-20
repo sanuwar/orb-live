@@ -258,11 +258,13 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
             arm=arm, closed_trades=base_sim.closed_trades, daily_equity=base_sim.daily_equity,
             starting_capital=base_sim.starting_capital, total_cost_paid=base_sim.total_cost_paid,
             evaluation_start=EVALUATION_START, evaluation_end=EVALUATION_END,
+            open_positions_at_end=base_sim.open_positions_at_end,
         )
         stress_metrics = compute_arm_metrics(
             arm=arm, closed_trades=stress_sim.closed_trades, daily_equity=stress_sim.daily_equity,
             starting_capital=stress_sim.starting_capital, total_cost_paid=stress_sim.total_cost_paid,
             evaluation_start=EVALUATION_START, evaluation_end=EVALUATION_END,
+            open_positions_at_end=stress_sim.open_positions_at_end,
         )
 
         segment_metrics = {}
@@ -274,6 +276,7 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
                 arm=arm, closed_trades=base_sim.closed_trades, daily_equity=base_sim.daily_equity,
                 starting_capital=base_sim.starting_capital, total_cost_paid=base_sim.total_cost_paid,
                 evaluation_start=seg_dates[0], evaluation_end=seg_dates[-1],
+                open_positions_at_end=base_sim.open_positions_at_end,
             )
 
         arm_monthly_pct_pairs = base_metrics["monthly_return_pct_series"]

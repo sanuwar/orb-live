@@ -1144,13 +1144,47 @@ def scale_trade_to_risk_cap(trade: ClosedTrade, *, risk_cap: Decimal) -> ClosedT
     )
 
 
+def exposure_and_concurrency(
+    *, entry_exit_pairs: Sequence[tuple[date, date | None]], window_dates: Sequence[date],
+) -> dict[str, Any]:
+    """`entry_exit_pairs` is `[(entry_date, exit_date_or_None_if_still_open), ...]`
+    for every position/holding (closed or still open) touching this arm.
+    A position is considered "open" on a session if
+    `entry_date <= session <= exit_date` (inclusive both ends -- the
+    entry session itself and the exit session itself both count as
+    exposed), or `entry_date <= session` with no exit yet. Returns the
+    percentage of `window_dates` with at least one position open and the
+    average number of concurrent positions across `window_dates`."""
+    if not window_dates:
+        return {"exposure_pct": None, "average_concurrent_positions": None}
+    counts: list[int] = []
+    for day in window_dates:
+        n = 0
+        for entry_date, exit_date in entry_exit_pairs:
+            if entry_date <= day and (exit_date is None or day <= exit_date):
+                n += 1
+        counts.append(n)
+    days_with_position = sum(1 for c in counts if c > 0)
+    return {
+        "exposure_pct": Decimal(days_with_position) / Decimal(len(window_dates)),
+        "average_concurrent_positions": Decimal(str(statistics.fmean(counts))) if counts else Decimal(0),
+    }
+
+
 def compute_arm_metrics(
     *, arm: str, closed_trades: Sequence[Any], daily_equity: Sequence[tuple[date, Decimal]],
     starting_capital: Decimal, total_cost_paid: Decimal, evaluation_start: date, evaluation_end: date,
+    open_positions_at_end: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """The full required-output set for one arm/cost-case, computed over
     `[evaluation_start, evaluation_end]` only (warm-up-period equity
-    marks and any pre-evaluation trades are excluded)."""
+    marks and any pre-evaluation trades are excluded). `closed_trades`
+    is the arm's FULL (unfiltered) trade list -- this function does its
+    own window filtering for P&L purposes, but needs the full list (plus
+    `open_positions_at_end`, for a position still open past the window)
+    to correctly compute exposure/concurrency for positions that were
+    open DURING the window even if their own entry or exit falls
+    outside it."""
     window_equity = slice_to_window(daily_equity, start=evaluation_start, end=evaluation_end)
     window_trades = [t for t in closed_trades if evaluation_start <= t.exit_date <= evaluation_end]
 
@@ -1194,9 +1228,16 @@ def compute_arm_metrics(
         seg_baseline = seg_start_candidates[-1] if seg_start_candidates else baseline_equity
         segment_net[seg] = seg_marks[-1][1] - seg_baseline
 
+    entry_exit_pairs = [(t.entry_date, t.exit_date) for t in closed_trades] + [
+        (p.entry_date, None) for p in open_positions_at_end
+    ]
+    exposure = exposure_and_concurrency(entry_exit_pairs=entry_exit_pairs, window_dates=[d for d, _ in window_equity])
+
     return {
         "arm": arm,
         "trade_or_rebalance_count": len(window_trades),
+        "exposure_pct": exposure["exposure_pct"],
+        "average_concurrent_positions": exposure["average_concurrent_positions"],
         "gross_pnl": gross_pnl,
         "net_pnl_realized": net_pnl_realized,
         "net_pnl": net_pnl_equity,
@@ -1256,4 +1297,5 @@ __all__ = [
     "CONTRIBUTOR_MIN_NONNEGATIVE_SEGMENTS", "CONTRIBUTOR_MIN_POSITIVE_SEGMENTS",
     "classify_capital_target_arm",
     "CALENDAR_SEGMENTS", "segment_label", "slice_to_window", "scale_trade_to_risk_cap", "compute_arm_metrics",
+    "exposure_and_concurrency",
 ]
