@@ -23,7 +23,7 @@ from src.orb_capital_target_strategy_family_research import (
     monthly_dollar_pnl, monthly_return_pct, cagr, max_drawdown, sharpe_ratio, sortino_ratio,
     profitable_month_stats, worst_and_percentile_month, pearson_correlation, align_monthly_series,
     positive_contribution_concentration, compute_arm_metrics, scale_trade_to_risk_cap, segment_label,
-    classify_capital_target_arm, exposure_and_concurrency,
+    classify_capital_target_arm, exposure_and_concurrency, evaluation_end_mark_transactions,
     CLASSIFICATION_DIRECT_TARGET_FEASIBLE, CLASSIFICATION_PROMISING_PORTFOLIO_CONTRIBUTOR,
     CLASSIFICATION_POSITIVE_BUT_INSUFFICIENT, CLASSIFICATION_NOT_PROMISING,
 )
@@ -340,6 +340,38 @@ def series_open_at(series: DailySeries, index: int) -> Decimal:
     return series.opens[index]
 
 
+def test_arm_a_stop_can_fire_on_the_entry_day_itself():
+    # Signal (RSI(2) dip) at day D=250 -> entry at D+1=251's open. The
+    # SAME session (251) then has an intraday low that breaches the
+    # 2xATR stop -- an implementation that only checks stops on
+    # positions opened on an EARLIER day would miss this entirely and
+    # let the position ride, understating both realized loss and
+    # drawdown. The stop must fire on 251 itself.
+    dates = _business_days(date(2021, 1, 4), 260)
+    closes = _uptrend_then_dip_then_recover(dates, dip_at=250, dip_factor=Decimal("0.93"))
+    aaa = _series_from_closes("AAA", dates, closes, pad=Decimal("0.02"))
+    # Patch day 251's own low to crash 20% intraday, well past any
+    # plausible 2xATR stop distance, while leaving its open/close (and
+    # every other day) untouched.
+    lows = list(aaa.lows)
+    lows[251] = closes[251] * Decimal("0.80")
+    aaa = DailySeries(symbol="AAA", dates=aaa.dates, opens=aaa.opens, highs=aaa.highs, lows=tuple(lows), closes=aaa.closes, volumes=aaa.volumes)
+    bbb = _series_from_closes("BBB", dates, _flat(dates, Decimal("50")), pad=Decimal("0.02"))
+
+    result = run_arm_a({"AAA": aaa, "BBB": bbb}, dates)
+    assert len(result.closed_trades) >= 1
+    trade = result.closed_trades[0]
+    assert trade.symbol == "AAA"
+    assert trade.entry_date == dates[251]
+    assert trade.exit_date == dates[251]  # exits on its OWN entry day
+    assert trade.exit_reason == "STOP"
+    assert trade.holding_sessions == 1
+    assert trade.exit_price == trade.entry_price - (trade.planned_risk / trade.quantity)  # fills at the stop (no gap at the open, since open==entry_price > stop)
+    assert trade.entry_cost > 0
+    assert trade.exit_cost > 0
+    assert trade.net_pnl == trade.gross_pnl - trade.entry_cost - trade.exit_cost
+
+
 def test_arm_a_max_concurrent_positions_and_no_duplicate_symbol():
     dates = _business_days(date(2021, 1, 4), 320)
     series = {}
@@ -506,17 +538,88 @@ def test_monthly_rebalance_final_month_has_no_execution_when_no_next_session():
     assert last_event.execution_index is None and last_event.execution_date is None
 
 
-def test_monthly_rebalance_incremental_no_forced_trade_for_continuing_holding():
+def test_monthly_rebalance_trims_overweight_continuing_holding():
+    # AAA grows much faster than BBB (0.15/day vs 0.05/day) -- once both
+    # are continuously eligible, AAA's position value outpaces its
+    # equal-capital target relative to BBB's, so it must be TRIMMED at
+    # later rebalances, not left to drift indefinitely.
     dates, series = _monthly_fixture()
     sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
     selector = arm_c_selector(series, sma200)
     result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
-    # AAA/BBB, once eligible, stay eligible every month after warm-up
-    # (monotonic uptrend) -- so they should be bought exactly ONCE each
-    # (the first month they become eligible), never re-traded every
-    # subsequent rebalance.
-    aaa_trades = [t for t in result.closed_trades if t.symbol == "AAA"]
-    assert len(aaa_trades) == 0  # never sold (held straight through to the end)
+    aaa_trims = [t for t in result.closed_trades if t.symbol == "AAA" and t.reason == "TRIMMED"]
+    assert len(aaa_trims) >= 1
+    for t in aaa_trims:
+        assert t.quantity > 0
+        assert t.exit_cost > 0  # costs charged on the required trim
+
+
+def test_monthly_rebalance_tops_up_underweight_continuing_holding():
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    bbb_topups = [t for t in result.transactions if t.symbol == "BBB" and t.reason == "REBALANCE_TOPUP"]
+    assert len(bbb_topups) >= 1
+    for t in bbb_topups:
+        assert t.quantity > 0
+        assert t.cost > 0  # costs charged on the required top-up
+
+
+def test_average_concurrent_positions_never_exceeds_universe_size_despite_trims():
+    # Regression: reconstructing exposure from closed-trade intervals
+    # double-counted a continuing holding that gets TRIMMED across
+    # several rebalances (each trim produces its own trade record
+    # sharing the ORIGINAL entry_date), inflating average concurrency
+    # above the arm's own universe size. The direct daily-tracked count
+    # must never do that.
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    assert any(t.reason == "TRIMMED" for t in result.closed_trades), "fixture must exercise a trim"
+    metrics = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions, daily_position_count=result.daily_position_count,
+    )
+    universe_size = len(series)
+    assert metrics["average_concurrent_positions"] <= universe_size
+    for _day, count in result.daily_position_count:
+        assert count <= universe_size
+
+
+def test_monthly_rebalance_continuing_holdings_finish_near_equal_target_capital():
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    # At the final rebalance execution, AAA and BBB (both still eligible)
+    # must each be within one share's worth of value from the other --
+    # a genuine equal-capital rebalance, not permanently-drifted weights.
+    executed = [e for e in result.rebalance_events if e.execution_index is not None]
+    last_execution_index = executed[-1].execution_index
+    last_execution_day = dates[last_execution_index]
+    holdings_by_symbol = {p.symbol: p for p in result.open_positions_at_end}
+    assert "AAA" in holdings_by_symbol and "BBB" in holdings_by_symbol
+    price_aaa = series["AAA"].opens[last_execution_index]
+    price_bbb = series["BBB"].opens[last_execution_index]
+    value_aaa = holdings_by_symbol["AAA"].quantity * price_aaa
+    value_bbb = holdings_by_symbol["BBB"].quantity * price_bbb
+    max_one_share_gap = max(price_aaa, price_bbb) * 2  # generous one-share-rounding-both-ways tolerance
+    assert abs(value_aaa - value_bbb) <= max_one_share_gap
+
+
+def test_monthly_rebalance_trim_and_topup_are_deterministic():
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    r1 = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    r2 = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    assert r1.closed_trades == r2.closed_trades
+    assert r1.transactions == r2.transactions
+    assert r1.open_positions_at_end == r2.open_positions_at_end
 
 
 def test_monthly_rebalance_deterministic_repeatability():
@@ -555,6 +658,43 @@ def test_monthly_rebalance_no_future_aware_selection():
 # ---------------------------------------------------------------------------
 # Metrics / concentration.
 # ---------------------------------------------------------------------------
+
+def test_fixed_notional_primary_view_never_compounds_unlike_secondary_view():
+    # Two consecutive +10% months on a $30,000 notional: the PRIMARY
+    # fixed-$30K view must show $3,000 then $3,000 (each month's own
+    # return applied to the SAME fixed base), while the SECONDARY
+    # compounded view (derived from the actual equity curve) shows
+    # $3,000 then $3,300 (10% of the now-$33,000 balance).
+    from src.orb_capital_target_strategy_family_research import fixed_notional_monthly_dollar_pnl
+    pct_series = [(date(2022, 1, 31), Decimal("0.10")), (date(2022, 2, 28), Decimal("0.10"))]
+    fixed_series = fixed_notional_monthly_dollar_pnl(pct_series, notional=Decimal("30000"))
+    fixed_values = [v for _, v in fixed_series]
+    assert fixed_values == [Decimal("3000.0"), Decimal("3000.0")]
+
+    # The naturally-compounding equity curve producing that same +10%/
+    # +10% return sequence shows $3,000 then $3,300 instead -- the two
+    # views must genuinely diverge.
+    equity = [(date(2022, 1, 3), Decimal("30000")), (date(2022, 1, 31), Decimal("33000")), (date(2022, 2, 28), Decimal("36300"))]
+    compounded_series = monthly_dollar_pnl(equity)
+    compounded_values = [v for _, v in compounded_series]
+    assert compounded_values == [Decimal("3000"), Decimal("3300")]
+    assert fixed_values != compounded_values
+
+
+def test_compute_arm_metrics_uses_fixed_notional_for_primary_classification_input():
+    dates, series = _arm_a_fixture()
+    result = run_arm_a(series, dates)
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[240], evaluation_end=dates[-1],
+        open_positions_at_end=result.open_positions_at_end, transactions=result.transactions,
+    )
+    assert "mean_monthly_dollar_pnl_fixed_30k" in metrics
+    assert "mean_monthly_dollar_pnl_compounded" in metrics
+    # No stale/ambiguous key from before the correction.
+    assert "mean_monthly_dollar_pnl" not in metrics
+
 
 def test_monthly_dollar_pnl_sums_to_total_change():
     dates = _business_days(date(2022, 1, 3), 90)
@@ -597,6 +737,37 @@ def test_pearson_correlation_and_alignment():
     assert len(aligned) == 3
     corr = pearson_correlation([r[1] for r in aligned], [r[2] for r in aligned])
     assert corr == pytest.approx(Decimal("1.0"), abs=Decimal("0.001"))
+
+
+def test_fill_missing_months_with_zero_preserves_existing_and_zero_fills_gaps():
+    from src.orb_capital_target_strategy_family_research import fill_missing_months_with_zero
+    sparse = [(date(2022, 3, 1), Decimal("1.5")), (date(2022, 6, 1), Decimal("-0.5"))]
+    filled = fill_missing_months_with_zero(sparse, start=date(2022, 1, 1), end=date(2022, 6, 30))
+    assert len(filled) == 6  # Jan..Jun, none dropped
+    by_month = dict(filled)
+    assert by_month[date(2022, 1, 1)] == Decimal(0)
+    assert by_month[date(2022, 2, 1)] == Decimal(0)
+    assert by_month[date(2022, 3, 1)] == Decimal("1.5")  # existing value preserved
+    assert by_month[date(2022, 4, 1)] == Decimal(0)
+    assert by_month[date(2022, 5, 1)] == Decimal(0)
+    assert by_month[date(2022, 6, 1)] == Decimal("-0.5")
+
+
+def test_fill_missing_months_with_zero_then_align_keeps_all_dense_series_months():
+    from src.orb_capital_target_strategy_family_research import fill_missing_months_with_zero
+    # A sparse ORB-like series (one trading month) must not cause an
+    # inner-join against a dense arm series to drop the other 5 months.
+    orb_sparse = [(date(2022, 3, 15), Decimal("2.0"))]
+    orb_filled = fill_missing_months_with_zero(orb_sparse, start=date(2022, 1, 1), end=date(2022, 6, 30))
+    arm_dense = [(date(2022, m, 1), Decimal("0.01") * m) for m in range(1, 7)]
+    aligned = align_monthly_series(arm_dense, orb_filled)
+    assert len(aligned) == 6  # nothing dropped
+    # The no-trade months correctly contribute a ZERO ORB value, not an
+    # absence.
+    march_row = next(r for r in aligned if r[0].month == 3)
+    assert march_row[2] == Decimal("2.0")
+    jan_row = next(r for r in aligned if r[0].month == 1)
+    assert jan_row[2] == Decimal(0)
 
 
 def test_align_monthly_series_inner_joins_on_missing_months():
@@ -796,3 +967,140 @@ def test_compute_arm_metrics_end_to_end_with_arm_a_fixture():
     )
     assert metrics["trade_or_rebalance_count"] >= 1
     assert metrics["concentration"]["best_contributor"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Finding 5 (independent review): transaction ledger, EVALUATION_END_MARK,
+# segment-scoped costs, and reconciliation.
+# ---------------------------------------------------------------------------
+
+def _arm_a_fixture_with_open_position_at_end():
+    # Entry happens a couple of sessions before the series ends and the
+    # price stays nearly flat afterward -- not enough remaining sessions
+    # to trigger the 5-session max-hold exit, and flat enough to never
+    # cross its own SMA(5) or touch the stop -- so the position is still
+    # open when the data runs out.
+    total_days = 320
+    dip_at = total_days - 3
+    dates = _business_days(date(2021, 1, 4), total_days)
+    closes = _uptrend_then_dip_then_recover(dates, dip_at=dip_at, dip_factor=Decimal("0.93"))
+    for i in range(dip_at + 1, len(closes)):
+        closes[i] = closes[dip_at] * Decimal("1.001") ** Decimal(i - dip_at)
+    aaa = _series_from_closes("AAA", dates, closes, pad=Decimal("0.02"))
+    bbb = _series_from_closes("BBB", dates, _flat(dates, Decimal("50")), pad=Decimal("0.02"))
+    return dates, {"AAA": aaa, "BBB": bbb}
+
+
+def test_evaluation_end_mark_transactions_and_endpoint_concentration():
+    dates, series = _arm_a_fixture_with_open_position_at_end()
+    result = run_arm_a(series, dates)
+    assert len(result.open_positions_at_end) >= 1, "fixture must leave a position open at the end"
+
+    end_prices = {s: series[s].closes[-1] for s in series}
+    end_marks = evaluation_end_mark_transactions(
+        open_positions_at_end=result.open_positions_at_end, end_date=dates[-1],
+        end_price_by_symbol=end_prices, cost_bps=BASE_COST_BPS, arm=ARM_A,
+    )
+    assert len(end_marks) == len(result.open_positions_at_end)
+    for t in end_marks:
+        assert t.reason == "EVALUATION_END_MARK"
+        assert t.cost > 0
+
+    metrics_without_mark = compute_arm_metrics(
+        arm=ARM_A, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions,
+    )
+    metrics_with_mark = compute_arm_metrics(
+        arm=ARM_A, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions, end_mark_transactions=end_marks,
+    )
+    open_symbol = result.open_positions_at_end[0].symbol
+    assert open_symbol not in metrics_without_mark["concentration"]["positive_contributors"] or metrics_without_mark["concentration"]["positive_contributors"][open_symbol] == Decimal(0)
+    assert metrics_with_mark["end_mark_liquidation_cost"] > 0
+    assert metrics_with_mark["net_pnl_marked"] == metrics_with_mark["net_pnl"] - metrics_with_mark["end_mark_liquidation_cost"]
+
+
+def test_stress_liquidation_cost_exceeds_base_liquidation_cost():
+    dates, series = _arm_a_fixture_with_open_position_at_end()
+    result = run_arm_a(series, dates)
+    end_prices = {s: series[s].closes[-1] for s in series}
+    base_marks = evaluation_end_mark_transactions(
+        open_positions_at_end=result.open_positions_at_end, end_date=dates[-1],
+        end_price_by_symbol=end_prices, cost_bps=BASE_COST_BPS, arm=ARM_A,
+    )
+    stress_marks = evaluation_end_mark_transactions(
+        open_positions_at_end=result.open_positions_at_end, end_date=dates[-1],
+        end_price_by_symbol=end_prices, cost_bps=STRESS_COST_BPS, arm=ARM_A,
+    )
+    base_cost = sum((t.cost for t in base_marks), Decimal(0))
+    stress_cost = sum((t.cost for t in stress_marks), Decimal(0))
+    assert stress_cost > base_cost
+
+
+def test_turnover_includes_rebalance_trim_and_topup_transactions():
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+    trim_or_topup = [t for t in result.transactions if t.reason in ("REBALANCE_TRIM", "REBALANCE_TOPUP")]
+    assert trim_or_topup, "fixture must produce at least one trim/top-up"
+    metrics = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions,
+    )
+    trim_topup_notional = sum((t.notional for t in trim_or_topup), Decimal(0))
+    assert metrics["turnover"]["total_traded_notional"] >= trim_topup_notional
+
+
+def test_segment_costs_sum_to_pooled_costs_not_full_study_total_per_segment():
+    dates, series = _monthly_fixture()
+    sma200 = {s: simple_moving_average(series[s].closes, TREND_SMA_PERIOD) for s in series}
+    selector = arm_c_selector(series, sma200)
+    result = run_monthly_rebalance_arm(series, dates, arm=ARM_C, selector=selector)
+
+    pooled = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions,
+    )
+    mid = len(dates) // 2
+    first_half = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[mid], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions,
+    )
+    second_half = compute_arm_metrics(
+        arm=ARM_C, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[mid + 1], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions,
+    )
+    assert abs((first_half["total_cost_paid"] + second_half["total_cost_paid"]) - pooled["total_cost_paid"]) <= Decimal("0.01")
+    assert first_half["total_cost_paid"] != pooled["total_cost_paid"]
+    assert second_half["total_cost_paid"] != pooled["total_cost_paid"]
+
+
+def test_reconciliation_symbol_contributions_plus_residual_equals_net_pnl():
+    dates, series = _arm_a_fixture_with_open_position_at_end()
+    result = run_arm_a(series, dates)
+    end_prices = {s: series[s].closes[-1] for s in series}
+    end_marks = evaluation_end_mark_transactions(
+        open_positions_at_end=result.open_positions_at_end, end_date=dates[-1],
+        end_price_by_symbol=end_prices, cost_bps=BASE_COST_BPS, arm=ARM_A,
+    )
+    metrics = compute_arm_metrics(
+        arm=ARM_A, closed_trades=result.closed_trades, daily_equity=result.daily_equity,
+        starting_capital=result.starting_capital, total_cost_paid=result.total_cost_paid,
+        evaluation_start=dates[0], evaluation_end=dates[-1], open_positions_at_end=result.open_positions_at_end,
+        transactions=result.transactions, end_mark_transactions=end_marks,
+    )
+    recon = metrics["reconciliation"]
+    assert recon["symbol_contribution_sum"] + recon["residual"] == metrics["net_pnl_marked"]

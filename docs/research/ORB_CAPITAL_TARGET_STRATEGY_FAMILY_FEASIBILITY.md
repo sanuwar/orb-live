@@ -47,21 +47,24 @@ Monthly time-series trend: at each month-end close, an ETF is eligible when trai
 
 ## Implementation
 
-`src/orb_capital_target_strategy_family_research.py` holds every deterministic, independently-testable piece: Wilder RSI/SMA/ATR/momentum/trailing-return indicators (warm-up-safe, list-aligned), order-fill mechanics (next-open scheduling, gap-through stop resolution), whole-share/cash/risk sizing, deterministic ranking/tie-breaks, transaction-cost application, the two simulation engines (`run_arm_a` for the daily event-driven arm, `run_monthly_rebalance_arm` shared by ARM_B/ARM_C via arm-specific `selector` callables), portfolio metrics (monthly $/％ returns, CAGR, drawdown+recovery, Sharpe/Sortino, profitable-month stats, positive-net-contribution symbol concentration, Pearson correlation with month alignment), and the frozen four-label classification gate. `scripts/research_capital_target_strategy_family.py` owns all I/O: daily-bar fetch (Alpaca, `timeframe=1Day`, `adjustment=all`, split/dividend-adjusted), a dedicated gitignored cache (`artifacts/research-capital-target-strategy-family/daily-bar-cache/`, distinct from the shared M43-M47 minute-bar cache), the provenance manifest, and orchestration of all three arms across both cost cases into the final results/report.
+`src/orb_capital_target_strategy_family_research.py` holds every deterministic, independently-testable piece: Wilder RSI/SMA/ATR/momentum/trailing-return indicators (warm-up-safe, list-aligned), order-fill mechanics (next-open scheduling, gap-through stop resolution), whole-share/cash/risk sizing, deterministic ranking/tie-breaks, transaction-cost application, an explicit `Transaction` ledger populated by both engines, the two simulation engines (`run_arm_a` for the daily event-driven arm, `run_monthly_rebalance_arm` shared by ARM_B/ARM_C via arm-specific `selector` callables), portfolio metrics (fixed-notional and compounded monthly $ views, CAGR, drawdown+recovery, Sharpe/Sortino, profitable-month stats, positive-net-contribution symbol concentration, exposure/concurrency tracked directly during simulation, Pearson correlation with month alignment and zero-fill for sparse series), and the frozen four-label classification gate. `scripts/research_capital_target_strategy_family.py` owns all I/O: daily-bar fetch (Alpaca, `timeframe=1Day`, `adjustment=all`, split/dividend-adjusted, `feed=sip`), a feed-specific gitignored cache, the provenance manifest, the committed hashes document, and orchestration of all three arms across both cost cases into the final results/report.
 
 No production `SignalEngine`/`ExitEngine`/`Simulator`/config/universe/broker code is touched. `src/market_data_canonical.py` (`MarketBar`) and `src/exchange_calendar.py` (both pinned) are reused unmodified, exactly as M43-M47 already do; no pinned-closure file is modified.
 
-### Design decisions made explicit (frozen before results are read)
+### Design decisions made explicit (frozen before results are read, two later corrected by independent review)
 
-Two points in the frozen protocol admit more than one reasonable literal reading; a single, documented, tested convention was picked for each rather than left ambiguous, and neither is revisited after seeing results:
+Several points in the frozen protocol admit more than one reasonable literal reading; a single, documented, tested convention was picked for each. Two of the original picks (1 and 2 below) were found by independent review to fail the protocol's own intent and were corrected mid-milestone -- documented here as CORRECTED, with the original (superseded) reading kept visible for the audit trail. None of these conventions were revisited a second time after that correction, and no protocol threshold/parameter was ever changed in response to a result.
 
-1. **"No compounding for the primary dollar-withdrawal view."** The simulation runs once, with the account's own natural compounding (profits fund later position sizes, exactly like a real account). The PRIMARY reported metric ("average monthly dollars on $30,000") is the plain arithmetic mean of each month's raw dollar P&L pulled from that curve -- never itself compounded forward. CAGR/total return, computed directly from the equity curve's start/end values, is the SECONDARY, explicitly-compounding diagnostic.
-2. **Monthly rebalance execution (ARM_B/ARM_C) is incremental, not full liquidate-and-rebuild.** A symbol dropping out of the target basket is sold; a symbol newly entering is bought with an equal-capital share of current equity; a symbol that remains in the basket across consecutive rebalances is left untouched (no forced re-equalization trade). This is the reading of "equal-capital allocation" + "costs apply to every REQUIRED buy/sell" that minimizes turnover to only what basket-membership changes actually require.
-3. **"Five completed holding sessions" (ARM_A).** The entry session itself counts as holding-session 1; the scheduled maximum-hold exit fires at the next session's open once five sessions have been held as of a close (`i - entry_index + 1 >= 5`). If both the SMA(5) and max-hold conditions are true at the same close, the SMA(5) exit is recorded (checked first) -- a single fixed, tested tie-break, not a per-trade judgment call.
+1. **"No compounding for the primary dollar-withdrawal view" -- CORRECTED.** *Original (superseded) reading:* the simulation runs once with the account's own natural compounding, and the primary metric was the plain arithmetic mean of each month's raw dollar P&L pulled directly off that compounding curve. Independent review found this was still compounding in substance (later months operate on a changing, grown equity base) and therefore not a genuine fixed-$30,000 view. *Corrected reading, in effect for all reported results:* the simulation still runs once, naturally compounding (profits fund later position sizes, exactly like a real account) -- but the PRIMARY reported metric ("average monthly dollars on $30,000") is each month's own percentage return applied to the ORIGINAL FIXED $30,000 notional (`fixed_notional_monthly_dollar_pnl`), never to the account's own grown balance. Two consecutive +10% months therefore both contribute exactly $3,000 here, even though the same two months compound the account's own equity from $30,000 to $33,000 to $36,300 (a $3,300 second-month change) in the secondary, explicitly-compounding `monthly_dollar_pnl`/CAGR diagnostic.
+2. **Monthly rebalance execution (ARM_B/ARM_C) -- CORRECTED.** *Original (superseded) reading:* incremental only -- a symbol dropping out of the target basket was sold, a symbol newly entering was bought with an equal-capital share of current equity, and a symbol remaining in the basket across consecutive rebalances was left completely untouched (no re-equalization trade), letting its weight drift indefinitely. Independent review found this was not a genuine "equal-capital rebalance" as the frozen protocol requires. *Corrected reading, in effect for all reported results:* every rebalance now (1) sells symbols leaving the basket, (2) computes each target symbol's whole-share equal-capital target quantity from equity marked at that session's open, (3) TRIMS any continuing holding above its target quantity, and (4) buys new positions / TOPS UP continuing holdings below target -- all in ticker-ascending, deterministic order, with costs charged on every actual trade (never on a holding already sitting at target). A top-up combines into one weighted-average-cost lot, keeping the original entry date for holding-session bookkeeping.
+3. **"Five completed holding sessions" (ARM_A).** Unchanged. The entry session itself counts as holding-session 1; the scheduled maximum-hold exit fires at the next session's open once five sessions have been held as of a close (`i - entry_index + 1 >= 5`). If both the SMA(5) and max-hold conditions are true at the same close, the SMA(5) exit is recorded (checked first) -- a single fixed, tested tie-break, not a per-trade judgment call.
+4. **ARM_A's protective stop is checked on every position still open after that session's entries, including one entered that same session (independent-review correction).** The stop is `entry_open - 2xATR(14)`, always strictly below the entry price, so a same-day gap-through is structurally impossible -- but an intraday touch after entry is not, and the original event order checked stops before processing that day's new entries, so a freshly-entered position could never stop out on its own entry day. Corrected event order: (1) scheduled exits at today's open, (2) new entries at today's open, (3) stop check against today's (open, low) for every position still open -- including one just entered in step 2, (4) close-derived signal scan and scheduled-exit flagging, (5) mark closing equity.
+5. **A fixed evaluation-endpoint mark, separate from any real exit (independent-review correction).** Positions still open at the study's true fixed endpoint (2026-08-13) are, for net-P&L/concentration/turnover accounting only, marked at that date's close with a hypothetical liquidation cost applied (`EVALUATION_END_MARK`) -- never a real or simulated strategy exit, and never applied to an interim calendar-segment boundary that merely happens to have open positions mid-flight.
+6. **ORB-correlation month alignment (independent-review correction).** The ORB baseline's own monthly R-sum series is sparse (most months have zero closed ORB trades); it is zero-filled across the complete evaluation-window month grid (`fill_missing_months_with_zero`) before correlating against any ETF arm's own (dense) monthly return series, so a no-trade ORB month contributes an explicit 0R rather than silently disappearing from the correlation's inner join.
 
 ## Data Provenance
 
-Daily OHLCV, split/dividend-adjusted (`adjustment=all`), fetched from Alpaca's Market Data API v2 (`feed=iex` by default, `timeframe=1Day`), `WARMUP_START=2021-01-01` through one day past `EVALUATION_END=2026-08-13`, for the union of all three arms' universes (`ALL_SYMBOLS`, 18 distinct tickers). Every raw response is cached under `artifacts/research-capital-target-strategy-family/daily-bar-cache/` (gitignored, never committed) and normalized via the unmodified `src.market_data_provider.normalize_alpaca_bar`. The master trading calendar is SPY's own fetched session list, intersected with `[WARMUP_START, EVALUATION_END]`; every other symbol's series is required to align to that exact calendar (`require_full_alignment`), failing closed on any missing session rather than forward-filling a substitute price. A structural OHLC integrity check (`high >= max(open,close,low)`, `low <= min(open,close,high)`, positive prices, non-negative volume) runs before any strategy result is read; a violation halts the run. The provenance manifest (`artifacts/research-capital-target-strategy-family/results/provenance_manifest.json`, gitignored) records, per symbol: provider/feed/timeframe/adjustment, retrieval timestamp, requested and received date ranges, session count, SHA-256 of the normalized series, and the alignment/integrity findings above. Raw vendor data is never committed; this report and the committed provenance hashes are the durable, reviewable record.
+Daily OHLCV, split/dividend-adjusted (`adjustment=all`), fetched from Alpaca's Market Data API v2. **`feed=sip`(the consolidated tape across all US exchanges) is the frozen M48 empirical feed** -- IEX is a single individual exchange whose OHLC can differ materially from the consolidated market, which matters directly here since ARM_A's entries/stops/exits are all driven by daily open/high/low/close; M46 hit the same IEX-completeness problem and switched to SIP, and M48 starts there (see "Corrections from Independent Review" below for the discovery). `WARMUP_START=2021-01-01` through one day past `EVALUATION_END=2026-08-13`, for the union of all three arms' universes (`ALL_SYMBOLS`, **20 distinct tickers**). Every raw response is cached under a feed-specific subdirectory (`artifacts/research-capital-target-strategy-family/daily-bar-cache/sip/`, gitignored, never committed) -- kept permanently separate from the original `daily-bar-cache/` IEX cache, which is left untouched as historical evidence, never read as if it were SIP data -- and normalized via the unmodified `src.market_data_provider.normalize_alpaca_bar`. The master trading calendar is SPY's own fetched session list, intersected with `[WARMUP_START, EVALUATION_END]`; every other symbol's series is required to align to that exact calendar (`require_full_alignment`), failing closed on any missing session rather than forward-filling a substitute price. A structural OHLC integrity check (`high >= max(open,close,low)`, `low <= min(open,close,high)`, positive prices, non-negative volume) runs before any strategy result is read; a violation halts the run. The provenance manifest (`artifacts/research-capital-target-strategy-family/results/provenance_manifest.json`, gitignored) records, per symbol: provider/feed/timeframe/adjustment, retrieval timestamp, requested and received date ranges, session count, SHA-256 of the normalized series, and the alignment/integrity findings above. Raw vendor data is never committed; a small **committed, non-vendor-data hashes file** (`docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_ARTIFACT_HASHES.json`) carries the durable, reviewable SHA-256 record -- exact feed/timeframe/adjustment parameters, all 20 normalized-series hashes, the master-calendar hash, every arm/cost-case transaction- and position/equity-ledger hash, the `study_results.json` hash, the exact evaluation window, and the generating implementation's git HEAD SHA.
 
 ## Required Outputs
 
@@ -79,163 +82,170 @@ Exactly these three arms, run once. Genuine data/code/integrity bugs are fixed a
 
 # Empirical Results
 
-*Everything below this line was added in the second commit, after the frozen protocol and implementation above were committed and pushed. The study was run exactly once.*
+*Everything below this line reflects the CORRECTED implementation, after an independent review of the first empirical pass found eight findings (one data-feed blocker, three implementation blockers, and four accounting/reporting corrections) -- all addressed, all covered by new or updated tests, and the complete study rerun exactly once more against genuine SIP data. The original IEX-based, pre-correction figures ($77.60 / $186.16 / $265.25 mean monthly dollars for ARM_A/B/C respectively, under the old incremental-rebalance and compounded-dollar-view logic) are SUPERSEDED and are not reported as headline numbers anywhere below; they are cited only where directly relevant to explaining what changed.*
 
-## Data Provenance (actual run)
+## Corrections From Independent Review
 
-Retrieved 2026-08-20 from Alpaca (`feed=iex`, `timeframe=1Day`, `adjustment=all`), 1,410 daily bars per symbol for all 20 distinct tickers across the three universes, 2021-01-04 through 2026-08-14. Master calendar (SPY's own session list, intersected with `[2021-01-01, 2026-08-13]`): **1,409 sessions**. `require_full_alignment` and `ohlc_integrity_report` both passed cleanly for every symbol -- **zero missing sessions, zero OHLC integrity violations**, including the two later-inception sector ETFs (XLC, XLRE), which both have full coverage back to the 2021 warm-up start. Full per-symbol SHA-256 hashes, coverage, and alignment detail are in the gitignored `artifacts/research-capital-target-strategy-family/results/provenance_manifest.json`, regenerable from cache via `python scripts/research_capital_target_strategy_family.py`.
+1. **BLOCKER -- IEX is not a consolidated market feed.** The first empirical pass used `feed=iex` (a single individual exchange) instead of `feed=sip` (the consolidated tape). Corrected: `feed=sip` is now the frozen M48 empirical feed, fetched into its own cache subdirectory (`daily-bar-cache/sip/`), with the original IEX cache preserved untouched as historical evidence. A direct comparison confirms genuinely different data was retrieved: matching-date closes are nearly identical (e.g. GLD 2023-10-23: IEX $182.98 vs. SIP $182.97), but volumes differ by roughly 10-100x (e.g. DIA same date: IEX 41,340 vs. SIP 3,898,317) -- exactly the expected single-venue-vs-consolidated-tape signature.
+2. **BLOCKER -- the primary "no-compounding" dollar metric was actually compounded.** See "Design decisions" item 1 above. Corrected via `fixed_notional_monthly_dollar_pnl`; a dedicated test proves two identical +10% months now produce $3,000 and $3,000 in the primary view (vs. $3,000/$3,300 in the still-available secondary compounded view).
+3. **BLOCKER -- the monthly "equal-capital rebalance" did not rebalance continuing holdings.** See "Design decisions" item 2 above. Corrected with trim/top-up mechanics; tests prove an overweight continuing holding is trimmed, an underweight one is topped up, continuing holdings finish within one share's value of the equal-capital target, and costs are charged on every such required trade.
+4. **BLOCKER -- ARM_A's stop was not active on the entry day.** See "Design decisions" item 4 above. Corrected event order; a dedicated test forces a signal on day D, entry at D+1's open, and a stop breach on D+1's own low, confirming the trade exits same-day at the stop/gap price with both entry and exit costs charged and `holding_sessions=1`.
+5. **BLOCKER -- open end-of-window positions were omitted from cost/concentration accounting.** See "Design decisions" item 5 above. Corrected with an explicit `Transaction` ledger for every buy/sell, a daily position/equity ledger, and `evaluation_end_mark_transactions` for the fixed endpoint only; concentration and net P&L now include each still-open position's own marked, cost-adjusted contribution, and turnover/segment costs are computed directly from the ledger (fixing a related bug where every segment had silently reported the WHOLE STUDY's cost total rather than its own).
+6. **CORRECTION -- ORB correlation dropped zero-trade months.** See "Design decisions" item 6 above. Corrected via `fill_missing_months_with_zero`; the pooled ORB monthly R series now has exactly 56 entries (January 2022 through August 2026 inclusive), not just the sparse set of months with a closed ORB trade.
+7. **CORRECTION -- required durable hashes were not committed.** The prior report pointed only at a gitignored manifest. Corrected: `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_ARTIFACT_HASHES.json` is now committed, containing the exact SIP feed/timeframe/adjustment parameters, all 20 normalized-series SHA-256 hashes, the master-calendar hash, a transaction-ledger and position/equity-ledger hash for every arm/cost-case combination, the `study_results.json` hash, the exact evaluation window, and the generating git HEAD SHA -- no raw vendor data, no secret.
+8. **REPORTING -- metadata and count corrections.** The universe union is **20** distinct tickers, not 18 (fixed above). The PR title/body are updated to reflect completed (corrected) results and accurate draft status once this commit lands.
 
-## A Real Bug Found and Fixed Before Any Empirical Data Was Read
-
-`classify_capital_target_arm`'s CONTRIBUTOR gate ("at least four of five calendar segments are non-negative and at least three are positive") was first implemented counting over `REQUIRED_POSITIVE_SEGMENTS` -- only **four** segments (2023-2026 YTD, matching the DIRECT gate's own four required-positive segments) -- instead of all **five** reported segments (including 2022). This was caught by the pre-committed synthetic-fixture test suite (two tests failed on the first run), fixed by introducing `ALL_FIVE_CALENDAR_SEGMENTS` for the CONTRIBUTOR gate specifically while leaving the DIRECT gate's four-segment `REQUIRED_POSITIVE_SEGMENTS` unchanged, and reverified (65/65 tests pass). This was caught and fixed entirely with synthetic data, before the real Alpaca fetch or study run -- no rerun of any empirical stage was required.
+**A ninth issue was found and fixed during this same review pass, not originally flagged:** exposure/concurrency reconstruction from closed-trade date intervals double-counted a continuing holding that gets TRIMMED across several rebalances (each trim produces its own trade record sharing the position's ORIGINAL entry date), which was observed producing an average-concurrent-positions figure *larger than the arm's own universe size* for ARM_C. Corrected by tracking each session's actual open-position count directly inside both simulation engines (`daily_position_count`) rather than reconstructing it after the fact; a regression test asserts concurrency never exceeds universe size despite trims.
 
 ## Pooled Results (2022-01-03 through 2026-08-13), Base Cost (5 bps)
 
 | Metric | ARM_A `ETF_PULLBACK_RSI2` | ARM_B `SECTOR_MOMENTUM_12_1` | ARM_C `DIVERSIFIED_TREND_12M` |
 |---|---:|---:|---:|
-| Entries/exits or rebalance trades | 369 | 28 | 20 |
-| Exposure (% of sessions with >=1 position) | 58.3% | 96.5% | 89.3% |
-| Average concurrent positions | 1.23 (of 3 max) | 2.63 (of 3 max) | 2.80 (of 8 universe) |
-| Gross P&L (realized, closed trades) | $7,513.39 | $7,333.13 | $12,635.70 |
-| Net P&L (realized, closed trades) | $4,283.82 | $7,029.04 | $12,456.12 |
-| Net P&L (equity, incl. unrealized on still-open positions) | $4,345.37 | $10,424.89 | $14,853.78 |
-| Mean monthly $ (primary, no compounding) | **$77.60** | **$186.16** | **$265.25** |
-| Median monthly $ | $91.65 | $310.68 | $144.02 |
-| Mean monthly return % | 0.260% | 0.621% | 0.768% |
-| CAGR (secondary, compounding) | 3.02% | 6.68% | 9.11% |
-| Sharpe (annualized, 0% RF) | 0.52 | 0.52 | 0.87 |
-| Sortino (annualized, 0% RF) | 0.69 | 0.77 | 1.16 |
-| Max drawdown ($ / %) | $2,845 / 9.62% | $7,984 / 24.76% | $8,711 / 16.82% |
-| Drawdown recovery | 441 days | 574 days | not recovered by 2026-08-13 |
-| Profitable months | 55.4% | 60.7% | 57.1% |
-| Longest losing-month streak | 5 | 3 | 4 |
-| Worst month ($) | −$1,744.93 | −$2,910.36 | −$4,262.77 |
-| 5th-percentile month (%) | −2.70% | −7.02% | −4.91% |
-| Turnover ratio (traded notional / avg equity) | 215.5x | 19.4x | 10.6x |
-| Total cost paid (base, 5 bps) | $3,381.11 | $322.36 | $192.26 |
-| Best-symbol positive-net-contribution share | 24.7% (XLK) | **58.3% (XLC)** | **66.9% (GLD)** |
-| Correlation to ORB baseline (monthly) | 0.184 | 0.033 | −0.103 |
-| Correlation to SPY buy-and-hold (monthly) | 0.345 | 0.776 | 0.444 |
+| Entries/exits or rebalance trades | 354 | 88 | 128 |
+| Exposure (% of sessions with >=1 position) | 48.5% | 96.5% | 89.1% |
+| Average concurrent positions | 0.88 (of 3 max) | 2.79 (of 3 max) | 4.18 (of 8 universe) |
+| Gross P&L (realized, closed trades) | $7,144.99 | $9,075.25 | $7,248.54 |
+| Net P&L (realized, closed trades) | $4,115.94 | $8,629.61 | $6,862.90 |
+| Net P&L (equity, incl. unrealized) | $4,176.15 | $11,423.06 | $10,630.72 |
+| **Net P&L (marked -- equity less hypothetical endpoint liquidation cost)** | **$4,171.05** | **$11,402.35** | **$10,610.91** |
+| Mean monthly $ on $30,000, **fixed-notional (PRIMARY)** | **$75.23** | **$196.72** | **$177.26** |
+| Median monthly $, fixed-notional | $125.52 | $219.67 | $298.83 |
+| Mean monthly $, compounded (secondary) | $74.57 | $203.98 | $189.83 |
+| Mean monthly return % | 0.251% | 0.656% | 0.591% |
+| CAGR (secondary, compounding) | 2.90% | 7.25% | 6.80% |
+| Sharpe (annualized, 0% RF) | 0.50 | 0.58 | 0.66 |
+| Sortino (annualized, 0% RF) | 0.70 | 0.87 | 0.98 |
+| Max drawdown ($ / %) | $2,713 / 9.16% | $7,519 / **23.56%** | $8,981 / **26.79%** |
+| Drawdown recovery | 448 days | 474 days | 874 days |
+| Profitable months | 58.9% | 57.1% | 57.1% |
+| Longest losing-month streak | 3 | 7 | 4 |
+| Worst month, fixed-notional ($) | −$1,451.94 | −$3,083.18 | −$2,301.42 |
+| 5th-percentile month (%) | −3.17% | −5.59% | −5.17% |
+| Turnover ratio (ledger notional / avg equity) | 202.8x | 30.1x | 27.3x |
+| Total cost paid (base, 5 bps, incl. endpoint mark) | $3,039.19 | $485.56 | $423.32 |
+| Hypothetical endpoint-liquidation cost | $5.09 | $20.71 | $19.81 |
+| Best-symbol positive-net-contribution share | 22.1% (XLK) | **46.7% (XLC)** | 38.9% (QQQ) |
+| Correlation to ORB baseline (monthly) | 0.122 | 0.109 | 0.088 |
+| Correlation to SPY buy-and-hold (monthly) | 0.342 | 0.825 | 0.717 |
 
-**"Gross/net P&L (realized)" vs. "net P&L (equity)"**: the equity-based figure is materially larger than realized net P&L for ARM_B/ARM_C because both arms are trend/momentum strategies designed to stay invested -- several positions (notably GLD and QQQ under ARM_C, XLC under ARM_B) were still open, with substantial unrealized gains, at the end of the evaluation window on 2026-08-13. The **equity-based figure is the correct basis for "average monthly dollars"** (the classification gate's own primary metric) since it reflects the account's real, total mark-to-market value each month, exactly like a real brokerage statement; the realized-only figure is reported alongside it as a reconciliation/diagnostic, not a second competing "net P&L."
+**Reading the three net-P&L rows.** "Realized" counts only closed trades within the window. "Equity" is the account's actual mark-to-market value change, which includes unrealized gains on anything still open at the window's end -- but does not yet charge a cost for exiting those. "Marked" (the figure used for classification's `pooled_net_base`/`pooled_net_stress` inputs and for symbol concentration) subtracts a hypothetical liquidation cost for whatever is still open at the STUDY's true fixed endpoint (2026-08-13) only -- never at an interim segment boundary. Reconciliation check (see `reconciliation` in the structured results): each arm's own per-symbol positive/negative net contributions plus a residual cash-drag/rounding term sum EXACTLY to that arm's marked net P&L, by construction.
 
 ## Stress-Cost (10 bps) Sensitivity
 
 | Metric | ARM_A | ARM_B | ARM_C |
 |---|---:|---:|---:|
-| Net P&L (equity), stress cost | $1,145.53 | $11,185.11 | $13,918.31 |
-| Total cost paid, stress | $6,736.26 | $650.50 | $385.46 |
+| Net P&L (marked), stress cost | $1,167.15 | $10,804.11 | $9,996.27 |
+| Total cost paid, stress | $6,065.17 | $963.26 | $841.56 |
 | Stress-cost pooled result positive? | **Yes** | **Yes** | **Yes** |
 
-All three arms remain net-positive under the doubled (10 bps) cost assumption, though ARM_A's net P&L falls by exactly (base_cost − stress_cost) = $3,355 to $4 above break-even (`$1,145.53`), reflecting its much higher turnover (215x vs. 19-11x) -- transaction costs are the dominant swing factor for ARM_A specifically, far less so for the two low-turnover monthly arms.
+All three arms remain net-positive under the doubled (10 bps) cost assumption. ARM_A's cost load nearly doubles ($3,039 → $6,065) given its very high turnover (202.8x), leaving stress-case net P&L at $1,167 -- still comfortably positive, but transaction costs are clearly the dominant swing factor for ARM_A specifically, far less so for the two much-lower-turnover monthly arms (ARM_B 30.1x, ARM_C 27.3x).
 
-## Per-Segment Net P&L (equity, base cost)
+## Per-Segment Net P&L (marked, base cost)
 
 | Segment | ARM_A | ARM_B | ARM_C |
 |---|---:|---:|---:|
-| 2022 | −$2,207.41 | −$2,409.35 | −$734.44 |
-| 2023 | +$833.46 | +$42.83 | **−$1,845.80** |
-| 2024 | +$1,844.25 | +$5,206.64 | +$7,092.11 |
-| 2025 | +$1,574.92 | +$4,061.55 | +$10,251.02 |
-| 2026 YTD | +$2,300.15 | +$3,523.22 | +$90.87 |
+| 2022 | −$2,101.61 | −$2,423.47 | −$3,788.59 |
+| 2023 | +$891.37 | +$1,302.49 | +$2,135.90 |
+| 2024 | +$2,311.47 | +$5,346.40 | +$3,440.69 |
+| 2025 | +$771.57 | +$4,205.26 | +$4,861.27 |
+| 2026 YTD | +$2,298.26 | +$2,971.68 | +$3,961.65 |
 
-Segment figures reconcile exactly to the pooled net P&L for every arm (verified: each row sums to that arm's own pooled equity-based net P&L above). ARM_A and ARM_B each have exactly one negative segment (2022, the broad-market drawdown year); ARM_C has two (2022 and 2023), which alone disqualifies it from the DIRECT gate's "2023/2024/2025/2026-YTD all positive" requirement and from the CONTRIBUTOR gate's "at least 4 of 5 non-negative" requirement (only 3 of 5 segments are non-negative for ARM_C).
+All three arms have exactly one negative segment (2022, the broad-market drawdown year); 2023-2026 YTD are all positive for all three arms, satisfying the DIRECT gate's "four required segments all positive" condition for every arm (that gate still fails each arm on other grounds -- see Classification below). Segment figures reconcile exactly to each arm's own pooled marked net P&L above (verified directly against the structured results: e.g. ARM_A's five segments sum to $4,171.06 against a pooled $4,171.05, the one-cent difference being Decimal rounding across five independently-rounded display figures).
 
 ## $150 / $300 Risk Views (ARM_A only -- post-hoc quantity scaling, same trades, not rerun)
 
 | | $300 risk (as-run) | $150 risk (secondary view) |
 |---|---:|---:|
-| Gross P&L | $7,513.39 | $3,734.60 |
-| Net P&L (realized) | $4,283.82 | $2,114.35 |
+| Gross P&L | $7,144.99 | $3,548.62 |
+| Net P&L (realized) | $4,115.94 | $2,034.60 |
 
 Scaling to $150 risk/position roughly halves both figures, as expected for a linear position-size scaling with no change in trade selection or timing.
 
-## Symbol Concentration (positive-net-contribution basis)
+## Symbol Concentration (positive-net-contribution basis, includes the fixed-endpoint mark)
 
-- **ARM_A**: best contributor XLK (24.7% of positive net P&L) -- broad-based across 10 different positively-contributing symbols (IWM, QQQ, XLB, XLC, XLF, XLI, XLK, XLU, XLV, XLY), none dominating.
-- **ARM_B**: best contributor **XLC at 58.3%** of positive net P&L -- exceeds the 50% concentration gate on its own, independent of any other failure.
-- **ARM_C**: best contributor **GLD at 66.9%** of positive net P&L -- gold alone drives most of this arm's edge; QQQ is the only other large contributor (the rest -- DBC, IEF, SPY -- are minor). The required SPY/QQQ/IWM overlap disclosure: SPY and QQQ are both eligible members of ARM_C's own universe and both frequently co-held with the ARM_A/ARM_C universes' broad-market exposure, so ARM_C's own trend edge here is substantially a levered bet on two things -- gold's multi-year rally and large-cap/mega-cap tech (QQQ) -- not eight genuinely diversified sleeves performing independently.
+- **ARM_A**: best contributor XLK (22.1% of positive net P&L) -- broad-based across ten different positively-contributing symbols (DIA, IWM, QQQ, SPY, XLB, XLC, XLE, XLK, XLRE, XLV), none close to dominating.
+- **ARM_B**: best contributor XLC at 46.7% of positive net P&L -- under the 50% concentration gate (an improvement from the pre-correction run, where the same symbol was over 50%; the corrected trim/top-up rebalancing keeps continuing winners closer to equal weight rather than letting them drift into dominance), but still the largest single driver by a wide margin over the next-largest (XLK, 2807 vs. XLC's 6641).
+- **ARM_C**: best contributor QQQ at 38.9% of positive net P&L, with GLD (2,077), IWM (3,629), and SPY (1,643) all meaningfully positive too -- a broader spread across the corrected run than the pre-correction figure (where GLD alone was 66.9%). The required SPY/QQQ/IWM overlap disclosure: SPY, QQQ, and IWM are three separate broad-market-beta ETFs in ARM_C's own 8-symbol universe: three of ARM_C's four positive contributors are large-cap/broad-market exposure (QQQ, IWM, SPY), not independent asset-class bets -- GLD is the only genuinely diversifying sleeve among the positive contributors (DBC and IEF's own contributions are negligible).
 
 ## Correlations
 
-**Cross-arm (monthly returns):** ARM_A↔ARM_B 0.481, ARM_A↔ARM_C 0.306, ARM_B↔ARM_C 0.535. All three arms are moderately positively correlated with each other (unsurprising -- all three are long-only and broadly benefit from the same rising-market years), which tempers any "genuinely uncorrelated combination" case among the M48 arms themselves.
+**Cross-arm (monthly returns):** ARM_A↔ARM_B 0.486, ARM_A↔ARM_C 0.453, ARM_B↔ARM_C 0.795. All three arms are positively correlated with each other, ARM_B/ARM_C strongly so (0.795) -- unsurprising, since both are trend/momentum strategies that tend to be invested through the same rising-market years. This tempers any "genuinely uncorrelated combination" case among the M48 arms themselves.
 
-**To the ORB baseline (monthly):** ARM_A 0.184, ARM_B 0.033, ARM_C −0.103 -- all comfortably below the 0.60 CONTRIBUTOR ceiling, and ARM_C is very mildly negatively correlated. None of the three arms' failure to reach PROMISING_PORTFOLIO_CONTRIBUTOR is due to ORB correlation.
+**To the ORB baseline (monthly, zero-filled across the full 56-month grid):** ARM_A 0.122, ARM_B 0.109, ARM_C 0.088 -- all comfortably below the 0.60 CONTRIBUTOR ceiling and all fairly low in absolute terms. None of the three arms' failure to reach PROMISING_PORTFOLIO_CONTRIBUTOR is due to ORB correlation.
 
-**To SPY buy-and-hold (monthly, benchmark only):** ARM_A 0.345, ARM_B 0.776, ARM_C 0.444. SPY buy-and-hold itself returned **+73.05%** over the identical window (2022-01-03 to 2026-08-13, start close $449.50, end close $777.84) with an 18.74% max drawdown -- reported strictly as a benchmark, per the frozen protocol, and never used to promote or demote any arm.
+**To SPY buy-and-hold (monthly, benchmark only):** ARM_A 0.342, ARM_B 0.825, ARM_C 0.717. SPY buy-and-hold itself returned **+73.07%** over the identical window (2022-01-03 to 2026-08-13, start close $449.46, end close $777.88) with an 18.76% max drawdown -- reported strictly as a benchmark, per the frozen protocol, and never used to promote or demote any arm.
 
 ## Predeclared Classification
 
-Applied exactly via `classify_capital_target_arm` (no arm compared against another; each verdict comes from that arm's own numbers only).
+Applied exactly via `classify_capital_target_arm` (no arm compared against another; each verdict comes from that arm's own numbers only). `pooled_net_base`/`pooled_net_stress`/segment inputs all use the MARKED net P&L basis (equity less hypothetical endpoint liquidation cost); the dollar-threshold gates use the fixed-notional PRIMARY monthly mean.
 
 ### ARM_A `ETF_PULLBACK_RSI2`
 
 ```
 DIRECT_TARGET_FEASIBLE checks:
-  average_monthly_dollars_at_least_1000:        FALSE  ($77.60 < $1,000)
+  average_monthly_dollars_at_least_1000:        FALSE  ($75.23 < $1,000)
   required_segments_all_positive:               TRUE
-  max_drawdown_at_most_20pct:                   TRUE   (9.62%)
+  max_drawdown_at_most_20pct:                   TRUE   (9.16%)
   stress_cost_pooled_positive:                  TRUE
-  no_symbol_over_50pct_of_positive_pnl:         TRUE   (24.7%)
+  no_symbol_over_50pct_of_positive_pnl:         TRUE   (22.1%)
 CONTRIBUTOR checks:
-  average_monthly_dollars_at_least_250:         FALSE  ($77.60 < $250)
+  average_monthly_dollars_at_least_250:         FALSE  ($75.23 < $250)
   pooled_net_positive / mean_monthly_positive:   TRUE / TRUE
   at_least_4_of_5_segments_nonnegative:         TRUE   (4/5)
   at_least_3_of_5_segments_positive:            TRUE   (4/5)
-  max_drawdown_at_most_15pct:                   TRUE   (9.62%)
+  max_drawdown_at_most_15pct:                   TRUE   (9.16%)
   stress_cost_pooled_positive:                  TRUE
-  profitable_months_at_least_55pct:             TRUE   (55.4%)
-  orb_correlation_at_most_060:                  TRUE   (0.184)
-  no_symbol_over_50pct_of_positive_pnl:         TRUE   (24.7%)
+  profitable_months_at_least_55pct:             TRUE   (58.9%)
+  orb_correlation_at_most_060:                  TRUE   (0.122)
+  no_symbol_over_50pct_of_positive_pnl:         TRUE   (22.1%)
 ```
-**VERDICT: POSITIVE_BUT_INSUFFICIENT.** Every CONTRIBUTOR gate passes except the $250/month dollar threshold ($77.60 actual) -- the closest of the three arms to CONTRIBUTOR status, failing on exactly one gate.
+**VERDICT: POSITIVE_BUT_INSUFFICIENT.** Every CONTRIBUTOR gate passes except the $250/month dollar threshold ($75.23 actual) -- the closest of the three arms to CONTRIBUTOR status, failing on exactly one gate, consistent with the pre-correction finding even though the underlying numbers moved (SIP data, corrected event order, fixed-notional metric).
 
 ### ARM_B `SECTOR_MOMENTUM_12_1`
 
 ```
 DIRECT_TARGET_FEASIBLE checks:
-  average_monthly_dollars_at_least_1000:        FALSE  ($186.16 < $1,000)
+  average_monthly_dollars_at_least_1000:        FALSE  ($196.72 < $1,000)
   required_segments_all_positive:               TRUE
-  max_drawdown_at_most_20pct:                   FALSE  (24.76%)
+  max_drawdown_at_most_20pct:                   FALSE  (23.56%)
   stress_cost_pooled_positive:                  TRUE
-  no_symbol_over_50pct_of_positive_pnl:         FALSE  (58.3%, XLC)
+  no_symbol_over_50pct_of_positive_pnl:         TRUE   (46.7%)
 CONTRIBUTOR checks:
-  average_monthly_dollars_at_least_250:         FALSE  ($186.16 < $250)
-  max_drawdown_at_most_15pct:                   FALSE  (24.76%)
-  no_symbol_over_50pct_of_positive_pnl:         FALSE  (58.3%, XLC)
+  average_monthly_dollars_at_least_250:         FALSE  ($196.72 < $250)
+  max_drawdown_at_most_15pct:                   FALSE  (23.56%)
+  no_symbol_over_50pct_of_positive_pnl:         TRUE   (46.7%)
   (all other contributor checks pass)
 ```
-**VERDICT: POSITIVE_BUT_INSUFFICIENT.** Fails on three independent gates (dollar threshold, drawdown, concentration) -- not a near-miss.
+**VERDICT: POSITIVE_BUT_INSUFFICIENT.** Fails on the dollar threshold and drawdown; concentration now PASSES after the trim/top-up correction (was a third failing gate, at 58.3%, before the fix).
 
 ### ARM_C `DIVERSIFIED_TREND_12M`
 
 ```
 DIRECT_TARGET_FEASIBLE checks:
-  average_monthly_dollars_at_least_1000:        FALSE  ($265.25 < $1,000)
-  required_segments_all_positive:               FALSE  (2023 negative)
-  max_drawdown_at_most_20pct:                   TRUE   (16.82%)
+  average_monthly_dollars_at_least_1000:        FALSE  ($177.26 < $1,000)
+  required_segments_all_positive:               TRUE
+  max_drawdown_at_most_20pct:                   FALSE  (26.79%)
   stress_cost_pooled_positive:                  TRUE
-  no_symbol_over_50pct_of_positive_pnl:         FALSE  (66.9%, GLD)
+  no_symbol_over_50pct_of_positive_pnl:         TRUE   (38.9%)
 CONTRIBUTOR checks:
-  average_monthly_dollars_at_least_250:         TRUE   ($265.25 >= $250)
-  at_least_4_of_5_segments_nonnegative:         FALSE  (only 3/5: 2022 and 2023 both negative)
-  max_drawdown_at_most_15pct:                   FALSE  (16.82%)
-  no_symbol_over_50pct_of_positive_pnl:         FALSE  (66.9%, GLD)
+  average_monthly_dollars_at_least_250:         FALSE  ($177.26 < $250)
+  at_least_4_of_5_segments_nonnegative:         TRUE   (5/5)
+  max_drawdown_at_most_15pct:                   FALSE  (26.79%)
+  no_symbol_over_50pct_of_positive_pnl:         TRUE   (38.9%)
   (all other contributor checks pass)
 ```
-**VERDICT: POSITIVE_BUT_INSUFFICIENT.** Clears the $250/month bar alone but fails segment-consistency, drawdown, and concentration.
+**VERDICT: POSITIVE_BUT_INSUFFICIENT.** Fails on the dollar threshold and drawdown. This is a materially DIFFERENT story than the pre-correction run: previously ARM_C cleared the $250/month bar ($265.25) and failed on segment-consistency (a 2023 negative month) plus concentration (GLD at 66.9%); after correction it no longer clears the dollar bar at all ($177.26), while segment-consistency and concentration both now pass. The label is unchanged; the reasons are not.
 
 ## Decision-Tree Route
 
 No arm reached `DIRECT_TARGET_FEASIBLE`. No arm reached `PROMISING_PORTFOLIO_CONTRIBUTOR`. **All three arms are `POSITIVE_BUT_INSUFFICIENT`** -- positive pooled net return after both cost cases, but each fails one or more contributor gates. Per the frozen decision tree: *"Only POSITIVE_BUT_INSUFFICIENT arms → record the economics and decide whether combining two pre-existing positive arms with ORB is mathematically plausible; no parameter tuning."*
 
-Recorded economics for that judgment: ARM_A's own numbers are closest to a genuine portfolio-contributor case (low drawdown, broad-based concentration, ORB correlation 0.184, only the dollar-magnitude gate fails) but its P&L is small in absolute terms ($77.60/month) and its turnover (215x) makes it the most cost-sensitive of the three. ARM_B and ARM_C both cleared meaningfully larger absolute dollar figures ($186-265/month) but carry drawdowns (24.8%, 16.8%) and single-symbol concentration (58%, 67%) that a real combined portfolio would need to size down materially to control -- diluting exactly the dollar edge that makes them interesting in the first place. Cross-arm correlations (0.31-0.54) mean the three M48 arms are not a strong diversification bloc among themselves either. No parameter tuning, universe change, or threshold adjustment was made in response to any of this -- these are the frozen protocol's own numbers, reported as computed.
+Recorded economics for that judgment: ARM_A's own numbers remain closest to a genuine portfolio-contributor case (lowest drawdown at 9.2%, most broad-based concentration at 22.1%, lowest ORB correlation at 0.122, only the dollar-magnitude gate fails) but its P&L is small in absolute terms ($75.23/month) and its very high turnover (202.8x) makes it by far the most cost-sensitive of the three (stress-case net P&L falls to $1,167, versus base $4,171). ARM_B and ARM_C both cleared meaningfully larger absolute dollar figures ($177-197/month) but carry drawdowns (23.6%, 26.8%) well above the 15% contributor ceiling -- a real combined portfolio would need to size either down materially to control that risk, diluting exactly the dollar edge that makes them interesting. Cross-arm correlations (0.45-0.80, with ARM_B/ARM_C at a strong 0.795) mean the three M48 arms are not a strong diversification bloc among themselves either -- ARM_B and ARM_C in particular would contribute largely redundant portfolio risk if combined with each other. No parameter tuning, universe change, or threshold adjustment was made in response to any of this, before or after the independent-review corrections -- these are the frozen protocol's own numbers, reported as computed.
 
 ## Safety
 
-`strategy.enabled` remains `false` throughout. No broker-write code was added; every network call in this milestone is a market-data-only Alpaca request (`AlpacaCredentials`, never a brokerage credential). No production `SignalEngine`/`ExitEngine`/`Simulator`/config/universe/broker code was touched; no pinned-closure file was modified. `src/orb_capital_target_strategy_family_research.py` and `scripts/research_capital_target_strategy_family.py` are research-only. Raw vendor data was never committed -- only the SHA-256-hashed provenance manifest and this report's aggregate tables. Trusted implementation digest confirmed unchanged before and after this milestone: `f79587b9e58da0465973f8ac08ce26f7cb648a52952df6407c3c0a57abd4c53a`.
+`strategy.enabled` remains `false` throughout. No broker-write code was added; every network call in this milestone is a market-data-only Alpaca request (`AlpacaCredentials`, never a brokerage credential). No production `SignalEngine`/`ExitEngine`/`Simulator`/config/universe/broker code was touched; no pinned-closure file was modified. `src/orb_capital_target_strategy_family_research.py` and `scripts/research_capital_target_strategy_family.py` are research-only. Raw vendor data was never committed -- only the committed SHA-256 hashes document (`docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_ARTIFACT_HASHES.json`) and this report's aggregate tables; the gitignored provenance manifest and raw daily-bar caches (both IEX and SIP) stay local-only. Trusted implementation digest confirmed unchanged before and after this milestone: `f79587b9e58da0465973f8ac08ce26f7cb648a52952df6407c3c0a57abd4c53a`.
 
 ## Structured Artifacts
 
-Generated under `artifacts/research-capital-target-strategy-family/` (gitignored, regenerable from cache via `python scripts/research_capital_target_strategy_family.py`): `daily-bar-cache/` (raw Alpaca responses), `results/provenance_manifest.json` (per-symbol provenance/hashes/coverage), `results/study_results.json` (full structured results for every arm/cost-case/segment).
-
+Generated under `artifacts/research-capital-target-strategy-family/` (gitignored, regenerable from cache via `python scripts/research_capital_target_strategy_family.py`): `daily-bar-cache/` (original IEX responses, preserved as historical evidence) and `daily-bar-cache/sip/` (frozen empirical SIP responses), `results/provenance_manifest.json` (per-symbol provenance/hashes/coverage), `results/study_results.json` (full structured results for every arm/cost-case/segment, including the transaction and position/equity ledgers). The COMMITTED (non-gitignored) counterpart is `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_ARTIFACT_HASHES.json` -- SHA-256 hashes only, no raw vendor data.

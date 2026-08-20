@@ -377,28 +377,63 @@ def ohlc_integrity_report(series_by_symbol: Mapping[str, DailySeries]) -> dict[s
 # ARM_A (ETF_PULLBACK_RSI2): daily event-driven simulation.
 #
 # Per session i (chronological order, one full pass = one trading day):
-#   1. EXIT at today's open -- for every position opened on an earlier
-#      day: a scheduled exit (flagged at yesterday's close processing,
-#      step 4) fires first; otherwise the protective stop is checked
-#      against today's (open, low) and fires if touched, using
-#      `stop_fill_price` for the fill; otherwise the position stays open.
-#      A position can never exit on its own entry day.
+#   1. SCHEDULED EXIT at today's open -- for every position opened on an
+#      earlier day and flagged at yesterday's close processing (step 4):
+#      exit at today's open. A position can never scheduled-exit on its
+#      own entry day (nothing is flagged for a position that does not
+#      exist yet).
 #   2. ENTRY at today's open -- yesterday's ranked candidate queue is
 #      filled in rank order, subject to the position-count/duplicate-
 #      symbol/per-position-risk/aggregate-risk/cash caps; the stop is
 #      `entry_open - 2*ATR(14)` computed from bars through YESTERDAY's
 #      close only (never today's not-yet-known high/low).
-#   3. SIGNAL SCAN at today's close -- ETFs not currently held with
-#      close > SMA(200) and RSI(2) < 10 are ranked (ascending RSI(2),
-#      ticker ascending) and queued for tomorrow's entry step.
-#   4. SCHEDULED-EXIT FLAGGING at today's close -- for every position
-#      still open (including one entered earlier today), evaluate
-#      close > SMA(5) or five completed holding sessions
-#      (`i - entry_index + 1 >= 5`); if either holds, flag it for a
-#      scheduled exit at tomorrow's open (step 1 next iteration).
+#   3. STOP CHECK at today's (open, low) -- applied to EVERY position
+#      still open after steps 1-2, including one entered THIS SAME
+#      session in step 2 (a position must be able to stop out on its own
+#      entry day if today's low breaches its stop -- an entry-day gap-
+#      through is structurally impossible since the stop is computed
+#      strictly below the entry price, but an intraday touch after entry
+#      is not, and omitting this check understates both realized losses
+#      and drawdown). Uses `stop_fill_price` for the fill exactly as any
+#      other stop.
+#   4. SIGNAL SCAN + SCHEDULED-EXIT FLAGGING at today's close -- ETFs not
+#      currently held with close > SMA(200) and RSI(2) < 10 are ranked
+#      (ascending RSI(2), ticker ascending) and queued for tomorrow's
+#      entry step; every position still open (including one entered or
+#      stopped-and-still-open... i.e. any position that survived step 3)
+#      is evaluated for close > SMA(5) or five completed holding sessions
+#      (`i - entry_index + 1 >= 5`) and flagged for a scheduled exit at
+#      tomorrow's open if either holds.
 #   5. Mark today's closing equity (cash + open positions marked at
 #      today's close) for the daily equity curve.
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Transaction:
+    """One row of the explicit transaction ledger -- every buy and sell
+    either simulation engine ever executes, real or (for
+    `EVALUATION_END_MARK` rows, added separately by
+    `evaluation_end_mark_transactions`) hypothetical. `reason` values:
+    `ENTRY` (ARM_A open), `STOP`/`SMA5`/`MAX_HOLD` (ARM_A close),
+    `REBALANCE_BUY` (ARM_B/C new position), `REBALANCE_TOPUP` (ARM_B/C
+    adds to a continuing holding), `REBALANCE_SELL_REMOVED` (ARM_B/C
+    full exit, left the target basket), `REBALANCE_TRIM` (ARM_B/C
+    partial sell, still in the basket), `EVALUATION_END_MARK`
+    (hypothetical liquidation at the fixed 2026-08-13 evaluation
+    endpoint, for net-P&L/concentration/turnover accounting only --
+    never a strategy-generated exit and never fed back into the
+    simulation)."""
+
+    date: date
+    arm: str
+    symbol: str
+    side: str  # "BUY" | "SELL"
+    quantity: int
+    price: Decimal
+    notional: Decimal
+    cost: Decimal
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -439,6 +474,8 @@ class ArmASimulationResult:
     ending_cash: Decimal
     open_positions_at_end: tuple[OpenPosition, ...]
     total_cost_paid: Decimal
+    transactions: tuple[Transaction, ...] = ()
+    daily_position_count: tuple[tuple[date, int], ...] = ()
 
 
 def run_arm_a(
@@ -467,24 +504,21 @@ def run_arm_a(
     scheduled_exit_reason: dict[str, str] = {}
     closed_trades: list[ClosedTrade] = []
     daily_equity: list[tuple[date, Decimal]] = []
+    daily_position_count: list[tuple[date, int]] = []
     pending_entries: list[str] = []
+    transactions: list[Transaction] = []
 
     for i in range(n):
         day = master_dates[i]
 
-        # --- 1. Exit processing at today's open ---
+        # --- 1. Scheduled-exit processing at today's open ---
         for symbol in list(open_positions):
             pos = open_positions[symbol]
-            s = series_by_symbol[symbol]
-            open_i, low_i = s.opens[i], s.lows[i]
             reason = scheduled_exit_reason.get(symbol)
-            if reason is not None:
-                exit_price = open_i
-            elif low_i <= pos.stop_price:
-                exit_price = stop_fill_price(session_open=open_i, stop_price=pos.stop_price)
-                reason = "STOP"
-            else:
+            if reason is None:
                 continue
+            s = series_by_symbol[symbol]
+            exit_price = s.opens[i]
             exit_notional = exit_price * pos.quantity
             exit_cost = transaction_cost(exit_notional, cost_bps)
             gross_pnl = (exit_price - pos.entry_price) * pos.quantity
@@ -496,6 +530,10 @@ def run_arm_a(
                 entry_price=pos.entry_price, exit_price=exit_price, quantity=pos.quantity,
                 exit_reason=reason, holding_sessions=i - pos.entry_index + 1, planned_risk=pos.planned_risk,
                 gross_pnl=gross_pnl, entry_cost=pos.entry_cost, exit_cost=exit_cost, net_pnl=net_pnl,
+            ))
+            transactions.append(Transaction(
+                date=day, arm=ARM_A, symbol=symbol, side="SELL", quantity=pos.quantity,
+                price=exit_price, notional=exit_notional, cost=exit_cost, reason=reason,
             ))
             del open_positions[symbol]
             scheduled_exit_reason.pop(symbol, None)
@@ -530,8 +568,40 @@ def run_arm_a(
                 symbol=symbol, entry_date=day, entry_index=i, entry_price=entry_open, quantity=quantity,
                 stop_price=stop_price, planned_risk=planned_risk, entry_cost=entry_cost,
             )
+            transactions.append(Transaction(
+                date=day, arm=ARM_A, symbol=symbol, side="BUY", quantity=quantity,
+                price=entry_open, notional=notional, cost=entry_cost, reason="ENTRY",
+            ))
 
-        # --- 3. Signal scan at today's close ---
+        # --- 3. Stop check at today's (open, low) -- every position still
+        # open after steps 1-2, INCLUDING one just entered in step 2. ---
+        for symbol in list(open_positions):
+            pos = open_positions[symbol]
+            s = series_by_symbol[symbol]
+            open_i, low_i = s.opens[i], s.lows[i]
+            if low_i > pos.stop_price:
+                continue
+            exit_price = stop_fill_price(session_open=open_i, stop_price=pos.stop_price)
+            exit_notional = exit_price * pos.quantity
+            exit_cost = transaction_cost(exit_notional, cost_bps)
+            gross_pnl = (exit_price - pos.entry_price) * pos.quantity
+            net_pnl = gross_pnl - pos.entry_cost - exit_cost
+            cash += exit_notional - exit_cost
+            total_cost_paid += exit_cost
+            closed_trades.append(ClosedTrade(
+                symbol=symbol, entry_date=pos.entry_date, exit_date=day,
+                entry_price=pos.entry_price, exit_price=exit_price, quantity=pos.quantity,
+                exit_reason="STOP", holding_sessions=i - pos.entry_index + 1, planned_risk=pos.planned_risk,
+                gross_pnl=gross_pnl, entry_cost=pos.entry_cost, exit_cost=exit_cost, net_pnl=net_pnl,
+            ))
+            transactions.append(Transaction(
+                date=day, arm=ARM_A, symbol=symbol, side="SELL", quantity=pos.quantity,
+                price=exit_price, notional=exit_notional, cost=exit_cost, reason="STOP",
+            ))
+            del open_positions[symbol]
+            scheduled_exit_reason.pop(symbol, None)
+
+        # --- 4a. Signal scan at today's close ---
         candidates: list[PullbackCandidate] = []
         for symbol in symbols:
             if symbol in open_positions:
@@ -545,7 +615,7 @@ def run_arm_a(
                 candidates.append(PullbackCandidate(symbol=symbol, rsi2=rsi2_i))
         pending_entries = [c.symbol for c in rank_pullback_candidates(candidates)]
 
-        # --- 4. Scheduled-exit flagging at today's close ---
+        # --- 4b. Scheduled-exit flagging at today's close ---
         scheduled_exit_reason = {}
         for symbol, pos in open_positions.items():
             s = series_by_symbol[symbol]
@@ -560,11 +630,13 @@ def run_arm_a(
         # --- 5. Mark today's closing equity ---
         equity = cash + sum((open_positions[s].quantity * series_by_symbol[s].closes[i] for s in open_positions), Decimal(0))
         daily_equity.append((day, equity))
+        daily_position_count.append((day, len(open_positions)))
 
     return ArmASimulationResult(
         arm=ARM_A, closed_trades=tuple(closed_trades), daily_equity=tuple(daily_equity),
         starting_capital=starting_capital, ending_cash=cash,
         open_positions_at_end=tuple(open_positions.values()), total_cost_paid=total_cost_paid,
+        transactions=tuple(transactions), daily_position_count=tuple(daily_position_count),
     )
 
 
@@ -576,16 +648,31 @@ def run_arm_a(
 # eligible/ranked target basket using only bars through session i's close
 # (never a later bar). The basket is executed at session i+1's open
 # (skipped entirely if i is the study's last session -- there is no next
-# open to execute at). Execution is INCREMENTAL, not a full liquidate-
-# and-rebuild: any currently-held symbol not in the new target is sold;
-# any target symbol not currently held is bought with an equal-capital
-# share of current equity (`current_equity / len(target)`); a symbol that
-# remains in the target across rebalances is left untouched (no forced
-# re-equalization trade) -- this is the interpretation of "equal-capital
-# allocation" + "costs apply to every REQUIRED buy/sell" that minimizes
-# turnover to only what basket-membership changes actually require,
-# rather than a full rebuild every month. Documented explicitly here and
-# in the milestone report as a deliberate, single, frozen convention.
+# open to execute at), as a genuine equal-capital rebalance:
+#   1. SELL every currently-held symbol no longer in the target (full
+#      exit, reason `REBALANCE_SELL_REMOVED`).
+#   2. Compute current total equity at today's open (cash + remaining
+#      continuing holdings marked at today's open) and divide by the
+#      target basket size for the equal per-symbol capital target.
+#   3. Compute each target symbol's whole-share target quantity at
+#      today's open price.
+#   4. TRIM every continuing holding whose current quantity exceeds its
+#      target quantity (partial sell, reason `REBALANCE_TRIM`) --
+#      processed in ticker-ascending order.
+#   5. BUY new positions and TOP UP continuing holdings below their
+#      target quantity (reason `REBALANCE_BUY` / `REBALANCE_TOPUP`) --
+#      processed in ticker-ascending order, capped by available cash
+#      (a cash shortfall silently buys as many whole shares as afford,
+#      never partial shares, never borrows).
+# A top-up combines with the existing lot into ONE weighted-average-cost
+# holding (keeping the ORIGINAL entry_date/entry_index for holding-
+# session bookkeeping -- a top-up does not reset how long a position has
+# been continuously held). Every step 1/4/5 transaction is recorded in
+# the explicit `transactions` ledger. Continuing holdings finish within
+# one-share rounding of the equal-capital target (whole-share sizing is
+# the only source of residual drift); costs are charged on every actual
+# trade (steps 1, 4, 5) -- never on a holding that already sits exactly
+# at target.
 # ---------------------------------------------------------------------------
 
 
@@ -612,6 +699,7 @@ class RebalanceTrade:
     entry_cost: Decimal
     exit_cost: Decimal
     net_pnl: Decimal
+    reason: str = "REMOVED"  # "REMOVED" (full exit, left the target basket) | "TRIMMED" (partial sell, still in the basket)
 
 
 @dataclass(frozen=True)
@@ -633,6 +721,8 @@ class MonthlyRebalanceSimulationResult:
     open_positions_at_end: tuple[RebalanceHolding, ...]
     total_cost_paid: Decimal
     rebalance_events: tuple[RebalanceEvent, ...]
+    transactions: tuple[Transaction, ...] = ()
+    daily_position_count: tuple[tuple[date, int], ...] = ()
 
 
 def month_end_indices(master_dates: Sequence[date]) -> list[int]:
@@ -656,7 +746,9 @@ def run_monthly_rebalance_arm(
     open_positions: dict[str, RebalanceHolding] = {}
     closed_trades: list[RebalanceTrade] = []
     daily_equity: list[tuple[date, Decimal]] = []
+    daily_position_count: list[tuple[date, int]] = []
     rebalance_events: list[RebalanceEvent] = []
+    transactions: list[Transaction] = []
 
     pending_target: tuple[str, ...] | None = None
     pending_execution_index: int | None = None
@@ -666,6 +758,8 @@ def run_monthly_rebalance_arm(
 
         if pending_execution_index == i and pending_target is not None:
             target = set(pending_target)
+
+            # 1. SELL every currently-held symbol no longer in the target.
             for symbol in sorted(open_positions):
                 if symbol in target:
                     continue
@@ -681,31 +775,104 @@ def run_monthly_rebalance_arm(
                     symbol=symbol, entry_date=pos.entry_date, exit_date=day,
                     entry_price=pos.entry_price, exit_price=exit_price, quantity=pos.quantity,
                     holding_sessions=i - pos.entry_index + 1, gross_pnl=gross_pnl,
-                    entry_cost=pos.entry_cost, exit_cost=exit_cost, net_pnl=net_pnl,
+                    entry_cost=pos.entry_cost, exit_cost=exit_cost, net_pnl=net_pnl, reason="REMOVED",
+                ))
+                transactions.append(Transaction(
+                    date=day, arm=arm, symbol=symbol, side="SELL", quantity=pos.quantity,
+                    price=exit_price, notional=exit_notional, cost=exit_cost, reason="REBALANCE_SELL_REMOVED",
                 ))
                 del open_positions[symbol]
 
-            new_buys = sorted(s for s in target if s not in open_positions)
-            if new_buys:
+            # 2-3. Equal-capital target quantity for every target symbol,
+            # from equity marked at today's open (continuing holdings only
+            # -- removed ones are already sold above).
+            target_capital_per_symbol = Decimal(0)
+            target_qty: dict[str, int] = {}
+            if target:
                 equity_now = cash + sum(
                     (open_positions[s].quantity * series_by_symbol[s].opens[i] for s in open_positions), Decimal(0),
                 )
-                target_capital_per_symbol = equity_now / Decimal(len(target)) if target else Decimal(0)
-                for symbol in new_buys:
-                    entry_price = series_by_symbol[symbol].opens[i]
-                    quantity = equal_capital_whole_shares(capital=min(target_capital_per_symbol, cash), price=entry_price)
-                    if quantity <= 0:
-                        continue
-                    notional = entry_price * quantity
-                    entry_cost = transaction_cost(notional, cost_bps)
-                    if notional + entry_cost > cash:
-                        continue
-                    cash -= notional + entry_cost
-                    total_cost_paid += entry_cost
+                target_capital_per_symbol = equity_now / Decimal(len(target))
+                for symbol in target:
+                    price = series_by_symbol[symbol].opens[i]
+                    target_qty[symbol] = equal_capital_whole_shares(capital=target_capital_per_symbol, price=price)
+
+            # 4. TRIM continuing holdings above their target quantity
+            # (ticker-ascending order; frees cash before any buy/top-up).
+            for symbol in sorted(s for s in open_positions if s in target):
+                pos = open_positions[symbol]
+                desired = target_qty.get(symbol, 0)
+                if pos.quantity <= desired:
+                    continue
+                trim_qty = pos.quantity - desired
+                price = series_by_symbol[symbol].opens[i]
+                proceeds = price * trim_qty
+                exit_cost = transaction_cost(proceeds, cost_bps)
+                frac = Decimal(trim_qty) / Decimal(pos.quantity)
+                allocated_entry_cost = pos.entry_cost * frac
+                gross_pnl = (price - pos.entry_price) * trim_qty
+                net_pnl = gross_pnl - allocated_entry_cost - exit_cost
+                cash += proceeds - exit_cost
+                total_cost_paid += exit_cost
+                closed_trades.append(RebalanceTrade(
+                    symbol=symbol, entry_date=pos.entry_date, exit_date=day,
+                    entry_price=pos.entry_price, exit_price=price, quantity=trim_qty,
+                    holding_sessions=i - pos.entry_index + 1, gross_pnl=gross_pnl,
+                    entry_cost=allocated_entry_cost, exit_cost=exit_cost, net_pnl=net_pnl, reason="TRIMMED",
+                ))
+                transactions.append(Transaction(
+                    date=day, arm=arm, symbol=symbol, side="SELL", quantity=trim_qty,
+                    price=price, notional=proceeds, cost=exit_cost, reason="REBALANCE_TRIM",
+                ))
+                if desired <= 0:
+                    del open_positions[symbol]
+                else:
                     open_positions[symbol] = RebalanceHolding(
-                        symbol=symbol, entry_date=day, entry_index=i, entry_price=entry_price,
-                        quantity=quantity, entry_cost=entry_cost,
+                        symbol=symbol, entry_date=pos.entry_date, entry_index=pos.entry_index,
+                        entry_price=pos.entry_price, quantity=desired, entry_cost=pos.entry_cost - allocated_entry_cost,
                     )
+
+            # 5. BUY new positions and TOP UP continuing holdings below
+            # target (ticker-ascending order; cash-shortfall buys as many
+            # whole shares as afford, never partial, never borrows).
+            for symbol in sorted(target):
+                current = open_positions.get(symbol)
+                current_qty = current.quantity if current is not None else 0
+                needed = target_qty.get(symbol, 0) - current_qty
+                if needed <= 0:
+                    continue
+                price = series_by_symbol[symbol].opens[i]
+                if price <= 0:
+                    continue
+                affordable = int(cash // (price * (Decimal(1) + cost_bps / Decimal(10000))))
+                buy_qty = min(needed, affordable)
+                while buy_qty > 0 and price * buy_qty + transaction_cost(price * buy_qty, cost_bps) > cash:
+                    buy_qty -= 1
+                if buy_qty <= 0:
+                    continue
+                notional = price * buy_qty
+                entry_cost = transaction_cost(notional, cost_bps)
+                cash -= notional + entry_cost
+                total_cost_paid += entry_cost
+                reason = "REBALANCE_TOPUP" if current is not None else "REBALANCE_BUY"
+                if current is None:
+                    open_positions[symbol] = RebalanceHolding(
+                        symbol=symbol, entry_date=day, entry_index=i, entry_price=price,
+                        quantity=buy_qty, entry_cost=entry_cost,
+                    )
+                else:
+                    combined_qty = current.quantity + buy_qty
+                    weighted_entry_price = (current.quantity * current.entry_price + buy_qty * price) / Decimal(combined_qty)
+                    open_positions[symbol] = RebalanceHolding(
+                        symbol=symbol, entry_date=current.entry_date, entry_index=current.entry_index,
+                        entry_price=weighted_entry_price, quantity=combined_qty,
+                        entry_cost=current.entry_cost + entry_cost,
+                    )
+                transactions.append(Transaction(
+                    date=day, arm=arm, symbol=symbol, side="BUY", quantity=buy_qty,
+                    price=price, notional=notional, cost=entry_cost, reason=reason,
+                ))
+
             pending_target = None
             pending_execution_index = None
 
@@ -728,12 +895,14 @@ def run_monthly_rebalance_arm(
             (open_positions[s].quantity * series_by_symbol[s].closes[i] for s in open_positions), Decimal(0),
         )
         daily_equity.append((day, equity))
+        daily_position_count.append((day, len(open_positions)))
 
     return MonthlyRebalanceSimulationResult(
         arm=arm, closed_trades=tuple(closed_trades), daily_equity=tuple(daily_equity),
         starting_capital=starting_capital, ending_cash=cash,
         open_positions_at_end=tuple(open_positions.values()), total_cost_paid=total_cost_paid,
-        rebalance_events=tuple(rebalance_events),
+        rebalance_events=tuple(rebalance_events), transactions=tuple(transactions),
+        daily_position_count=tuple(daily_position_count),
     )
 
 
@@ -808,10 +977,16 @@ def monthly_equity_marks(daily_equity: Sequence[tuple[date, Decimal]]) -> list[t
 
 
 def monthly_dollar_pnl(daily_equity: Sequence[tuple[date, Decimal]]) -> list[tuple[date, Decimal]]:
-    """`[(month_end_date, dollar_pnl_for_that_month), ...]`. The first
-    calendar month's P&L is measured against `daily_equity[0][1]`
-    (typically the starting capital, since the caller's simulation
-    engines append one equity mark per session starting on day 0)."""
+    """`[(month_end_date, dollar_pnl_for_that_month), ...]`, computed
+    against the account's own actual, naturally-COMPOUNDING equity base
+    at the start of each month. **SECONDARY / diagnostic only** -- later
+    months operate on a changing (compounded) equity base, so this is
+    NOT the frozen protocol's "no compounding" primary dollar-
+    withdrawal view; see `fixed_notional_monthly_dollar_pnl` for that.
+    The first calendar month's P&L is measured against
+    `daily_equity[0][1]` (typically the starting capital, since the
+    caller's simulation engines append one equity mark per session
+    starting on day 0)."""
     if not daily_equity:
         return []
     marks = monthly_equity_marks(daily_equity)
@@ -826,7 +1001,9 @@ def monthly_dollar_pnl(daily_equity: Sequence[tuple[date, Decimal]]) -> list[tup
 def monthly_return_pct(daily_equity: Sequence[tuple[date, Decimal]]) -> list[tuple[date, Decimal]]:
     """`[(month_end_date, pct_return_for_that_month), ...]` computed
     against the account's own compounding base at the start of that
-    month (secondary/diagnostic view, not the primary dollar view)."""
+    month. This is the basis both `monthly_dollar_pnl` (compounded,
+    secondary) and `fixed_notional_monthly_dollar_pnl` (fixed-notional,
+    PRIMARY) are derived from."""
     if not daily_equity:
         return []
     marks = monthly_equity_marks(daily_equity)
@@ -837,6 +1014,24 @@ def monthly_return_pct(daily_equity: Sequence[tuple[date, Decimal]]) -> list[tup
         out.append((month_end_date, pct))
         prior = equity
     return out
+
+
+def fixed_notional_monthly_dollar_pnl(
+    monthly_pct_series: Sequence[tuple[date, Decimal]], *, notional: Decimal = STARTING_CAPITAL,
+) -> list[tuple[date, Decimal]]:
+    """The frozen protocol's PRIMARY dollar-withdrawal view: each
+    month's own percentage return applied to a FIXED notional (the
+    original $30,000 starting capital), never to the account's own
+    (compounding) equity at that month's start. Two consecutive +10%
+    months therefore both contribute exactly `0.10 * notional` here --
+    e.g. $3,000 and $3,000 on a $30,000 notional -- even though the same
+    two months would compound the account's own equity to $33,000 then
+    $36,300 (a $3,300 second-month dollar change) in the naturally-
+    compounding `monthly_dollar_pnl` series. Averaging THIS series is
+    what "average monthly dollars on $30,000, without compounding"
+    means; `monthly_dollar_pnl`/`cagr` are the secondary, genuinely-
+    compounding diagnostics."""
+    return [(d, pct * notional) for d, pct in monthly_pct_series]
 
 
 def cagr(daily_equity: Sequence[tuple[date, Decimal]]) -> Decimal | None:
@@ -978,6 +1173,35 @@ def align_monthly_series(*series: Sequence[tuple[date, Decimal]]) -> list[tuple[
     out = []
     for key in sorted(common_keys):
         out.append((date(key[0], key[1], 1),) + tuple(k[key] for k in keyed))
+    return out
+
+
+def fill_missing_months_with_zero(
+    monthly_series: Sequence[tuple[date, Decimal]], *, start: date, end: date,
+) -> list[tuple[date, Decimal]]:
+    """Builds the complete calendar-month grid from `start` through `end`
+    (inclusive, by (year, month)) and fills every month absent from
+    `monthly_series` with exactly `Decimal(0)`, rather than letting it
+    silently disappear from a later `align_monthly_series` inner join.
+    Existing months keep their own value unchanged. Correct for a sparse
+    series like ORB's own monthly R-sum (most months have zero closed
+    trades) being correlated against a densely-populated series (an
+    ETF arm's own monthly return) -- dropping no-trade months would
+    otherwise only ever compare ORB's OWN trading months against the
+    ETF arm, silently discarding the (materially informative) fact that
+    ORB was flat everywhere else. Constant risk-normalization (R,
+    scaled by a fixed dollar-per-R) does not change the resulting
+    Pearson correlation, so leaving the series in R (not converting to
+    dollars) is an accepted, documented convention here."""
+    by_month = {(d.year, d.month): v for d, v in monthly_series}
+    out: list[tuple[date, Decimal]] = []
+    year, month = start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        out.append((date(year, month, 1), by_month.get((year, month), Decimal(0))))
+        month += 1
+        if month == 13:
+            month = 1
+            year += 1
     return out
 
 
@@ -1144,6 +1368,34 @@ def scale_trade_to_risk_cap(trade: ClosedTrade, *, risk_cap: Decimal) -> ClosedT
     )
 
 
+def evaluation_end_mark_transactions(
+    *, open_positions_at_end: Sequence[Any], end_date: date, end_price_by_symbol: Mapping[str, Decimal],
+    cost_bps: Decimal, arm: str,
+) -> tuple[Transaction, ...]:
+    """A hypothetical full liquidation of every still-open position at
+    `end_date`'s adjusted close, with a hypothetical liquidation cost
+    applied -- for net-P&L/concentration/turnover accounting ONLY. Never
+    a real strategy-generated exit, never fed back into either
+    simulation engine, and always labeled `reason="EVALUATION_END_MARK"`
+    so it is never confused with one. `end_date` must be the study's
+    fixed overall evaluation endpoint, not an interim segment boundary
+    -- an open position that merely straddles a calendar-segment cut is
+    NOT liquidated for that segment's own reporting; only the true final
+    date gets this treatment."""
+    out = []
+    for pos in open_positions_at_end:
+        price = end_price_by_symbol.get(pos.symbol)
+        if price is None:
+            continue
+        notional = price * pos.quantity
+        cost = transaction_cost(notional, cost_bps)
+        out.append(Transaction(
+            date=end_date, arm=arm, symbol=pos.symbol, side="SELL", quantity=pos.quantity,
+            price=price, notional=notional, cost=cost, reason="EVALUATION_END_MARK",
+        ))
+    return tuple(out)
+
+
 def exposure_and_concurrency(
     *, entry_exit_pairs: Sequence[tuple[date, date | None]], window_dates: Sequence[date],
 ) -> dict[str, Any]:
@@ -1171,10 +1423,42 @@ def exposure_and_concurrency(
     }
 
 
+def exposure_and_concurrency_from_daily_counts(
+    daily_position_count: Sequence[tuple[date, int]], *, window_dates: Sequence[date],
+) -> dict[str, Any]:
+    """The preferred exposure/concurrency computation: reads each
+    session's ACTUAL open-position count directly off the simulation's
+    own `daily_position_count` series (recorded once per session inside
+    either engine's own loop), rather than reconstructing overlapping
+    intervals from closed-trade records after the fact.
+    `exposure_and_concurrency`'s `entry_exit_pairs` reconstruction is
+    correct for ARM_A (each closed trade IS one genuine, non-overlapping
+    position lifetime) but silently overcounts for ARM_B/ARM_C: a
+    continuing holding that gets TRIMMED several times across several
+    rebalances produces several `RebalanceTrade` records that all share
+    the SAME original `entry_date` with different `exit_date`s, which
+    the interval-reconstruction approach double(triple, ...)-counts as
+    separate simultaneous positions -- observed producing an average
+    concurrency figure larger than the arm's own universe size. This
+    function has no such failure mode since it never reconstructs
+    anything; it only reads what the engine itself already tracked."""
+    if not window_dates:
+        return {"exposure_pct": None, "average_concurrent_positions": None}
+    counts_by_date = dict(daily_position_count)
+    counts = [counts_by_date.get(d, 0) for d in window_dates]
+    days_with_position = sum(1 for c in counts if c > 0)
+    return {
+        "exposure_pct": Decimal(days_with_position) / Decimal(len(window_dates)),
+        "average_concurrent_positions": Decimal(str(statistics.fmean(counts))) if counts else Decimal(0),
+    }
+
+
 def compute_arm_metrics(
     *, arm: str, closed_trades: Sequence[Any], daily_equity: Sequence[tuple[date, Decimal]],
     starting_capital: Decimal, total_cost_paid: Decimal, evaluation_start: date, evaluation_end: date,
-    open_positions_at_end: Sequence[Any] = (),
+    open_positions_at_end: Sequence[Any] = (), transactions: Sequence[Transaction] = (),
+    end_mark_transactions: Sequence[Transaction] = (), fixed_notional: Decimal = STARTING_CAPITAL,
+    daily_position_count: Sequence[tuple[date, int]] = (),
 ) -> dict[str, Any]:
     """The full required-output set for one arm/cost-case, computed over
     `[evaluation_start, evaluation_end]` only (warm-up-period equity
@@ -1184,9 +1468,20 @@ def compute_arm_metrics(
     `open_positions_at_end`, for a position still open past the window)
     to correctly compute exposure/concurrency for positions that were
     open DURING the window even if their own entry or exit falls
-    outside it."""
+    outside it. `transactions` is the arm's FULL transaction ledger
+    (also unfiltered) -- turnover and this window's own cost total are
+    computed from it directly, filtered to this window's own dates, so a
+    per-segment call never reports the whole study's cost total.
+    `end_mark_transactions` (from `evaluation_end_mark_transactions`) is
+    non-empty ONLY when this window's own end is the study's true fixed
+    evaluation endpoint AND positions are still open then -- it feeds a
+    hypothetical-liquidation-adjusted net P&L and folds each such
+    position's own unrealized (marked, cost-adjusted) contribution into
+    symbol concentration; it must never be passed for an interim segment
+    boundary that merely happens to have open positions mid-flight."""
     window_equity = slice_to_window(daily_equity, start=evaluation_start, end=evaluation_end)
     window_trades = [t for t in closed_trades if evaluation_start <= t.exit_date <= evaluation_end]
+    window_transactions = [t for t in transactions if evaluation_start <= t.date <= evaluation_end]
 
     if not window_equity:
         raise CapitalTargetResearchError("no equity marks in the evaluation window")
@@ -1197,27 +1492,41 @@ def compute_arm_metrics(
         baseline_equity = prior_before_window[-1]
     anchored_equity = [(evaluation_start, baseline_equity)] + window_equity if window_equity[0][0] != evaluation_start else window_equity
 
-    monthly_pnl_pairs = monthly_dollar_pnl(anchored_equity)
     monthly_pct_pairs = monthly_return_pct(anchored_equity)
-    monthly_pnl = [v for _, v in monthly_pnl_pairs]
     monthly_pct = [v for _, v in monthly_pct_pairs]
+    fixed_pnl_pairs = fixed_notional_monthly_dollar_pnl(monthly_pct_pairs, notional=fixed_notional)  # PRIMARY
+    compounded_pnl_pairs = monthly_dollar_pnl(anchored_equity)  # SECONDARY
+    fixed_pnl = [v for _, v in fixed_pnl_pairs]
+    compounded_pnl = [v for _, v in compounded_pnl_pairs]
 
     gross_pnl = sum((t.gross_pnl for t in window_trades), Decimal(0))
     net_pnl_realized = sum((t.net_pnl for t in window_trades), Decimal(0))
     net_pnl_equity = window_equity[-1][1] - baseline_equity
 
+    end_mark_cost = sum((t.cost for t in end_mark_transactions), Decimal(0))
+    net_pnl_marked = net_pnl_equity - end_mark_cost  # equity view, less a hypothetical liquidation cost on anything still open at the true evaluation end
+
     dd = max_drawdown(anchored_equity)
-    prof = profitable_month_stats(monthly_pnl)
+    prof = profitable_month_stats(fixed_pnl)  # sign-equivalent to the compounded series; fixed is the primary basis
     worst_pct = worst_and_percentile_month(monthly_pct)
 
     pnl_by_symbol: dict[str, Decimal] = {}
     for t in window_trades:
         pnl_by_symbol[t.symbol] = pnl_by_symbol.get(t.symbol, Decimal(0)) + t.net_pnl
+    end_mark_by_symbol = {t.symbol: t for t in end_mark_transactions}
+    for pos in open_positions_at_end:
+        mark = end_mark_by_symbol.get(pos.symbol)
+        if mark is None:
+            continue
+        unrealized_gross = (mark.price - pos.entry_price) * pos.quantity
+        unrealized_net = unrealized_gross - pos.entry_cost - mark.cost
+        pnl_by_symbol[pos.symbol] = pnl_by_symbol.get(pos.symbol, Decimal(0)) + unrealized_net
     concentration = positive_contribution_concentration(pnl_by_symbol)
 
-    trade_notionals = [t.entry_price * t.quantity for t in window_trades] + [t.exit_price * t.quantity for t in window_trades]
+    trade_notionals = [t.notional for t in window_transactions] + [t.notional for t in end_mark_transactions]
+    window_cost_paid = sum((t.cost for t in window_transactions), Decimal(0)) + end_mark_cost
     average_equity = (sum((e for _, e in window_equity), Decimal(0)) / Decimal(len(window_equity))) if window_equity else starting_capital
-    turnover = turnover_and_costs(trade_notionals, total_cost_paid, average_equity)
+    turnover = turnover_and_costs(trade_notionals, window_cost_paid, average_equity)
 
     segment_net: dict[str, Decimal] = {}
     for seg in CALENDAR_SEGMENTS:
@@ -1228,10 +1537,7 @@ def compute_arm_metrics(
         seg_baseline = seg_start_candidates[-1] if seg_start_candidates else baseline_equity
         segment_net[seg] = seg_marks[-1][1] - seg_baseline
 
-    entry_exit_pairs = [(t.entry_date, t.exit_date) for t in closed_trades] + [
-        (p.entry_date, None) for p in open_positions_at_end
-    ]
-    exposure = exposure_and_concurrency(entry_exit_pairs=entry_exit_pairs, window_dates=[d for d, _ in window_equity])
+    exposure = exposure_and_concurrency_from_daily_counts(daily_position_count, window_dates=[d for d, _ in window_equity])
 
     return {
         "arm": arm,
@@ -1241,8 +1547,12 @@ def compute_arm_metrics(
         "gross_pnl": gross_pnl,
         "net_pnl_realized": net_pnl_realized,
         "net_pnl": net_pnl_equity,
-        "mean_monthly_dollar_pnl": (statistics.fmean(_to_float_list(monthly_pnl)) if monthly_pnl else None),
-        "median_monthly_dollar_pnl": (statistics.median(_to_float_list(monthly_pnl)) if monthly_pnl else None),
+        "net_pnl_marked": net_pnl_marked,
+        "end_mark_liquidation_cost": end_mark_cost,
+        "mean_monthly_dollar_pnl_fixed_30k": (statistics.fmean(_to_float_list(fixed_pnl)) if fixed_pnl else None),
+        "median_monthly_dollar_pnl_fixed_30k": (statistics.median(_to_float_list(fixed_pnl)) if fixed_pnl else None),
+        "mean_monthly_dollar_pnl_compounded": (statistics.fmean(_to_float_list(compounded_pnl)) if compounded_pnl else None),
+        "median_monthly_dollar_pnl_compounded": (statistics.median(_to_float_list(compounded_pnl)) if compounded_pnl else None),
         "mean_monthly_return_pct": (Decimal(str(statistics.fmean(_to_float_list(monthly_pct)))) if monthly_pct else Decimal(0)),
         "median_monthly_return_pct": (statistics.median(_to_float_list(monthly_pct)) if monthly_pct else None),
         "cagr": cagr(anchored_equity),
@@ -1253,16 +1563,22 @@ def compute_arm_metrics(
         "recovery_days": dd["recovery_days"],
         "profitable_month_pct": prof["profitable_month_pct"],
         "longest_losing_streak": prof["longest_losing_streak"],
-        "worst_month_dollars": worst_and_percentile_month(monthly_pnl)["worst_month"],
+        "worst_month_dollars_fixed_30k": worst_and_percentile_month(fixed_pnl)["worst_month"],
         "fifth_percentile_month_pct": worst_pct["percentile_month"],
         "concentration": concentration,
         "turnover": turnover,
-        "monthly_dollar_pnl_series": monthly_pnl_pairs,
+        "monthly_dollar_pnl_fixed_30k_series": fixed_pnl_pairs,
+        "monthly_dollar_pnl_compounded_series": compounded_pnl_pairs,
         "monthly_return_pct_series": monthly_pct_pairs,
         "segment_net_pnl": segment_net,
         "starting_capital": baseline_equity,
         "ending_equity": window_equity[-1][1],
-        "total_cost_paid": total_cost_paid,
+        "total_cost_paid": window_cost_paid,
+        "reconciliation": {
+            "symbol_contribution_sum": sum(pnl_by_symbol.values(), Decimal(0)),
+            "net_pnl_marked": net_pnl_marked,
+            "residual": net_pnl_marked - sum(pnl_by_symbol.values(), Decimal(0)),
+        },
     }
 
 
@@ -1297,5 +1613,7 @@ __all__ = [
     "CONTRIBUTOR_MIN_NONNEGATIVE_SEGMENTS", "CONTRIBUTOR_MIN_POSITIVE_SEGMENTS",
     "classify_capital_target_arm",
     "CALENDAR_SEGMENTS", "segment_label", "slice_to_window", "scale_trade_to_risk_cap", "compute_arm_metrics",
-    "exposure_and_concurrency",
+    "exposure_and_concurrency", "exposure_and_concurrency_from_daily_counts",
+    "Transaction", "evaluation_end_mark_transactions", "fixed_notional_monthly_dollar_pnl",
+    "fill_missing_months_with_zero",
 ]

@@ -1,0 +1,67 @@
+{
+  "adjustment": "all",
+  "evaluation_end": "2026-08-13",
+  "evaluation_start": "2022-01-03",
+  "feed": "sip",
+  "generation_git_head_sha": "bc0776d99660f362fb737a2c0c6d21386bb551f4",
+  "ledger_hashes": {
+    "DIVERSIFIED_TREND_12M__base_5bps": {
+      "position_equity_ledger_sha256": "eca63ab77edf3bf0d3ca00da8664516ae1ab9c105a8b63aace10411c82dc1c62",
+      "transaction_count": 235,
+      "transaction_ledger_sha256": "0dfca99b0457205028cd4e37ab3a3a579f8be8eace02de40b68f968300aa247c"
+    },
+    "DIVERSIFIED_TREND_12M__stress_10bps": {
+      "position_equity_ledger_sha256": "7843457008fce1d3512d690305abc424219de68cd8c3ec3bd303518b02a0e682",
+      "transaction_count": 234,
+      "transaction_ledger_sha256": "53c3efcda215aaa151cf86b46b5247d745e5ca323f5d86ee5d466689793d5ed2"
+    },
+    "ETF_PULLBACK_RSI2__base_5bps": {
+      "position_equity_ledger_sha256": "a2cf3d7ac523d2d82b90077a79dc0159f3931192fa444c57cb5bd65b693b0efc",
+      "transaction_count": 739,
+      "transaction_ledger_sha256": "620b54413d9a005988406527896e38da11d93b68bdf5da4c81f6363d4dc2c97f"
+    },
+    "ETF_PULLBACK_RSI2__stress_10bps": {
+      "position_equity_ledger_sha256": "1ebe3525a5ebb348cd44f60b474227d77f0fedf08e7103c6dfe256a990953b56",
+      "transaction_count": 739,
+      "transaction_ledger_sha256": "4b575ad03c02802d9a5438f0cdd2fdcd6796c8c941774097c58c1de3010fd4e3"
+    },
+    "SECTOR_MOMENTUM_12_1__base_5bps": {
+      "position_equity_ledger_sha256": "27886bb6e350fe59ae3e4b15932f2bc2436ca33937362879b7af473ad251dacf",
+      "transaction_count": 179,
+      "transaction_ledger_sha256": "f186739d0dece2bf1727269a51908946747e5594f6ca486c65e01b5f1e169f86"
+    },
+    "SECTOR_MOMENTUM_12_1__stress_10bps": {
+      "position_equity_ledger_sha256": "9154046f72a58fefdce0bc84c9576dc953f44ba6705adfc418fa61eb0e44d6d4",
+      "transaction_count": 177,
+      "transaction_ledger_sha256": "792a2d2746b430e14029b9ed51b6d45f9256018aff08183512a0aa4fe036cb18"
+    }
+  },
+  "master_calendar_session_count": 1409,
+  "master_calendar_sha256": "bd61d697aa704f6f4f418eeda97fd43743cc335b5c0e198ef7cf28ca231fc174",
+  "per_symbol_series_sha256": {
+    "DBC": "590bf19d914bc8803b0d2c99ce4671b60ad021b13879de879c0cb14e895ace44",
+    "DIA": "0dbad3d495ee7e2e42b96a31154eb7b75f6e9f2bbcd3e35858971959b5878db6",
+    "GLD": "35f88ebf334e83932ea069d46c9d6b4efea78fc0df972f916b9ce360aebaeef8",
+    "IEF": "93c9e716590f7abde13c7f392ed43246e3af2c9a371b7b8c8ba7a85dea64a3a9",
+    "IWM": "2aadac19f7f80848848647f9b6e06994e6fb6cbd546b70a09af3ffa675a9804f",
+    "QQQ": "9070e577e11c3c1d3d4413a2a63b1be79fdf91518fb700fc86975ae210fbdb51",
+    "SPY": "1d72bac2d327a52a441ab5e318c94657a3302dedb5798f0cf8063170e1869fe0",
+    "TLT": "31709adc74b7c30e5cde48200181ba63af3e646e41d627974deafe1d23faa630",
+    "VNQ": "3ac2efd796eb4141db9e49b2fd0061f875cf694dc945f81cf926048b5beec721",
+    "XLB": "cdee48297eaddd655e6aa7ebc0806d7fd041d7fecd796358ac4d9c00895b0e2a",
+    "XLC": "34842e2f7655839da68598b3cd829def49678a4e2adcb1ea0b954fab0e606d55",
+    "XLE": "4bcc3c2834c831b65aa9e9dcd9927be20e2a3c0b75f254b92ac13a570a5dec42",
+    "XLF": "c3a8164bfcbcfa884571d319e4ce006926a37276f855e6a9b741700141d793f7",
+    "XLI": "ef81f856cef1805dc9df60737517fb7fcc9d50cbf8cf137cdc85bbfece2d7eba",
+    "XLK": "fa4febb8c75fc2779213cb787b2034f8feea0e2452ec4e7912c119da2646f005",
+    "XLP": "c0e8cdb07451d4b451237ccbbdbedc660476acab43fdc3480f382b042282d739",
+    "XLRE": "cac23bc2cad455392aceab9d627b0f34d356b0599ca38cec9099d8a7b46e9a79",
+    "XLU": "50286ec256e8b1813446f45f6e02193bd8d333708c1ede5a71aadc4b1a220687",
+    "XLV": "0368da60e34f68cad8b61ad4b16aebecf755e2b44e974eb2ba799ac9d7f94ef8",
+    "XLY": "e8c8ad4427fbfe2458dbf62309db2d053d877362f78a61c0c6d7c6b2556a1869"
+  },
+  "retrieval_timestamp_utc": "2026-08-20T13:01:20.772322+00:00",
+  "study_results_json_sha256": "7e5795b3105727c04d09a3dc88bdf9314cf341f453d3ff0e008c7b05a940ad4d",
+  "timeframe": "1Day",
+  "warmup_start": "2021-01-01"
+}

@@ -43,16 +43,31 @@ from src.orb_capital_target_strategy_family_research import (
     run_arm_a, run_monthly_rebalance_arm, arm_b_selector, arm_c_selector,
     simple_moving_average, compute_arm_metrics, scale_trade_to_risk_cap, segment_label,
     monthly_return_pct, pearson_correlation, align_monthly_series, classify_capital_target_arm,
-    max_drawdown,
+    max_drawdown, evaluation_end_mark_transactions, fill_missing_months_with_zero,
 )
 
 WARMUP_START = date(2021, 1, 1)
 FETCH_END_EXCLUSIVE = date(2026, 8, 14)  # one day past EVALUATION_END; Alpaca's `end` is exclusive
-DEFAULT_CACHE_DIR = ROOT / "artifacts" / "research-capital-target-strategy-family" / "daily-bar-cache"
+CACHE_ROOT = ROOT / "artifacts" / "research-capital-target-strategy-family" / "daily-bar-cache"
 RESULTS_DIR = ROOT / "artifacts" / "research-capital-target-strategy-family" / "results"
 PROVENANCE_PATH = RESULTS_DIR / "provenance_manifest.json"
-DEFAULT_FEED = "iex"
+#: SIP (the consolidated tape across all US exchanges) is the frozen M48
+#: empirical feed -- IEX is a single individual exchange whose OHLC can
+#: differ materially from the consolidated market, which matters
+#: directly here since ARM_A's entries/stops/exits are all driven by
+#: daily open/high/low/close. M46 hit the same IEX-completeness problem
+#: and switched to SIP; M48 starts there. Feed-specific cache
+#: subdirectories (`daily-bar-cache/sip/`, `daily-bar-cache/iex/`) keep
+#: the two feeds' raw responses permanently separate -- an IEX cache
+#: entry is NEVER read as if it were SIP data, and the original IEX
+#: cache from the first (pre-review) run is left untouched as historical
+#: evidence, not deleted.
+DEFAULT_FEED = "sip"
 MAX_PAGES_PER_SYMBOL = 20
+
+
+def cache_dir_for_feed(feed: str) -> Path:
+    return CACHE_ROOT / feed
 
 ALL_SYMBOLS: tuple[str, ...] = tuple(sorted(set(UNIVERSE_A) | set(UNIVERSE_B) | set(UNIVERSE_C)))
 
@@ -186,6 +201,35 @@ def build_master_calendar(spy_series: DailySeries) -> tuple[date, ...]:
     return tuple(d for d in spy_series.dates if WARMUP_START <= d <= EVALUATION_END)
 
 
+def _sha256_of_json(value: Any) -> str:
+    material = json.dumps(value, sort_keys=True, default=_json_default)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _transaction_ledger_hash(transactions: Sequence[Any]) -> str:
+    rows = [
+        {
+            "date": t.date.isoformat(), "arm": t.arm, "symbol": t.symbol, "side": t.side,
+            "quantity": t.quantity, "price": str(t.price), "notional": str(t.notional),
+            "cost": str(t.cost), "reason": t.reason,
+        }
+        for t in transactions
+    ]
+    return _sha256_of_json(rows)
+
+
+def _position_equity_ledger_hash(daily_equity: Sequence[tuple[date, Decimal]], daily_position_count: Sequence[tuple[date, int]]) -> str:
+    rows = {
+        "daily_equity": [[d.isoformat(), str(e)] for d, e in daily_equity],
+        "daily_position_count": [[d.isoformat(), c] for d, c in daily_position_count],
+    }
+    return _sha256_of_json(rows)
+
+
+def _master_calendar_hash(master_dates: Sequence[date]) -> str:
+    return _sha256_of_json([d.isoformat() for d in master_dates])
+
+
 # ---------------------------------------------------------------------------
 # Empirical execution: run all three arms across both cost cases, load the
 # ORB-baseline monthly R-series for correlation, and assemble the full
@@ -200,9 +244,18 @@ ORB_PERIODS = ("P_MINUS_2", "P_MINUS_1", "P0", "P1", "P2", "P3")
 def load_orb_monthly_r_series() -> list[tuple[date, Decimal]]:
     """Pooled `WAITED_FIRST_VALID_0950`/`BE_AFTER_050R` closed-trade R
     multiples from the existing, already-merged M43 checkpoints
-    (untouched, read-only), bucketed by calendar month. Never re-runs or
-    modifies the ORB baseline -- purely a read of its own already-
-    validated results, for correlation purposes only."""
+    (untouched, read-only), bucketed by calendar month and then
+    zero-filled across the COMPLETE `[EVALUATION_START, EVALUATION_END]`
+    month grid via `fill_missing_months_with_zero` -- the ORB lane is
+    sparse (most months have zero closed trades), and leaving those
+    months absent would silently drop them from any later
+    `align_monthly_series` inner join against a densely-populated ETF
+    arm series, distorting the resulting correlation. R is a fixed
+    per-trade risk normalization, not a dollar figure; a constant
+    scaling factor does not change Pearson correlation, so this series
+    is correlated in R terms directly, not converted to dollars. Never
+    re-runs or modifies the ORB baseline -- purely a read of its own
+    already-validated results, for correlation purposes only."""
     import pickle
 
     monthly: dict[tuple[int, int], Decimal] = {}
@@ -219,7 +272,8 @@ def load_orb_monthly_r_series() -> list[tuple[date, Decimal]]:
             session_date = date.fromisoformat(row.decision["session_date"])
             key = (session_date.year, session_date.month)
             monthly[key] = monthly.get(key, Decimal(0)) + Decimal(str(row.outcome["r_multiple"]))
-    return [(date(y, m, 1), r) for (y, m), r in sorted(monthly.items())]
+    sparse = [(date(y, m, 1), r) for (y, m), r in sorted(monthly.items())]
+    return fill_missing_months_with_zero(sparse, start=EVALUATION_START, end=EVALUATION_END)
 
 
 def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Sequence[date]) -> dict[str, Any]:
@@ -254,17 +308,31 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
         base_sim = raw_sim[arm][BASE_COST_BPS]
         stress_sim = raw_sim[arm][STRESS_COST_BPS]
 
+        # Hypothetical-liquidation marks at the TRUE fixed evaluation
+        # endpoint only -- never for an interim segment boundary.
+        end_price_by_symbol = {s: series_by_symbol[s].closes[-1] for s in UNIVERSE_BY_ARM[arm]}
+        base_end_marks = evaluation_end_mark_transactions(
+            open_positions_at_end=base_sim.open_positions_at_end, end_date=EVALUATION_END,
+            end_price_by_symbol=end_price_by_symbol, cost_bps=BASE_COST_BPS, arm=arm,
+        )
+        stress_end_marks = evaluation_end_mark_transactions(
+            open_positions_at_end=stress_sim.open_positions_at_end, end_date=EVALUATION_END,
+            end_price_by_symbol=end_price_by_symbol, cost_bps=STRESS_COST_BPS, arm=arm,
+        )
+
         base_metrics = compute_arm_metrics(
             arm=arm, closed_trades=base_sim.closed_trades, daily_equity=base_sim.daily_equity,
             starting_capital=base_sim.starting_capital, total_cost_paid=base_sim.total_cost_paid,
             evaluation_start=EVALUATION_START, evaluation_end=EVALUATION_END,
-            open_positions_at_end=base_sim.open_positions_at_end,
+            open_positions_at_end=base_sim.open_positions_at_end, transactions=base_sim.transactions,
+            end_mark_transactions=base_end_marks, daily_position_count=base_sim.daily_position_count,
         )
         stress_metrics = compute_arm_metrics(
             arm=arm, closed_trades=stress_sim.closed_trades, daily_equity=stress_sim.daily_equity,
             starting_capital=stress_sim.starting_capital, total_cost_paid=stress_sim.total_cost_paid,
             evaluation_start=EVALUATION_START, evaluation_end=EVALUATION_END,
-            open_positions_at_end=stress_sim.open_positions_at_end,
+            open_positions_at_end=stress_sim.open_positions_at_end, transactions=stress_sim.transactions,
+            end_mark_transactions=stress_end_marks, daily_position_count=stress_sim.daily_position_count,
         )
 
         segment_metrics = {}
@@ -272,11 +340,17 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
             seg_dates = [d for d in master_dates if segment_label(d) == seg and EVALUATION_START <= d <= EVALUATION_END]
             if not seg_dates:
                 continue
+            # Only the segment whose own end IS the true evaluation end
+            # (2026_YTD) gets the hypothetical endpoint mark; earlier
+            # segment boundaries are interim reporting cuts, not real or
+            # hypothetical liquidation events.
+            seg_end_marks = base_end_marks if seg_dates[-1] == EVALUATION_END else ()
             segment_metrics[seg] = compute_arm_metrics(
                 arm=arm, closed_trades=base_sim.closed_trades, daily_equity=base_sim.daily_equity,
                 starting_capital=base_sim.starting_capital, total_cost_paid=base_sim.total_cost_paid,
                 evaluation_start=seg_dates[0], evaluation_end=seg_dates[-1],
-                open_positions_at_end=base_sim.open_positions_at_end,
+                open_positions_at_end=base_sim.open_positions_at_end, transactions=base_sim.transactions,
+                end_mark_transactions=seg_end_marks, daily_position_count=base_sim.daily_position_count,
             )
 
         arm_monthly_pct_pairs = base_metrics["monthly_return_pct_series"]
@@ -296,10 +370,10 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
 
         best_share = base_metrics["concentration"]["best_contribution_share"]
         classification = classify_capital_target_arm(
-            average_monthly_dollars_base=Decimal(str(base_metrics["mean_monthly_dollar_pnl"] or 0)),
-            segment_net_returns={seg: v["net_pnl"] for seg, v in segment_metrics.items()},
+            average_monthly_dollars_base=Decimal(str(base_metrics["mean_monthly_dollar_pnl_fixed_30k"] or 0)),
+            segment_net_returns={seg: v["net_pnl_marked"] for seg, v in segment_metrics.items()},
             max_drawdown_pct=base_metrics["max_drawdown_pct"],
-            pooled_net_base=base_metrics["net_pnl"], pooled_net_stress=stress_metrics["net_pnl"],
+            pooled_net_base=base_metrics["net_pnl_marked"], pooled_net_stress=stress_metrics["net_pnl_marked"],
             mean_monthly_return_pct=base_metrics["mean_monthly_return_pct"],
             profitable_month_pct=base_metrics["profitable_month_pct"],
             correlation_to_orb=correlation_to_orb, best_single_symbol_positive_share=best_share,
@@ -326,10 +400,22 @@ def run_full_study(series_by_symbol: Mapping[str, DailySeries], master_dates: Se
 
     spy_buy_and_hold = compute_spy_buy_and_hold(series_by_symbol["SPY"], master_dates)
 
+    ledger_hashes: dict[str, Any] = {}
+    for arm in ARMS:
+        for cost_label, cost_bps in (("base_5bps", BASE_COST_BPS), ("stress_10bps", STRESS_COST_BPS)):
+            sim = raw_sim[arm][cost_bps]
+            ledger_hashes[f"{arm}__{cost_label}"] = {
+                "transaction_ledger_sha256": _transaction_ledger_hash(sim.transactions),
+                "position_equity_ledger_sha256": _position_equity_ledger_hash(sim.daily_equity, sim.daily_position_count),
+                "transaction_count": len(sim.transactions),
+            }
+
     results["arms"] = per_arm_output
     results["cross_arm_correlation"] = cross_arm_correlation
     results["spy_buy_and_hold_benchmark"] = spy_buy_and_hold
     results["orb_monthly_r_series"] = [(d.isoformat(), str(r)) for d, r in orb_monthly]
+    results["ledger_hashes"] = ledger_hashes
+    results["master_calendar_sha256"] = _master_calendar_hash(master_dates)
     return results
 
 
@@ -358,6 +444,42 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+COMMITTED_HASHES_PATH = ROOT / "docs" / "research" / "ORB_CAPITAL_TARGET_STRATEGY_FAMILY_ARTIFACT_HASHES.json"
+
+
+def _git_head_sha() -> str | None:
+    import subprocess
+
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, timeout=10, check=True)
+        return out.stdout.strip()
+    except Exception:
+        return None
+
+
+def build_committed_hashes_document(*, manifest: Mapping[str, Any], results: Mapping[str, Any], results_path: Path, feed: str) -> dict[str, Any]:
+    """The small, COMMITTED (never-gitignored), non-vendor-data record
+    Issue #348 requires: exact feed/timeframe/adjustment parameters, the
+    per-symbol normalized-series hashes, the master-calendar hash, every
+    arm/cost-case transaction- and position/equity-ledger hash, the
+    `study_results.json` file hash, the exact evaluation window, and the
+    generating implementation's git HEAD SHA. Contains no raw OHLCV, no
+    full vendor response, and no secret -- only SHA-256 digests and
+    already-public parameters/counts."""
+    return {
+        "feed": feed, "timeframe": "1Day", "adjustment": "all",
+        "evaluation_start": EVALUATION_START.isoformat(), "evaluation_end": EVALUATION_END.isoformat(),
+        "warmup_start": WARMUP_START.isoformat(),
+        "master_calendar_session_count": manifest["master_calendar_session_count"],
+        "master_calendar_sha256": results["master_calendar_sha256"],
+        "per_symbol_series_sha256": {symbol: info["sha256"] for symbol, info in manifest["per_symbol"].items()},
+        "ledger_hashes": results["ledger_hashes"],
+        "study_results_json_sha256": hashlib.sha256(results_path.read_bytes()).hexdigest(),
+        "generation_git_head_sha": _git_head_sha(),
+        "retrieval_timestamp_utc": manifest["retrieval_timestamp_utc"],
+    }
+
+
 async def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fetch-missing", action="store_true", default=False)
@@ -365,7 +487,8 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-only", action="store_true", default=False, help="Fetch/verify data and write the provenance manifest, but do not run the study.")
     args = parser.parse_args(argv)
 
-    series_by_symbol = await fetch_all_symbols(cache_dir=DEFAULT_CACHE_DIR, fetch_missing=args.fetch_missing, feed=args.feed)
+    cache_dir = cache_dir_for_feed(args.feed)
+    series_by_symbol = await fetch_all_symbols(cache_dir=cache_dir, fetch_missing=args.fetch_missing, feed=args.feed)
     master_dates = build_master_calendar(series_by_symbol["SPY"])
 
     require_full_alignment({s: series_by_symbol[s] for s in ALL_SYMBOLS}, master_dates=master_dates)
@@ -390,8 +513,13 @@ async def main(argv: list[str] | None = None) -> int:
     print(f"Study results written to {results_path}")
     for arm in ARMS:
         verdict = results["arms"][arm]["classification"]["verdict"]
-        base_mean = results["arms"][arm]["base_cost"]["mean_monthly_dollar_pnl"]
+        base_mean = results["arms"][arm]["base_cost"]["mean_monthly_dollar_pnl_fixed_30k"]
         print(f"[{arm}] verdict={verdict} mean_monthly_dollar_pnl_base={base_mean}")
+
+    committed_hashes = build_committed_hashes_document(manifest=manifest, results=results, results_path=results_path, feed=args.feed)
+    COMMITTED_HASHES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    COMMITTED_HASHES_PATH.write_text(json.dumps(committed_hashes, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"Committed artifact-hashes document written to {COMMITTED_HASHES_PATH}")
     print("Empirical study stage complete.")
     return 0
 
