@@ -194,6 +194,13 @@ class ExitArmOutcome:
     maximum_adverse_excursion: Decimal | None
     bars_evaluated_after_entry: int
     protection_activated: bool
+    # Additive fields (M47): entry/exit clock time, needed to determine
+    # second-trade scan eligibility (src/orb_sequential_second_trade_research.py).
+    # Defaulted so every existing positional/keyword construction elsewhere
+    # in this module and in M43-M46's callers is unaffected -- neither
+    # value changes any existing field, comparison, or classification.
+    entry_timestamp: datetime | None = None
+    exit_timestamp: datetime | None = None
 
 
 def _outcome_from_reference(arm: str, reference: ShadowExecutionResult) -> ExitArmOutcome:
@@ -208,6 +215,7 @@ def _outcome_from_reference(arm: str, reference: ShadowExecutionResult) -> ExitA
         realized_pnl=reference.realized_pnl, maximum_favorable_excursion=reference.maximum_favorable_excursion,
         maximum_adverse_excursion=reference.maximum_adverse_excursion,
         bars_evaluated_after_entry=reference.bars_evaluated_after_entry, protection_activated=protection_activated,
+        entry_timestamp=reference.entry_timestamp, exit_timestamp=reference.exit_timestamp,
     )
 
 
@@ -236,31 +244,32 @@ def _replay_post_entry(
     mae = Decimal("0")
     tail = eligible[entry_index + 1:]
 
-    def _result(*, state: ShadowExecutionState, exit_price: Decimal | None, exit_reason: str, realized_pnl: Decimal | None, bars_after: int) -> ExitArmOutcome:
+    def _result(*, state: ShadowExecutionState, exit_price: Decimal | None, exit_reason: str, realized_pnl: Decimal | None, bars_after: int, exit_ts: datetime | None) -> ExitArmOutcome:
         return ExitArmOutcome(
             arm=arm, state=state, entry_price=entry_price, initial_stop_price=initial_stop,
             final_stop_price=current_stop, target_price=target, exit_price=exit_price, exit_reason=exit_reason,
             realized_pnl=realized_pnl, maximum_favorable_excursion=mfe, maximum_adverse_excursion=mae,
             bars_evaluated_after_entry=bars_after, protection_activated=current_stop != initial_stop,
+            entry_timestamp=reference.entry_timestamp, exit_timestamp=exit_ts,
         )
 
     for bars_after, later in enumerate(tail, start=1):
         mfe = max(mfe, later.high - entry_price)
         mae = min(mae, later.low - entry_price)
         if later.low <= current_stop and target is not None and later.high >= target:
-            return _result(state=ShadowExecutionState.AMBIGUOUS, exit_price=None, exit_reason="", realized_pnl=None, bars_after=bars_after)
+            return _result(state=ShadowExecutionState.AMBIGUOUS, exit_price=None, exit_reason="", realized_pnl=None, bars_after=bars_after, exit_ts=None)
         if later.low <= current_stop:
             pnl = current_stop - entry_price
-            return _result(state=ShadowExecutionState.STOPPED, exit_price=current_stop, exit_reason="protective_stop", realized_pnl=pnl, bars_after=bars_after)
+            return _result(state=ShadowExecutionState.STOPPED, exit_price=current_stop, exit_reason="protective_stop", realized_pnl=pnl, bars_after=bars_after, exit_ts=later.event_timestamp)
         if target is not None and later.high >= target:
             pnl = target - entry_price
-            return _result(state=ShadowExecutionState.TARGET_HIT, exit_price=target, exit_reason="profit_target", realized_pnl=pnl, bars_after=bars_after)
+            return _result(state=ShadowExecutionState.TARGET_HIT, exit_price=target, exit_reason="profit_target", realized_pnl=pnl, bars_after=bars_after, exit_ts=later.event_timestamp)
         if later.event_timestamp.astimezone(EASTERN).time() >= _TIME_EXIT_ET:
             pnl = later.close - entry_price
-            return _result(state=ShadowExecutionState.TIME_EXIT, exit_price=later.close, exit_reason="time_exit", realized_pnl=pnl, bars_after=bars_after)
+            return _result(state=ShadowExecutionState.TIME_EXIT, exit_price=later.close, exit_reason="time_exit", realized_pnl=pnl, bars_after=bars_after, exit_ts=later.event_timestamp)
         current_stop = policy(entry_price=entry_price, risk=risk, current_stop=current_stop, mfe=mfe, completed_bar_low=later.low)
 
-    return _result(state=ShadowExecutionState.FILLED_OPEN, exit_price=None, exit_reason="", realized_pnl=None, bars_after=len(tail))
+    return _result(state=ShadowExecutionState.FILLED_OPEN, exit_price=None, exit_reason="", realized_pnl=None, bars_after=len(tail), exit_ts=None)
 
 
 def simulate_exit_arm(
@@ -321,6 +330,8 @@ def _outcome_dict(outcome: ExitArmOutcome) -> dict[str, Any]:
         "mfe_r": mfe_r, "mae_r": mae_r,
         "protection_activated": outcome.protection_activated,
         "bars_evaluated_after_entry": outcome.bars_evaluated_after_entry,
+        "entry_timestamp": outcome.entry_timestamp.isoformat() if outcome.entry_timestamp is not None else None,
+        "exit_timestamp": outcome.exit_timestamp.isoformat() if outcome.exit_timestamp is not None else None,
     }
 
 
@@ -332,6 +343,7 @@ def _no_decision_time_data_outcome() -> dict[str, Any]:
         "is_winner": None, "is_stopped": False, "is_full_stop_loss": False, "initial_risk_r": None,
         "maximum_favorable_excursion": None, "maximum_adverse_excursion": None, "mfe_r": None, "mae_r": None,
         "protection_activated": False, "bars_evaluated_after_entry": 0,
+        "entry_timestamp": None, "exit_timestamp": None,
     }
 
 

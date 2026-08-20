@@ -105,3 +105,8 @@ artifacts/research-later-first-entry-recovery/
 # carried by the committed SHA-256 hashes and provenance manifest, not by
 # committing the underlying vendor/cache data itself.
 artifacts/research-small-midcap-momentum-lane/
+
+# Research tooling: generated study output + per-period simulation
+# checkpoint cache (Issue #346, M47) -- same local-only resumability
+# convention as M43/M45 above.
+artifacts/research-sequential-second-trade/
