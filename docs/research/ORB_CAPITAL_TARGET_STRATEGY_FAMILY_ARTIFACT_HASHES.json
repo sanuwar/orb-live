@@ -3,10 +3,10 @@
   "evaluation_end": "2026-08-13",
   "evaluation_start": "2022-01-03",
   "feed": "sip",
-  "generation_git_head_sha": "36f3a198438f99618ba6f18d38c11231aeac4b8e",
+  "generation_git_head_sha": "f04b68bd46f6b2dc8a6773ebafcddd28b43dfee9",
   "generation_source_file_sha256": {
-    "scripts/research_capital_target_strategy_family.py": "3202326d11292dd59db16d99f38ea7c4b57fafc3ae5465f01b6b27c104926086",
-    "src/orb_capital_target_strategy_family_research.py": "09f9aa97d5b0e714bc976a991e83f8a810e7fa4124ded48106497e71396be542"
+    "scripts/research_capital_target_strategy_family.py": "437328fc2f8b0ea1900ba8ee0e3d388dfc7bf38b208ef0097aa2f3ce7db62127",
+    "src/orb_capital_target_strategy_family_research.py": "2653c75f86a12feb6801ca01e71109da204ed8171f5825fcd08667939bd7dba7"
   },
   "generation_working_tree_clean": true,
   "ledger_hashes": {
@@ -89,8 +89,8 @@
     "XLV": "0368da60e34f68cad8b61ad4b16aebecf755e2b44e974eb2ba799ac9d7f94ef8",
     "XLY": "e8c8ad4427fbfe2458dbf62309db2d053d877362f78a61c0c6d7c6b2556a1869"
   },
-  "retrieval_timestamp_utc": "2026-08-20T17:04:09.866663+00:00",
-  "study_results_json_sha256": "5b3e58961dd996437c3b7b4e2859de4072f7dc6025dd73490599006f9c232cab",
+  "retrieval_timestamp_utc": "2026-08-20T18:41:04.654652+00:00",
+  "study_results_json_sha256": "3d6f79b14919249242deaf8de79ea354b92ef51014a6f7a8a4ab4c983fd84dc8",
   "timeframe": "1Day",
   "warmup_start": "2021-01-01"
 }
