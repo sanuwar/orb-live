@@ -226,6 +226,24 @@ def test_build_committed_hashes_document_includes_source_hashes_and_clean_tree_f
     assert doc["generation_working_tree_clean"] in (True, False, None)
 
 
+def test_git_working_tree_clean_check_is_scoped_to_source_files_not_whole_repo():
+    # The clean-tree check must be scoped to exactly the two source
+    # files being hashed. A results/report/hashes-document file that
+    # legitimately differs from the last commit (the expected, intended
+    # effect of every rerun -- this very call overwrites
+    # study_results.json and the hashes document before the tree gets
+    # re-checked) must never cause a false "dirty" reading here, or the
+    # flag would read False on every honest rerun and become useless.
+    import subprocess
+
+    source_status = subprocess.run(
+        ["git", "status", "--porcelain", "--"] + [str(p.relative_to(cli.ROOT).as_posix()) for p in cli.SOURCE_FILES_FOR_HASHING],
+        cwd=cli.ROOT, capture_output=True, text=True, timeout=10, check=True,
+    )
+    expected = source_status.stdout.strip() == ""
+    assert cli._git_working_tree_clean() == expected
+
+
 def test_full_study_arm_a_risk_views_never_fabricate_a_fixed_notional_figure():
     # Finding 14: ARM_A's $150/$300 risk views must either report the
     # primary fixed-$30K marked view too, or explicitly explain what

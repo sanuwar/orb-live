@@ -542,24 +542,35 @@ def _git_head_sha() -> str | None:
         return None
 
 
-def _git_working_tree_clean() -> bool | None:
-    """`True` only if `git status --porcelain` is empty -- i.e. HEAD
-    genuinely IS the exact code that generated this run, with no
-    uncommitted edit sitting on top of it. `None` if git itself could
-    not be queried (never silently reported as clean in that case)."""
-    import subprocess
-
-    try:
-        out = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True, timeout=10, check=True)
-        return out.stdout.strip() == ""
-    except Exception:
-        return None
-
-
 SOURCE_FILES_FOR_HASHING = (
     ROOT / "src" / "orb_capital_target_strategy_family_research.py",
     ROOT / "scripts" / "research_capital_target_strategy_family.py",
 )
+
+
+def _git_working_tree_clean() -> bool | None:
+    """`True` only if the exact SOURCE FILES being hashed
+    (`SOURCE_FILES_FOR_HASHING`) are byte-identical to `HEAD` -- i.e.
+    `generation_git_head_sha` genuinely identifies the implementation
+    that generated this run, with no uncommitted source edit sitting on
+    top of it. Deliberately scoped to only those two files, NOT the
+    whole working tree: `study_results.json` and this very hashes
+    document are always rewritten by the current run before this is
+    computed, so they always differ from whatever was last committed --
+    that is the expected, intended effect of a rerun, not evidence of an
+    unclean implementation. `None` if git itself could not be queried
+    (never silently reported as clean in that case)."""
+    import subprocess
+
+    try:
+        rel_paths = [str(p.relative_to(ROOT).as_posix()) for p in SOURCE_FILES_FOR_HASHING]
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--"] + rel_paths,
+            cwd=ROOT, capture_output=True, text=True, timeout=10, check=True,
+        )
+        return out.stdout.strip() == ""
+    except Exception:
+        return None
 
 
 def _source_file_hashes() -> dict[str, str]:
