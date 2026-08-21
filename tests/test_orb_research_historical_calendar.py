@@ -408,7 +408,7 @@ def test_dates_inside_production_coverage_delegate_unchanged():
 
 def test_date_before_research_coverage_floor_raises():
     with pytest.raises(ResearchCalendarError):
-        research_regular_session_bounds(date(2020, 12, 31))
+        research_regular_session_bounds(date(2017, 12, 31))
 
 
 def test_datetime_input_raises_instead_of_silently_truncating():
@@ -416,8 +416,8 @@ def test_datetime_input_raises_instead_of_silently_truncating():
         research_regular_session_bounds(datetime(2025, 4, 3, 9, 30))  # type: ignore[arg-type]
 
 
-def test_research_calendar_first_supported_date_is_2021_01_01():
-    assert RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE == date(2021, 1, 1)
+def test_research_calendar_first_supported_date_is_2018_01_01():
+    assert RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE == date(2018, 1, 1)
 
 
 def test_trading_sessions_before_returns_oldest_first_and_excludes_reference_day():
@@ -438,12 +438,12 @@ def test_trading_sessions_before_252_ending_before_discovery_period_has_no_overl
     assert not (set(oos_sessions) & discovery_sessions)
 
 
-def test_trading_sessions_before_beyond_2021_coverage_fails_closed():
-    # 1320 is the first count that walks back past the 2021-01-01 floor
-    # from 2026-04-07 (verified directly against this module); 1400 is
+def test_trading_sessions_before_beyond_2018_coverage_fails_closed():
+    # 2078 is the first count that walks back past the 2018-01-01 floor
+    # from 2026-04-07 (verified directly against this module); 2100 is
     # comfortably beyond that.
     with pytest.raises(ResearchCalendarError):
-        research_trading_sessions_before(date(2026, 4, 7), count=1400)
+        research_trading_sessions_before(date(2026, 4, 7), count=2100)
 
 
 def test_third_period_252_ending_before_oos_period_has_no_overlap():
@@ -487,3 +487,183 @@ def test_fourth_period_p0_252_ending_before_third_period_has_no_overlap():
 
     discovery_sessions = set(trading_sessions_before(date(2026, 8, 14), count=90))
     assert not (set(p0_sessions) & discovery_sessions)
+
+
+# ---------------------------------------------------------------------------
+# 2018/2019/2020 (M50, Issue #352): the floor was extended from 2021-01-01
+# to 2018-01-01 for the untouched-portfolio-validation study's own frozen
+# outcome window (2019-01-02..2020-12-31) and warmup target (2018-01-02).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("day", [
+    date(2018, 1, 1), date(2018, 1, 15), date(2018, 2, 19), date(2018, 3, 30),
+    date(2018, 5, 28), date(2018, 7, 4), date(2018, 9, 3), date(2018, 11, 22), date(2018, 12, 25),
+])
+def test_2018_full_holidays_are_closed(day):
+    assert research_regular_session_bounds(day) is None
+
+
+def test_2018_early_closes_are_correct():
+    from src.orb_research_historical_calendar import RESEARCH_EARLY_CLOSE_DAYS_2018
+
+    assert set(RESEARCH_EARLY_CLOSE_DAYS_2018) == {date(2018, 7, 3), date(2018, 11, 23), date(2018, 12, 24)}
+    for day in RESEARCH_EARLY_CLOSE_DAYS_2018:
+        assert research_regular_session_bounds(day) == (REGULAR_OPEN, EARLY_REGULAR_CLOSE)
+
+
+def test_2018_has_no_juneteenth():
+    assert research_regular_session_bounds(date(2018, 6, 19)) == (REGULAR_OPEN, REGULAR_CLOSE)
+
+
+def test_ordinary_2018_trading_day_uses_regular_hours():
+    assert research_regular_session_bounds(date(2018, 4, 4)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Wednesday
+
+
+def test_2018_weekend_is_closed():
+    assert research_regular_session_bounds(date(2018, 4, 7)) is None  # Saturday
+
+
+@pytest.mark.parametrize("day", [
+    date(2019, 1, 1), date(2019, 1, 21), date(2019, 2, 18), date(2019, 4, 19),
+    date(2019, 5, 27), date(2019, 7, 4), date(2019, 9, 2), date(2019, 11, 28), date(2019, 12, 25),
+])
+def test_2019_full_holidays_are_closed(day):
+    assert research_regular_session_bounds(day) is None
+
+
+def test_2019_early_closes_are_correct():
+    from src.orb_research_historical_calendar import RESEARCH_EARLY_CLOSE_DAYS_2019
+
+    assert set(RESEARCH_EARLY_CLOSE_DAYS_2019) == {date(2019, 7, 3), date(2019, 11, 29), date(2019, 12, 24)}
+    for day in RESEARCH_EARLY_CLOSE_DAYS_2019:
+        assert research_regular_session_bounds(day) == (REGULAR_OPEN, EARLY_REGULAR_CLOSE)
+
+
+def test_2019_has_no_juneteenth():
+    assert research_regular_session_bounds(date(2019, 6, 19)) == (REGULAR_OPEN, REGULAR_CLOSE)
+
+
+def test_ordinary_2019_trading_day_uses_regular_hours():
+    assert research_regular_session_bounds(date(2019, 3, 4)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Monday
+
+
+def test_2019_weekend_is_closed():
+    assert research_regular_session_bounds(date(2019, 3, 3)) is None  # Sunday
+
+
+@pytest.mark.parametrize("day", [
+    date(2020, 1, 1), date(2020, 1, 20), date(2020, 2, 17), date(2020, 4, 10),
+    date(2020, 5, 25), date(2020, 7, 3), date(2020, 9, 7), date(2020, 11, 26), date(2020, 12, 25),
+])
+def test_2020_full_holidays_are_closed(day):
+    assert research_regular_session_bounds(day) is None
+
+
+def test_2020_independence_day_observance_is_a_full_holiday_not_an_early_close():
+    # 2020-07-04 fell on a Saturday; NYSE observed it as a FULL closure on
+    # the preceding Friday (2020-07-03), unlike 2018/2019 where July 3 was
+    # merely a half-day. Confirmed directly against the source press
+    # release, not assumed from the general Saturday-holiday rule.
+    from src.orb_research_historical_calendar import RESEARCH_EARLY_CLOSE_DAYS_2020, RESEARCH_FULL_HOLIDAYS_2020
+
+    assert date(2020, 7, 3) in RESEARCH_FULL_HOLIDAYS_2020
+    assert date(2020, 7, 3) not in RESEARCH_EARLY_CLOSE_DAYS_2020
+    assert research_regular_session_bounds(date(2020, 7, 3)) is None
+
+
+def test_2020_early_closes_are_correct():
+    from src.orb_research_historical_calendar import RESEARCH_EARLY_CLOSE_DAYS_2020
+
+    assert set(RESEARCH_EARLY_CLOSE_DAYS_2020) == {date(2020, 11, 27), date(2020, 12, 24)}
+    for day in RESEARCH_EARLY_CLOSE_DAYS_2020:
+        assert research_regular_session_bounds(day) == (REGULAR_OPEN, EARLY_REGULAR_CLOSE)
+
+
+def test_2020_has_no_juneteenth():
+    assert research_regular_session_bounds(date(2020, 6, 19)) == (REGULAR_OPEN, REGULAR_CLOSE)
+
+
+def test_ordinary_2020_trading_day_uses_regular_hours():
+    assert research_regular_session_bounds(date(2020, 3, 2)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Monday
+
+
+def test_2020_weekend_is_closed():
+    assert research_regular_session_bounds(date(2020, 3, 1)) is None  # Sunday
+
+
+def test_year_end_boundary_between_2018_and_2019_tables_is_seamless():
+    assert research_regular_session_bounds(date(2018, 12, 31)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Mon, ordinary
+    assert research_regular_session_bounds(date(2019, 1, 1)) is None  # New Year's Day (Tue)
+    assert research_regular_session_bounds(date(2019, 1, 2)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Wed, ordinary -- M50's own 2019 effective/outcome-start date
+
+
+def test_year_end_boundary_between_2019_and_2020_tables_is_seamless():
+    assert research_regular_session_bounds(date(2019, 12, 31)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Tue, ordinary
+    assert research_regular_session_bounds(date(2020, 1, 1)) is None  # New Year's Day (Wed)
+    assert research_regular_session_bounds(date(2020, 1, 2)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Thu, ordinary -- M50's own 2020 effective-date boundary
+
+
+def test_year_end_boundary_between_2020_and_2021_tables_is_seamless():
+    assert research_regular_session_bounds(date(2020, 12, 31)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Thu, ordinary
+    assert research_regular_session_bounds(date(2021, 1, 1)) is None  # New Year's Day (Fri) -- an ordinary weekday holiday, not the Saturday-shift special case
+    assert research_regular_session_bounds(date(2021, 1, 4)) == (REGULAR_OPEN, REGULAR_CLOSE)  # Mon, ordinary
+
+
+def test_2018_2019_2020_holiday_tables_are_pairwise_disjoint_from_each_other_and_from_2021_2025():
+    from src.orb_research_historical_calendar import (
+        RESEARCH_FULL_HOLIDAYS_2018,
+        RESEARCH_FULL_HOLIDAYS_2019,
+        RESEARCH_FULL_HOLIDAYS_2020,
+        RESEARCH_FULL_HOLIDAYS_2021,
+        RESEARCH_FULL_HOLIDAYS_2022,
+        RESEARCH_FULL_HOLIDAYS_2023,
+        RESEARCH_FULL_HOLIDAYS_2024,
+        RESEARCH_FULL_HOLIDAYS_2025,
+    )
+
+    all_tables = [
+        RESEARCH_FULL_HOLIDAYS_2018, RESEARCH_FULL_HOLIDAYS_2019, RESEARCH_FULL_HOLIDAYS_2020,
+        RESEARCH_FULL_HOLIDAYS_2021, RESEARCH_FULL_HOLIDAYS_2022, RESEARCH_FULL_HOLIDAYS_2023,
+        RESEARCH_FULL_HOLIDAYS_2024, RESEARCH_FULL_HOLIDAYS_2025,
+    ]
+    for i, table_a in enumerate(all_tables):
+        for table_b in all_tables[i + 1:]:
+            assert not (table_a & table_b)
+    assert sum(len(t) for t in all_tables) == len(set().union(*all_tables))
+
+
+def test_2018_holidays_have_exactly_nine_full_days_and_no_restated_new_years_day():
+    # 2018-01-01 (Mon) is New Year's Day observed on its own date -- no
+    # Saturday/Sunday shift needed, so unlike 2023/2028-style years there
+    # is exactly one New Year's entry, not zero or a shifted one.
+    from src.orb_research_historical_calendar import RESEARCH_FULL_HOLIDAYS_2018
+
+    assert len(RESEARCH_FULL_HOLIDAYS_2018) == 9
+    assert date(2018, 1, 1) in RESEARCH_FULL_HOLIDAYS_2018
+
+
+def test_rvol_warmup_lookback_before_2019_outcome_start_reaches_into_december_2018():
+    # M50's ORB RVOL warmup (20 sessions before 2019-01-02) must resolve
+    # entirely within this module's now-extended coverage.
+    sessions = research_trading_sessions_before(date(2019, 1, 2), count=20)
+    assert len(sessions) == 20
+    assert sessions[-1] < date(2019, 1, 2)
+    assert sessions[0] >= date(2018, 1, 1)
+
+
+def test_full_m50_outcome_window_2019_2020_has_no_calendar_gap():
+    # Every calendar day in the M50 outcome window resolves (either to a
+    # session or a confirmed non-session) without raising -- the coverage
+    # floor genuinely spans the whole window, not just its two boundaries.
+    from datetime import timedelta
+
+    day = date(2019, 1, 2)
+    end = date(2020, 12, 31)
+    session_count = 0
+    while day <= end:
+        result = research_regular_session_bounds(day)  # raises if out of coverage
+        if result is not None:
+            session_count += 1
+        day += timedelta(days=1)
+    assert session_count > 480  # roughly 252/year * 2 years, minus holidays
