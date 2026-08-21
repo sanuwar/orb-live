@@ -125,3 +125,12 @@ artifacts/research-capital-target-strategy-family/
 # convention as M48 above -- reproducibility is carried by the committed
 # SHA-256 hashes document and the results tables in the committed report.
 artifacts/research-practical-core-satellite-portfolio/
+
+# Research tooling: M50 untouched 2019-2020 validation Stage-0 gate output
+# (Issue #352). Reuses the M43 ORB checkpoint/minute-bar cache and the M48
+# SIP daily-bar cache above unchanged; this directory holds only this
+# milestone's own generated Stage-0 result JSON. Reproducibility is
+# carried by the committed SHA-256 hashes document and the committed
+# methodology/findings report, not by committing the generated JSON
+# itself.
+artifacts/research-untouched-2019-2020-validation/

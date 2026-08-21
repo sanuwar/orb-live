@@ -79,13 +79,34 @@ to (see the 2022 paragraph above). 2021-12-31 is therefore an ordinary
 trading session in this module, matching NYSE's actual historical
 calendar.
 
+2018, 2019, and 2020 were added (M50, Issue #352, untouched 2019-2020
+portfolio validation) for a different reason than every year above: not a
+252-session lookback reaching backward from a newer study, but the study's
+own frozen outcome window (2019-01-02 through 2020-12-31) and its
+daily-indicator warmup target (2018-01-02) landing entirely before this
+module's previous 2021-01-01 floor. Source: the official NYSE Group press
+release "NYSE Group Announces 2018, 2019 and 2020 Holiday and Early
+Closings Calendar" (Intercontinental Exchange investor-relations site),
+cross-checked against the fixed-position US market-holiday rules (Monday
+holidays computed by weekday, Good Friday by the Easter date) already
+used to sanity-check every other year in this file. Same sourcing
+standard as every year above -- no fabricated dates. 2018-2020 all
+predate NYSE's first Juneteenth observance (2022), so none of the three
+years has a Juneteenth entry. 2020 is the one year among the three where
+Independence Day's Saturday observance shifts to a FULL holiday on the
+preceding Friday (July 3) rather than a half-day -- confirmed directly
+against the source press release, not inferred from the general Saturday-
+holiday rule, since New Year's Day is a documented exception to that rule
+and Independence Day's own treatment is therefore verified explicitly
+rather than assumed to follow the general pattern.
+
 For any date already inside `src.exchange_calendar`'s own coverage window,
 this module delegates to the production `regular_session_bounds` unchanged
 -- there is exactly one source of truth for any given date, never two
 tables that could silently disagree. Coverage is finite and explicitly
-stated here too: a date outside [2021-01-01, exchange_calendar's own
+stated here too: a date outside [2018-01-01, exchange_calendar's own
 `last_supported_date`] raises `ResearchCalendarError` rather than guessing,
-so a mistaken request (e.g. for 2020 data) fails loudly instead of
+so a mistaken request (e.g. for 2017 data) fails loudly instead of
 returning a fabricated answer.
 """
 from __future__ import annotations
@@ -111,10 +132,92 @@ class ResearchCalendarError(RuntimeError):
 
 #: This module's own lower bound. Below this, no NYSE holiday/early-close
 #: data has been restated here, so this module refuses rather than guess.
-RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE = date(2021, 1, 1)
+RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE = date(2018, 1, 1)
 
-#: The last date this module answers from its own 2021/2022/2023/2024/2025
-#: tables. From `src.exchange_calendar`'s own `first_supported_date`
+#: Source: NYSE Group's official "2018, 2019 and 2020 Holiday and Early
+#: Closings Calendar" press release. Full-day closures. 2018 predates
+#: NYSE's first Juneteenth observance (2022), so there is no Juneteenth
+#: entry this year (same as 2021's own table).
+RESEARCH_FULL_HOLIDAYS_2018: frozenset[date] = frozenset({
+    date(2018, 1, 1),   # New Year's Day (Mon)
+    date(2018, 1, 15),  # Martin Luther King Jr. Day
+    date(2018, 2, 19),  # Washington's Birthday
+    date(2018, 3, 30),  # Good Friday
+    date(2018, 5, 28),  # Memorial Day
+    date(2018, 7, 4),   # Independence Day (Wed)
+    date(2018, 9, 3),   # Labor Day
+    date(2018, 11, 22), # Thanksgiving
+    date(2018, 12, 25), # Christmas (Tue)
+})
+
+#: Source: NYSE Group's official 2018 early-close (half-day, 13:00 ET)
+#: schedule. July 4 fell midweek (Wednesday), so July 3 is a half-day, not
+#: a full closure -- unlike 2020 below.
+RESEARCH_EARLY_CLOSE_DAYS_2018: Mapping[date, time] = {
+    date(2018, 7, 3): EARLY_REGULAR_CLOSE,   # day before Independence Day (Tue)
+    date(2018, 11, 23): EARLY_REGULAR_CLOSE, # day after Thanksgiving (Fri)
+    date(2018, 12, 24): EARLY_REGULAR_CLOSE, # Christmas Eve (Mon)
+}
+
+#: Source: NYSE Group's official "2018, 2019 and 2020 Holiday and Early
+#: Closings Calendar" press release. Full-day closures. 2019 predates
+#: NYSE's first Juneteenth observance (2022), so there is no Juneteenth
+#: entry this year.
+RESEARCH_FULL_HOLIDAYS_2019: frozenset[date] = frozenset({
+    date(2019, 1, 1),   # New Year's Day (Tue)
+    date(2019, 1, 21),  # Martin Luther King Jr. Day
+    date(2019, 2, 18),  # Washington's Birthday
+    date(2019, 4, 19),  # Good Friday
+    date(2019, 5, 27),  # Memorial Day
+    date(2019, 7, 4),   # Independence Day (Thu)
+    date(2019, 9, 2),   # Labor Day
+    date(2019, 11, 28), # Thanksgiving
+    date(2019, 12, 25), # Christmas (Wed)
+})
+
+#: Source: NYSE Group's official 2019 early-close (half-day, 13:00 ET)
+#: schedule. July 4 fell midweek (Thursday), so July 3 is a half-day, not
+#: a full closure -- unlike 2020 below.
+RESEARCH_EARLY_CLOSE_DAYS_2019: Mapping[date, time] = {
+    date(2019, 7, 3): EARLY_REGULAR_CLOSE,   # day before Independence Day (Wed)
+    date(2019, 11, 29): EARLY_REGULAR_CLOSE, # day after Thanksgiving (Fri)
+    date(2019, 12, 24): EARLY_REGULAR_CLOSE, # Christmas Eve (Tue)
+}
+
+#: Source: NYSE Group's official "2018, 2019 and 2020 Holiday and Early
+#: Closings Calendar" press release. Full-day closures. 2020 predates
+#: NYSE's first Juneteenth observance (2022), so there is no Juneteenth
+#: entry this year. Independence Day (2020-07-04) fell on a Saturday; per
+#: the source press release, NYSE observed it as a FULL holiday on the
+#: preceding Friday (2020-07-03), not a half-day -- verified directly
+#: against the source rather than assumed from the general Saturday-
+#: holiday rule (which, per the 2022 table's own comment, does NOT apply
+#: uniformly to every holiday -- New Year's Day is the documented
+#: exception, so Independence Day's own treatment is confirmed explicitly
+#: here, not inferred).
+RESEARCH_FULL_HOLIDAYS_2020: frozenset[date] = frozenset({
+    date(2020, 1, 1),   # New Year's Day (Wed)
+    date(2020, 1, 20),  # Martin Luther King Jr. Day
+    date(2020, 2, 17),  # Washington's Birthday
+    date(2020, 4, 10),  # Good Friday
+    date(2020, 5, 25),  # Memorial Day
+    date(2020, 7, 3),   # Independence Day observed (Jul 4 was a Saturday)
+    date(2020, 9, 7),   # Labor Day
+    date(2020, 11, 26), # Thanksgiving
+    date(2020, 12, 25), # Christmas (Fri)
+})
+
+#: Source: NYSE Group's official 2020 early-close (half-day, 13:00 ET)
+#: schedule. No separate July 3 early close this year -- 2020-07-03 is
+#: itself the full Independence Day holiday observance above, not a
+#: half-day.
+RESEARCH_EARLY_CLOSE_DAYS_2020: Mapping[date, time] = {
+    date(2020, 11, 27): EARLY_REGULAR_CLOSE, # day after Thanksgiving (Fri)
+    date(2020, 12, 24): EARLY_REGULAR_CLOSE, # Christmas Eve (Thu)
+}
+
+#: The last date this module answers from its own 2018/2019/2020/2021/
+#: 2022/2023/2024/2025 tables. From `src.exchange_calendar`'s own `first_supported_date`
 #: (2026-01-01) onward, every lookup delegates to the production calendar
 #: instead, so the two tables never overlap and can never disagree.
 _RESEARCH_ONLY_UPPER_BOUND = date(2025, 12, 31)
@@ -245,16 +348,20 @@ RESEARCH_EARLY_CLOSE_DAYS_2025: Mapping[date, time] = {
     date(2025, 12, 24): EARLY_REGULAR_CLOSE, # Christmas Eve (Wed)
 }
 
-#: Combined lookup spanning all five restated years -- built once here so
+#: Combined lookup spanning all eight restated years -- built once here so
 #: `research_regular_session_bounds` has exactly one merged table to
-#: consult instead of per-year branching. The five years' key sets are
+#: consult instead of per-year branching. The eight years' key sets are
 #: disjoint by construction (tested), so a plain union cannot silently
 #: shadow any source table.
 _RESEARCH_FULL_HOLIDAYS: frozenset[date] = (
-    RESEARCH_FULL_HOLIDAYS_2021 | RESEARCH_FULL_HOLIDAYS_2022 | RESEARCH_FULL_HOLIDAYS_2023
+    RESEARCH_FULL_HOLIDAYS_2018 | RESEARCH_FULL_HOLIDAYS_2019 | RESEARCH_FULL_HOLIDAYS_2020
+    | RESEARCH_FULL_HOLIDAYS_2021 | RESEARCH_FULL_HOLIDAYS_2022 | RESEARCH_FULL_HOLIDAYS_2023
     | RESEARCH_FULL_HOLIDAYS_2024 | RESEARCH_FULL_HOLIDAYS_2025
 )
 _RESEARCH_EARLY_CLOSE_DAYS: Mapping[date, time] = {
+    **RESEARCH_EARLY_CLOSE_DAYS_2018,
+    **RESEARCH_EARLY_CLOSE_DAYS_2019,
+    **RESEARCH_EARLY_CLOSE_DAYS_2020,
     **RESEARCH_EARLY_CLOSE_DAYS_2021,
     **RESEARCH_EARLY_CLOSE_DAYS_2022,
     **RESEARCH_EARLY_CLOSE_DAYS_2023,
@@ -266,14 +373,14 @@ _RESEARCH_EARLY_CLOSE_DAYS: Mapping[date, time] = {
 def research_regular_session_bounds(day: date) -> tuple[time, time] | None:
     """Open/close bounds for `day`, or `None` if the market does not open,
     extending `src.exchange_calendar.regular_session_bounds` backward to
-    2021-01-01 for research use only.
+    2018-01-01 for research use only.
 
     Delegates unchanged to the production function for any date already in
-    its own coverage; answers from the merged 2021/2022/2023/2024/2025
-    `RESEARCH_FULL_HOLIDAYS_*`/`RESEARCH_EARLY_CLOSE_DAYS_*` tables for
-    2021-2025 dates; raises `ResearchCalendarError` for anything before
-    2021-01-01 or after production's own `last_supported_date` -- never a
-    silent guess."""
+    its own coverage; answers from the merged 2018/2019/2020/2021/2022/
+    2023/2024/2025 `RESEARCH_FULL_HOLIDAYS_*`/`RESEARCH_EARLY_CLOSE_DAYS_*`
+    tables for 2018-2025 dates; raises `ResearchCalendarError` for anything
+    before 2018-01-01 or after production's own `last_supported_date` --
+    never a silent guess."""
     if not isinstance(day, date) or isinstance(day, datetime):
         raise ResearchCalendarError(f"expected a date, got {day!r}")
     production_first, production_last = supported_range()
@@ -296,7 +403,7 @@ def research_trading_sessions_before(reference_day: date, *, count: int) -> tupl
     equivalent of
     `src.orb_universe_expansion_research.trading_sessions_before`, using
     `research_regular_session_bounds` instead of the production-only
-    function so it can reach back to 2023. Raises `ResearchCalendarError`
+    function so it can reach back to 2018. Raises `ResearchCalendarError`
     (propagated from `research_regular_session_bounds`, fail-closed, not
     caught here) if walking back runs past this module's own coverage floor
     before finding `count` sessions."""
@@ -314,6 +421,12 @@ def research_trading_sessions_before(reference_day: date, *, count: int) -> tupl
 __all__ = [
     "ResearchCalendarError",
     "RESEARCH_CALENDAR_FIRST_SUPPORTED_DATE",
+    "RESEARCH_FULL_HOLIDAYS_2018",
+    "RESEARCH_EARLY_CLOSE_DAYS_2018",
+    "RESEARCH_FULL_HOLIDAYS_2019",
+    "RESEARCH_EARLY_CLOSE_DAYS_2019",
+    "RESEARCH_FULL_HOLIDAYS_2020",
+    "RESEARCH_EARLY_CLOSE_DAYS_2020",
     "RESEARCH_FULL_HOLIDAYS_2021",
     "RESEARCH_EARLY_CLOSE_DAYS_2021",
     "RESEARCH_FULL_HOLIDAYS_2022",
