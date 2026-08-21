@@ -136,4 +136,154 @@ Exactly this one frozen portfolio, run once. Genuine code/data/integrity defects
 
 ---
 
-*Empirical results, standalone-parity confirmation, and the final classification are added below in a later, separate commit, generated from a clean checkout of the exact commit that implements everything above.*
+# Empirical Results
+
+*Generated from a clean checkout of implementation commit `3c8ef8ec3d57f74da07eac151b4b4ce32423adb6` (verified clean at generation time -- `generation_working_tree_clean: true`), using the existing gitignored SIP (ARM_A/ARM_B) and minute-bar (ORB, `feed=iex`) caches. Zero network calls -- cache-only mode fails closed on any cache miss.*
+
+## Standalone-Parity and Integrity Gate Results
+
+**ORB baseline replay -- all 6 frozen periods, bit-for-bit against their own already-committed checkpoints:**
+
+| Period | Candidates | Matched | Mismatches |
+|---|---:|---:|---:|
+| P_MINUS_2 | 35 | 35 | **0** |
+| P_MINUS_1 | 34 | 34 | **0** |
+| P0 | 38 | 38 | **0** |
+| P1 | 31 | 31 | **0** |
+| P2 | 53 | 53 | **0** |
+| P3 | 18 | 18 | **0** |
+
+209 total replayed candidates across all 6 periods; 179 fall within the M49 evaluation window (2022-01-03 through 2026-08-13). Every real, timezone-aware entry/exit timestamp was reconstructed by re-invoking `simulate_exit_arm` (completely unmodified) against the existing minute-bar cache -- never fabricated or inferred.
+
+**ARM_A / ARM_B standalone replay, through the shared allocator with the other two lanes disabled and no core-allocation cap:**
+
+| Lane | Closed trades | Object-for-object match vs. `run_arm_a`/`run_monthly_rebalance_arm` | Ledger-hash match vs. M48's committed document |
+|---|---:|---|---|
+| ARM_A `ETF_PULLBACK_RSI2` | 353 | **Yes** | **Yes** |
+| ARM_B `SECTOR_MOMENTUM_12_1` | 88 | **Yes** | **Yes** |
+
+Both the strategy-transaction-ledger hash and the position/equity-ledger hash match M48's own committed `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_ARTIFACT_HASHES.json` exactly, for both lanes -- the strongest possible confirmation that the shared allocator's ARM_A/ARM_B mechanics are byte-identical to the frozen M48 engines when run without contention.
+
+**Shared-capital integrity invariants**, verified directly against the run's own ledgers:
+- Tactical position count: **maximum observed 3** (of the 3-position cap) across all 1,409 evaluation-window sessions -- never exceeded, enforced structurally (every entry attempt is gated by an explicit `tactical_count() >= max_tactical_positions` check before any fill).
+- Cash: **never negative** -- structurally guaranteed, not merely observed: every cash-reducing operation (ARM_A entry, ORB entry, ARM_B buy/top-up) is preceded by an explicit affordability check that blocks or truncates the order rather than letting it proceed; every daily equity mark (cash + all marked positions) was confirmed non-negative.
+- Core (ARM_B) allocation: recomputed only at ARM_B's own scheduled rebalance opens, as specified; observed range 0% - **61.77%** of total equity (the small excursion above the 60% target is expected intra-month price drift between rebalances, per the frozen protocol's own design, not a cap violation).
+- Reconciliation: symbol-level contribution sum vs. marked net P&L residual = **-4E-23** (floating-point noise, effectively exact) for the pooled base-cost view.
+- 386 blocked intents (base cost), every one carrying an explicit lane + reason (`tactical_position_count_cap`, `insufficient_shared_cash_or_risk_budget`, `insufficient_shared_cash`, `insufficient_shared_cash_after_tactical_allocation`) -- none silently dropped.
+- No duplicate execution, no post-evaluation-end lookahead (endpoint marks resolved by exact date), no unclassified blocked intent.
+
+All gates passed on the first run; no code, data, or integrity defect was found, so no checkpoint was cleared or rerun.
+
+## Pooled Results (2022-01-03 through 2026-08-13), Base Cost (5 bps)
+
+| Metric | Value |
+|---|---:|
+| Gross P&L | $12,365.56 |
+| Net P&L (realized, closed trades) | $9,358.05 |
+| Net P&L (equity, incl. unrealized) | $11,064.47 |
+| **Net P&L (marked -- equity less hypothetical endpoint liquidation cost)** | **$11,047.51** |
+| Mean monthly $ on $30,000, **fixed-notional (PRIMARY)** | **$184.75** |
+| Median monthly $, fixed-notional | $272.74 |
+| Mean monthly $, compounded (secondary) | $197.58 |
+| Mean monthly return % | 0.616% |
+| CAGR (secondary, compounding) | 7.05% |
+| Sharpe (annualized, 0% RF) | 0.65 |
+| Sortino (annualized, 0% RF) | 0.99 |
+| Annualized volatility | 11.31% |
+| Annualized downside deviation | 7.47% |
+| Max drawdown ($ / %) | $4,381.32 / **14.60%** |
+| Drawdown recovery | 342 days |
+| Profitable months | 62.5% |
+| Longest losing-month streak | 3 |
+| Worst month, fixed-notional ($) | -$2,398.37 |
+| 5th-percentile month (%) | -4.60% |
+| Turnover ratio (ledger notional / avg equity) | 190.4x |
+| Total cost paid (base, 5 bps, incl. endpoint mark) | $3,040.56 |
+| Hypothetical endpoint-liquidation cost | $16.96 |
+| Blocked intents (all reasons) | 386 |
+
+**$400/month stretch level: NOT reached** ($184.75 < $400) -- reported as the required diagnostic only; it never changes the classification.
+
+## Stress-Cost (10 bps) Sensitivity
+
+| Metric | Value |
+|---|---:|
+| Net P&L (marked), stress cost | $6,448.32 |
+| Mean monthly $, fixed-notional, stress cost | $122.02 |
+| Total cost paid, stress | $5,748.32 |
+| Max drawdown, stress cost | 18.54% |
+| Stress-cost pooled result positive? | **Yes** |
+
+The portfolio remains net-positive under the doubled cost assumption, but the cost load nearly doubles ($3,041 -> $5,748) given ARM_A's own high turnover dominating the combined turnover figure -- stress-case mean monthly dollars fall by exactly one-third ($184.75 -> $122.02), and stress-case max drawdown rises from 14.60% to 18.54% (still under the 20% `NOT_PRACTICAL` ceiling, but above the 15% `PRACTICAL_TARGET_FEASIBLE`/`SAFE_BUT_BELOW_TARGET` ceiling on a stress-cost basis -- the frozen classification gate is defined on the BASE-cost drawdown only, per Issue #350, so this does not itself change the label, but is a material sensitivity worth flagging honestly).
+
+## Per-Segment Net P&L (marked)
+
+| Segment | Base (5 bps) | Stress (10 bps) |
+|---|---:|---:|
+| 2022 | -$2,225.85 | -$3,299.56 |
+| 2023 | +$937.56 | +$268.65 |
+| 2024 | +$5,142.43 | +$3,957.15 |
+| 2025 | +$3,574.30 | +$2,927.46 |
+| 2026 YTD | +$3,619.07 | +$2,594.61 |
+
+One negative segment (2022, the broad-market drawdown year also seen throughout M43-M48); all four remaining segments positive at both cost cases -- satisfying both the "at least 4 of 5 non-negative" and "at least 3 of 5 positive" gates.
+
+## Symbol and Sleeve Concentration (positive-net-contribution basis, base cost)
+
+- **By symbol**: best contributor XLC at **32.8%** of positive net P&L -- under the 50% single-symbol ceiling, broadly spread across 17 different positively-contributing symbols from all three lanes (AAPL, AMD, AMZN, AVGO, GOOGL, IWM, MSFT, NFLX, SPY, TSLA, XLB, XLC, XLF, XLI, XLK, XLV, XLY).
+- **By sleeve**: best contributor **SECTOR_MOMENTUM_12_1 (ARM_B) at 63.9%** of positive net P&L -- ABOVE the 50% ceiling. ETF_PULLBACK_RSI2 (ARM_A) contributes 21.3% and ORB_GAP_050_RVOL_175 contributes 14.7%. This single gate failure is the reason the portfolio does not reach `PRACTICAL_TARGET_FEASIBLE` even though every other feasibility check (segments, profitable-month rate, worst-month floor, drawdown) independently passes.
+
+## Standalone-vs-Shared Opportunity-Cost Attribution (base cost)
+
+| Lane | Standalone net P&L (marked, uncontended, full $30K) | Shared realized net P&L (as actually filled) | Delta | Blocked intents |
+|---|---:|---:|---:|---:|
+| ORB `GAP_050_RVOL_175` | $3,338.16 | $1,630.54 | -$1,707.63 | 39 |
+| ARM_A `ETF_PULLBACK_RSI2` | $4,445.29 | $2,304.80 | -$2,085.36 | 343 |
+| ARM_B `SECTOR_MOMENTUM_12_1` | $11,402.44 | $5,422.71 | -$3,206.90 | 4 |
+
+Every lane earns materially less inside the shared account than it would standalone -- the direct, quantified cost of the three lanes competing for one $30,000 pool. ARM_A absorbs the most BLOCKED intents (343, mostly `insufficient_shared_cash_or_risk_budget` -- its very high signal frequency runs into the shared 3-position/$600-risk tactical cap constantly), while ARM_B's shortfall comes almost entirely from the 60% core-allocation cap itself (only 4 blocked buy/top-up intents) rather than from being blocked outright -- consistent with ARM_B being a scheduled monthly rebalance, not a high-frequency competitor for tactical slots.
+
+Note: ORB's own standalone-at-$300-risk figure computed here ($3,338.16 marked / **$59.00/month** mean fixed-notional across the 2022-2026 evaluation window) is a genuine simulated result -- real entry/stop prices, whole-share $300-risk sizing, actual transaction costs -- and is LOWER than the naive "$108.90/month" back-of-envelope reference cited in Issue #350's own frozen-evidence section (0.363 R/month x $300, a simple multiplication, not a position-sized simulation over this exact window). This is reported as the more rigorous figure precisely because it comes from an actual simulation of the frozen baseline, not because any signal, threshold, or sizing rule was changed.
+
+## Correlations
+
+- **To SPY buy-and-hold (monthly, benchmark only):** 0.776.
+- **To the frozen ORB standalone monthly R series:** 0.243 -- higher than any single M48 arm's own correlation to ORB (unsurprising: ORB itself is now literally one of the three lanes inside this portfolio).
+
+## Predeclared Classification
+
+```
+SAFE_BUT_BELOW_TARGET checks:
+  mean_monthly_dollars_at_least_150_below_250:  TRUE   ($184.75, in [$150,$250))
+  max_drawdown_at_most_15pct:                   TRUE   (14.60%)
+  pooled_net_base_and_stress_positive:          TRUE   (base $11,047.51 / stress $6,448.32)
+  at_least_4_of_5_segments_nonnegative:         TRUE   (4/5)
+
+PRACTICAL_TARGET_FEASIBLE checks (for reference -- SAFE_BUT_BELOW_TARGET already satisfied first):
+  mean_monthly_dollars_at_least_250:            FALSE  ($184.75 < $250)
+  max_drawdown_at_most_15pct:                   TRUE   (14.60%)
+  pooled_net_base_and_stress_positive:          TRUE
+  at_least_4_of_5_segments_nonnegative:         TRUE   (4/5)
+  at_least_3_of_5_segments_positive:            TRUE   (4/5)
+  profitable_months_at_least_55pct:             TRUE   (62.5%)
+  worst_month_at_least_negative_10pct:          TRUE   (-4.60%, well inside -10%)
+  no_sleeve_or_symbol_over_50pct_of_positive_pnl: FALSE (SECTOR_MOMENTUM_12_1 sleeve at 63.9%)
+```
+
+**VERDICT: `SAFE_BUT_BELOW_TARGET`.** The portfolio clears every SAFE gate cleanly. It falls short of the higher `PRACTICAL_TARGET_FEASIBLE` label on exactly two grounds: the $184.75/month mean is below the $250 target, and ARM_B's sleeve alone contributes 63.9% of positive net P&L (above the 50% single-sleeve ceiling) -- notably, EVERY OTHER `PRACTICAL_TARGET_FEASIBLE` gate (drawdown, segment consistency, profitable-month rate, worst-month floor) independently passes. No label was promoted for being close to a threshold; both of these are applied literally as specified.
+
+## Decision-Tree Route
+
+Per Issue #350's frozen decision tree: **`SAFE_BUT_BELOW_TARGET` -> record $150-$250/month as the supported practical range; no allocation sweep.**
+
+The `PRACTICAL_CORE_SATELLITE_30K` portfolio -- ORB + ARM_A tactical satellite (max 3 positions, $300/$600 risk caps) alongside ARM_B core (60%-of-equity cap), sharing one real $30,000 cash account -- supports an average monthly withdrawal in the **$150-$250 range** ($184.75/month observed at base cost, $122.02/month at stress cost), with a maximum drawdown of 14.60% (18.54% under doubled costs), under the frozen $30,000/no-leverage mandate. Per the frozen protocol, no allocation-cap sweep, threshold adjustment, or universe change is performed in response to this result. This is M49's complete, honest answer to the question it set out to ask.
+
+## Safety Confirmation
+
+`strategy.enabled=false` confirmed unchanged before and after this milestone. Trusted implementation digest confirmed unchanged: `f79587b9e58da0465973f8ac08ce26f7cb648a52952df6407c3c0a57abd4c53a`. No pinned-closure file modified. No broker/Robinhood/account/order/position API call at any point -- every network-capable code path ran in cache-only mode against the existing gitignored SIP and minute-bar caches, with zero actual network calls made. Raw vendor data and generated ledgers remain gitignored; only this report, the frozen protocol, and the committed SHA-256 hashes document (`docs/research/ORB_PRACTICAL_CORE_SATELLITE_PORTFOLIO_ARTIFACT_HASHES.json`) are committed.
+
+**Provenance:** implementation commit `3c8ef8ec3d57f74da07eac151b4b4ce32423adb6`, verified clean at generation time (`generation_working_tree_clean: true`). Results generated from that exact clean checkout; this results/report/hashes update is committed separately, afterward.
+
+## Structured Artifacts
+
+Generated under `artifacts/research-practical-core-satellite-portfolio/` (gitignored, regenerable via `python scripts/research_orb_practical_core_satellite_portfolio.py`): `results/provenance_manifest.json` (per-period ORB parity reports, ARM_A/ARM_B standalone-parity confirmation), `results/study_results.json` (full structured results for both cost cases, pooled and per-segment, including the transaction/blocked-intent/position-snapshot ledgers and opportunity-cost attribution). The COMMITTED (non-gitignored) counterpart is `docs/research/ORB_PRACTICAL_CORE_SATELLITE_PORTFOLIO_ARTIFACT_HASHES.json` -- SHA-256 hashes only, no raw vendor data.

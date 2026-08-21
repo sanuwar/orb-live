@@ -1,0 +1,85 @@
+{
+  "arm_a_standalone_parity": {
+    "closed_trade_count": 353,
+    "ledger_hash_match": true,
+    "ok": true
+  },
+  "arm_b_standalone_parity": {
+    "closed_trade_count": 88,
+    "ledger_hash_match": true,
+    "ok": true
+  },
+  "classification": "SAFE_BUT_BELOW_TARGET",
+  "evaluation_end": "2026-08-13",
+  "evaluation_start": "2022-01-03",
+  "feed": "sip",
+  "generation_git_head_sha": "3c8ef8ec3d57f74da07eac151b4b4ce32423adb6",
+  "generation_source_file_sha256": {
+    "scripts/research_orb_practical_core_satellite_portfolio.py": "67c648a82dd6941e7d3bab2de2ce887b914f300b368cef3dbdec393561b14534",
+    "src/orb_practical_core_satellite_portfolio_research.py": "47c8388d4869d4f3663aee78bda0979cb14d3ff69508a7cb95fdc782bfb24886"
+  },
+  "generation_working_tree_clean": true,
+  "ledger_hashes": {
+    "base_5bps": {
+      "blocked_intent_count": 386,
+      "blocked_intent_ledger_sha256": "ced6fdf26e23b27e0f39087dff231e8cbb357f5ab3ba626a7bb95aaa17589fc2",
+      "endpoint_mark_count": 4,
+      "endpoint_mark_ledger_sha256": "5cd80de8150bd6b97f8945a0b823aaf9623adc641be622693017229a026025d4",
+      "position_snapshot_sha256": "bd896e3d4025cd2608febdcf4a175b7b4c051e46c416143b0cf8ed7e84590731",
+      "transaction_count": 957,
+      "transactions_sha256": "b1160aaf099e0f8abd9adf84c5b461cab92b0626598fe2b3ff33812255599616"
+    },
+    "stress_10bps": {
+      "blocked_intent_count": 424,
+      "blocked_intent_ledger_sha256": "e4b406435d99a383d8628742ee8a349ed23f961faae3b48e7bd7ea1ccf10370c",
+      "endpoint_mark_count": 4,
+      "endpoint_mark_ledger_sha256": "9351be1d818bf0ae31b13d080a7344d8d9a6292021b14fb4e4efcc146a63904c",
+      "position_snapshot_sha256": "1ff1775f7a8241f5738e9abbb31dd06c456ece3d5f455bbb6b0c1b47d37a3e3c",
+      "transaction_count": 949,
+      "transactions_sha256": "b6eeb257ffa8b0b714aace6669c7f1ffa93e01b4eacd26016d90efcb93c3527c"
+    }
+  },
+  "orb_feed": "iex",
+  "orb_parity_reports": {
+    "P0": {
+      "matched_count": 38,
+      "mismatch_count": 0,
+      "ok": true
+    },
+    "P1": {
+      "matched_count": 31,
+      "mismatch_count": 0,
+      "ok": true
+    },
+    "P2": {
+      "matched_count": 53,
+      "mismatch_count": 0,
+      "ok": true
+    },
+    "P3": {
+      "matched_count": 18,
+      "mismatch_count": 0,
+      "ok": true
+    },
+    "P_MINUS_1": {
+      "matched_count": 34,
+      "mismatch_count": 0,
+      "ok": true
+    },
+    "P_MINUS_2": {
+      "matched_count": 35,
+      "mismatch_count": 0,
+      "ok": true
+    }
+  },
+  "orb_periods": [
+    "P_MINUS_2",
+    "P_MINUS_1",
+    "P0",
+    "P1",
+    "P2",
+    "P3"
+  ],
+  "retrieval_timestamp_utc": "2026-08-21T06:36:20.528942+00:00",
+  "study_results_json_sha256": "aaf79b6887307b7ab9ce19a3e1c654f2b011058e8237e13eb7e15754d7a23683"
+}

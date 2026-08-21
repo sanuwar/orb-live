@@ -117,3 +117,11 @@ artifacts/research-sequential-second-trade/
 # hashes in the provenance manifest and the results tables in the
 # committed report, not by committing the underlying vendor data.
 artifacts/research-capital-target-strategy-family/
+
+# Research tooling: generated study output + provenance manifest
+# (Issue #350, M49). Reuses the M48 SIP cache and the M43 ORB minute-bar
+# cache/checkpoints above unchanged; this directory holds only this
+# milestone's own generated results/provenance, same never-committed
+# convention as M48 above -- reproducibility is carried by the committed
+# SHA-256 hashes document and the results tables in the committed report.
+artifacts/research-practical-core-satellite-portfolio/
