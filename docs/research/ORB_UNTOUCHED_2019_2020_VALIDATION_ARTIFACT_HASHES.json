@@ -1,0 +1,13 @@
+{
+  "final_classification": "INSUFFICIENT_EVIDENCE",
+  "generated_at": "2026-08-21T14:56:49.936443+00:00",
+  "generation_git_head_sha": "b45758db578b89e11298c11e5595755f8392291f",
+  "generation_source_file_sha256": {
+    "scripts/research_orb_untouched_2019_2020_validation.py": "824ca8604c6b4749a1d2725e9c280f98b9bf06ceefd6628d55201464156bafca",
+    "src/orb_untouched_2019_2020_validation_research.py": "ed24c4c2de5eb0be15aebfe77a4beda09bb5fc9d2f02fed999d18845d536f68b"
+  },
+  "generation_working_tree_clean": true,
+  "issue": 352,
+  "milestone": "M50",
+  "stage0_result_sha256": "994483b292a64ad0171f5b67d2b029b7829b50f279187f32a4d27e95c20db2d4"
+}

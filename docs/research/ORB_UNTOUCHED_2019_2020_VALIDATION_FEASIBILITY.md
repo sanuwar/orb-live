@@ -75,6 +75,39 @@ Applied once after all integrity gates pass. Because Stage-0 item 1 blocks, the 
 
 ---
 
-## Stage-0 result (added in the results commit, after running the gate from a clean implementation checkout)
+## Stage-0 result
 
-_Pending -- see the results commit for the actual run's classification, parity outcome, and generation provenance (commit SHA, source-file hashes, working-tree-clean status)._
+Run once from the clean implementation head `b45758db578b89e11298c11e5595755f8392291f` via `scripts/research_orb_untouched_2019_2020_validation.py`.
+
+### Item 1: point-in-time ORB universe
+
+**Not established for either 2019 or 2020.** All 19 recorded source attempts across all 3 tiers of the fixed source order were exhausted (see the itemized table above); none produced a complete, compliant roster.
+
+### Item 2: market data and calendar
+
+Not evaluated -- moot, since item 1 established no roster to check coverage for.
+
+### Item 3: parity before economics -- PASSED
+
+Reproduced against the existing M43/M48/M49 artifacts, using only the already-frozen caches/checkpoints (no 2019-2020 data):
+
+- **ORB standalone replay parity:** all 6 frozen periods (`P_MINUS_2`, `P_MINUS_1`, `P0`, `P1`, `P2`, `P3`) reproduced bit-for-bit against their own committed M43 checkpoints. 209 total replayed candidates, 0 mismatches.
+- **ARM_A (`ETF_PULLBACK_RSI2`) standalone parity:** reproduced against M48's own frozen engine and committed ledger hashes. `ok: true`, `ledger_hash_match: true`.
+- **ARM_B (`SECTOR_MOMENTUM_12_1`) standalone parity:** reproduced against M48's own frozen engine and committed ledger hashes. `ok: true`, `ledger_hash_match: true`.
+
+No M50 economic outcome was computed: Stage-0 item 1 blocked before any empirical portfolio result could be read, per Issue #352's own sequencing.
+
+### Final classification: `INSUFFICIENT_EVIDENCE`
+
+Per Issue #352's decision tree: *"record the exact provenance/data blocker; do not substitute a biased universe or widen/change the window."* This is the deliberate, complete stopping point for M50 -- not a partial or abandoned run. No date, universe, source, allocation, threshold, indicator, exit, cost, or risk parameter was swept or tuned to try to recover a different outcome.
+
+### Generation provenance
+
+| Field | Value |
+| --- | --- |
+| `generation_git_head_sha` | `b45758db578b89e11298c11e5595755f8392291f` |
+| `generation_working_tree_clean` | `true` (scoped to the two hashed source files) |
+| `src/orb_untouched_2019_2020_validation_research.py` SHA-256 | `ed24c4c2de5eb0be15aebfe77a4beda09bb5fc9d2f02fed999d18845d536f68b` |
+| `scripts/research_orb_untouched_2019_2020_validation.py` SHA-256 | `824ca8604c6b4749a1d2725e9c280f98b9bf06ceefd6628d55201464156bafca` |
+
+Full generation record: `docs/research/ORB_UNTOUCHED_2019_2020_VALIDATION_ARTIFACT_HASHES.json` (committed).
