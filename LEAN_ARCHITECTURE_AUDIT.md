@@ -2,8 +2,8 @@
 
 Deterministic scope: tracked Python files only. Static absence is uncertainty, not proof of dead code.
 
-- Production LOC: 92837
-- Test LOC: 71055
+- Production LOC: 93305
+- Test LOC: 71213
 - Estimated removable production LOC: 0
 - Estimated removable test LOC: 0
 - Exact helper-body candidates: 0
@@ -28,7 +28,7 @@ Deterministic scope: tracked Python files only. Static absence is uncertainty, n
    Estimated removable LOC: production 0, tests 0
 
 4. **NEEDS_RUNTIME_EVIDENCE / MEDIUM -- Public surfaces without static repository callers**
-   Evidence: 12 public definitions have zero name/attribute references outside their definitions.
+   Evidence: 13 public definitions have zero name/attribute references outside their definitions.
    Interpretation: This is uncertainty, not proven dead code; dynamic dispatch, operator entrypoints, and external consumers remain invisible.
    Estimated removable LOC: production 0, tests 0
 
