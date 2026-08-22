@@ -110,17 +110,44 @@ def _cached_request(cache_dir: Path, key: str, *, fetch_missing: bool, do_fetch)
     return body
 
 
+#: A genuine network-level read timeout (distinct from an HTTP 429,
+#: which the OpenFIGI caller already retries on its own) is a
+#: transient condition observed live during this pipeline's own
+#: multi-hour run -- retried here, at the lowest HTTP layer, so every
+#: caller (SEC EDGAR, OpenFIGI, and any future vendor) benefits without
+#: each needing its own timeout-handling logic.
+_HTTP_TIMEOUT_MAX_RETRIES = 4
+_HTTP_TIMEOUT_RETRY_DELAY_SECONDS = 10.0
+
+
+def _retry_on_timeout(do_request):
+    last_error: Exception | None = None
+    for attempt in range(_HTTP_TIMEOUT_MAX_RETRIES):
+        try:
+            return do_request()
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                raise  # a real HTTP error status, not a network-level timeout -- propagate immediately
+            last_error = exc
+            time.sleep(_HTTP_TIMEOUT_RETRY_DELAY_SECONDS)
+    raise last_error  # type: ignore[misc]
+
+
 def _http_get(url: str, *, headers: dict[str, str]) -> bytes:
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read()
+    def _do() -> bytes:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    return _retry_on_timeout(_do)
 
 
 def _http_post_json(url: str, payload: Any, *, headers: dict[str, str]) -> bytes:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={**headers, "Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read()
+    def _do() -> bytes:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={**headers, "Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    return _retry_on_timeout(_do)
 
 
 # ---------------------------------------------------------------------------
