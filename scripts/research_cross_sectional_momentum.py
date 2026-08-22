@@ -167,7 +167,19 @@ async def fetch_nport_holdings(filing: NportFiling, *, fetch_missing: bool) -> t
 # OpenFIGI: CUSIP-named security -> US exchange ticker resolution.
 # ---------------------------------------------------------------------------
 
-US_SEARCH_EXCHANGES = ("UN", "UW", "UA", "UR")
+#: Bloomberg exchange codes for every major US common-stock listing
+#: venue, per OpenFIGI's own published exchange-code reference
+#: (https://www.openfigi.com/assets/content/OpenFIGI_Exchange_Codes-
+#: 3d3e5936ba.csv): UN=NYSE, UW=Nasdaq Global Select, UQ=Nasdaq Global
+#: Market, UR=Nasdaq Capital Market, UA=NYSE American, UP=NYSE Arca.
+#: The original implementation omitted UP and UQ -- a real correctness
+#: gap, not just a speed one, caught while investigating an unexpected
+#: resolution result during the live run. Ordered UN/UW first (the
+#: primary listing venue for the overwhelming majority of Russell 1000
+#: constituents) so the early-exit in `resolve_holding_via_openfigi`
+#: below reaches a decision after the fewest requests in the common
+#: case, without narrowing which venues are considered.
+US_SEARCH_EXCHANGES = ("UN", "UW", "UQ", "UR", "UA", "UP")
 
 
 OPENFIGI_REQUEST_DELAY_SECONDS = 3.0
@@ -247,13 +259,23 @@ async def resolve_holding_via_openfigi(raw: RawHolding, *, fetch_missing: bool) 
     NAME (the vast majority of Russell 1000 membership is stable quarter
     to quarter): the on-disk cache means a repeat name across snapshots
     costs zero additional OpenFIGI requests, and the rate-limit courtesy
-    delay below only applies on an actual cache miss, not a hit. Checks
-    ALL of `US_SEARCH_EXCHANGES` for whichever name variant is being
-    tried (no early exit across exchanges, so a genuine cross-exchange
-    ambiguity is never missed for the sake of speed) but stops at the
-    first NAME VARIANT (see `_name_query_variants`) that returns any
+    delay below only applies on an actual cache miss, not a hit.
+
+    `US_SEARCH_EXCHANGES` is ordered UN/UW first (the primary listing
+    venue for the overwhelming majority of Russell 1000 constituents).
+    After EACH exchange query, if the candidates accumulated so far for
+    this name variant already resolve uniquely (`resolve_holding(...)`
+    would return RESOLVED), the remaining exchanges are skipped -- a
+    later exchange could in principle surface a same-named, different
+    company and turn a clean resolution into an ambiguity, but for
+    real US large/mid-cap common-stock names this is a rare, accepted
+    trade-off against otherwise-impractical total runtime; it is never
+    applied to a variant that has NOT yet resolved uniquely (an empty
+    or already-ambiguous accumulation always continues through every
+    remaining exchange for that variant). Stops trying further NAME
+    VARIANTS (see `_name_query_variants`) once one variant returns any
     candidate at all, since a later variant re-querying the same
-    underlying security is redundant, not a source of new evidence."""
+    underlying security is redundant, not new evidence."""
     for query in _name_query_variants(raw.name):
         variant_candidates: list[ResolutionCandidate] = []
         for exch in US_SEARCH_EXCHANGES:
@@ -279,6 +301,8 @@ async def resolve_holding_via_openfigi(raw: RawHolding, *, fetch_missing: bool) 
                 variant_candidates.append(ResolutionCandidate(ticker=item["ticker"], exch_code=item["exchCode"], name=item["name"]))
             if fetch_missing and not cache_hit:
                 await asyncio.sleep(OPENFIGI_REQUEST_DELAY_SECONDS)  # fetches only, never on a cache hit
+            if resolve_holding(raw, variant_candidates).resolution_status == "RESOLVED":
+                break  # already unique for this variant -- skip the remaining exchanges
         if variant_candidates:
             return resolve_holding(raw, variant_candidates)
     return resolve_holding(raw, [])
