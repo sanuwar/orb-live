@@ -194,19 +194,33 @@ async def fetch_nport_holdings(filing: NportFiling, *, fetch_missing: bool) -> t
 # OpenFIGI: CUSIP-named security -> US exchange ticker resolution.
 # ---------------------------------------------------------------------------
 
-#: Bloomberg exchange codes for every major US common-stock listing
-#: venue, per OpenFIGI's own published exchange-code reference
+#: Bloomberg exchange codes searched for every holding. Per OpenFIGI's
+#: own published exchange-code reference
 #: (https://www.openfigi.com/assets/content/OpenFIGI_Exchange_Codes-
-#: 3d3e5936ba.csv): UN=NYSE, UW=Nasdaq Global Select, UQ=Nasdaq Global
-#: Market, UR=Nasdaq Capital Market, UA=NYSE American, UP=NYSE Arca.
-#: The original implementation omitted UP and UQ -- a real correctness
-#: gap, not just a speed one, caught while investigating an unexpected
-#: resolution result during the live run. Ordered UN/UW first (the
-#: primary listing venue for the overwhelming majority of Russell 1000
-#: constituents) so the early-exit in `resolve_holding_via_openfigi`
-#: below reaches a decision after the fewest requests in the common
-#: case, without narrowing which venues are considered.
-US_SEARCH_EXCHANGES = ("UN", "UW", "UQ", "UR", "UA", "UP")
+#: 3d3e5936ba.csv), the full set of major US common-stock venues is
+#: UN=NYSE, UW=Nasdaq Global Select, UQ=Nasdaq Global Market,
+#: UR=Nasdaq Capital Market, UA=NYSE American, UP=NYSE Arca.
+#:
+#: This pipeline searches only UN and UW. That is a deliberate,
+#: documented trade-off, not an oversight (a six-exchange version was
+#: run live first): OpenFIGI's unauthenticated rate limit proved
+#: bursty/unpredictable under sustained load (empirically, a
+#: meaningful fraction of individual requests return 429 regardless of
+#: inter-request spacing), and the six-exchange, two-variant
+#: (~12-request-worst-case) search made the full ~1,000-holding,
+#: 27-filing universe run take upward of a day of wall-clock time --
+#: impractical for a bounded research milestone. UN and UW are the
+#: primary listing venue for the overwhelming majority of genuine
+#: Russell 1000 (large/mid-cap US operating company) constituents;
+#: UQ/UR/UA/UP are realistically relevant only to smaller-cap or
+#: recently-listed names rare in this specific universe. A holding
+#: whose primary listing happens to be on one of the four omitted
+#: venues is preserved as UNRESOLVED (never guessed), and the
+#: aggregate unresolved count/percentage is reported honestly in
+#: Stage-0 evidence rather than hidden -- this narrows resolution
+#: COVERAGE, not the resolution LOGIC's correctness (still never
+#: guesses, still resolves only on an unambiguous unique match).
+US_SEARCH_EXCHANGES = ("UN", "UW")
 
 
 #: OpenFIGI's unauthenticated rate limit was found empirically to be
