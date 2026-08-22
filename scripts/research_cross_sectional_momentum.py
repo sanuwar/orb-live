@@ -182,8 +182,16 @@ async def fetch_nport_holdings(filing: NportFiling, *, fetch_missing: bool) -> t
 US_SEARCH_EXCHANGES = ("UN", "UW", "UQ", "UR", "UA", "UP")
 
 
-OPENFIGI_REQUEST_DELAY_SECONDS = 3.0
-OPENFIGI_MAX_RETRIES = 6
+#: OpenFIGI's unauthenticated rate limit was found empirically to be
+#: bursty/unpredictable rather than a simple fixed interval -- a live
+#: test sent 15 requests spaced 6s apart and still saw 6 individual
+#: 429s, interleaved with successes, not a clean "N per minute"
+#: pattern. Retrying with exponential backoff (below) is therefore the
+#: actual correctness mechanism, not this base delay; this value is
+#: only a courtesy starting point between requests that were NOT
+#: rate-limited.
+OPENFIGI_REQUEST_DELAY_SECONDS = 5.0
+OPENFIGI_MAX_RETRIES = 8
 
 #: Corporate-suffix tokens stripped, longest-first, to build a "bare"
 #: name variant. N-PORT filings spell these out in full, all-caps
