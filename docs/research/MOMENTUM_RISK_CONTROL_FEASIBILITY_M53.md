@@ -84,6 +84,70 @@ Two arms only, one empirical run each. No threshold, universe, target-volatility
 
 ---
 
-## Results (added in the results commit)
+## Results
 
-_Pending -- see the results commit for baseline-parity evidence, Stage-0 outcomes, full base/stress metrics for baseline/Arm A/Arm B, the gate-by-gate `TARGET_FEASIBLE` pass/fail table, opportunity cost versus the exact M52 baseline, the final M53 decision, and the exact implementation/results-generating commit SHAs._
+Generated from commit `4c43fe96ab80d739fd10a9bd6bfa4c1319f67865` (clean working tree, all three source files' SHA-256 hashes recorded in `artifacts/research-momentum-risk-control/results/m53_result.json` / `docs/research/MOMENTUM_RISK_CONTROL_ARTIFACT_HASHES.json`). All three runs (baseline, Arm A, Arm B) used the existing immutable M52 caches only -- no SEC/OpenFIGI/Alpaca fetch was repeated.
+
+### Baseline parity: PASS
+
+58 scalar metric fields and 12 calendar-segment entries (base + stress, 6 segments each) compared field-by-field as exact `Decimal` values against the committed M52 result (commit `3d345ebca19c7159678aaad801cdb66299f9ba6b`) -- zero mismatches. Bit-for-bit parity confirmed before either new arm was examined, as required.
+
+### Stage-0 integrity: PASS for baseline and both arms
+
+0 duplicate transactions and 0 unclassified blocked intents in all three runs (baseline, Arm A, Arm B). No implementation or data-integrity defect surfaced during this run -- unlike M52's own generation (which required several pipeline/harness fixes), M53's empirical run completed cleanly on the first attempt, reusing M52's already-hardened caches and harness unchanged.
+
+### Arm A -- `BREADTH_30` (top_n=30): `POSITIVE_BUT_INSUFFICIENT`
+
+| Metric (base 5bps) | Value | vs. M52 baseline |
+|---|---|---|
+| Mean monthly $ | $328.24 | -$128.63 |
+| Median monthly $ | $45.06 | -- |
+| Endpoint-marked net P&L | $23,611.02 | -$11,704.84 |
+| CAGR | 11.22% | -3.94pp |
+| Sharpe / Sortino | 0.58 / 0.95 | -- |
+| Annualized volatility / downside deviation | 22.69% / 13.86% | -- |
+| **Max drawdown** | **27.25%** | **-6.89pp (improved)** |
+| Worst month | -20.79% | +4.29pp (improved) |
+| Profitable months | 50.0% | -1.47pp |
+| Best-symbol contribution share | 6.70% | -2.39pp |
+| Turnover | $1,559,078.65 | +$49,366 |
+| Avg invested positions | 24.13 / 30 max | -- |
+
+Stress (10bps): mean $320.47/month, endpoint net P&L $22,659.86, max drawdown 27.55% -- still net-positive.
+
+Segments (base): 2021 +, **2022 -**, **2023 -**, 2024 +, 2025 +, 2026 YTD + -- only **4 of 6** positive (M52 baseline had 5 of 6; 2023 flips negative under breadth-30).
+
+**Gate failures (`TARGET_FEASIBLE`):** base mean $ ($328.24 < $500), base max drawdown (27.25% > 25% -- close, but still fails), segments positive (4 < 5), profitable months (50.0% < 55%), worst month (-20.79% < -10%).
+
+**Interpretation:** breadth reduction genuinely helped drawdown and worst-month severity -- both improved meaningfully versus the concentrated M52 baseline -- but diluting the top-15 momentum signal to top-30 also diluted the return, both in absolute dollars and in calendar-segment consistency (2023 flips from marginally positive to negative). The risk reduction did not come for free.
+
+### Arm B -- `MARKET_VOL_15` (top_n=15, 63-session/15%-target exposure cap): `POSITIVE_BUT_INSUFFICIENT`
+
+| Metric (base 5bps) | Value | vs. M52 baseline |
+|---|---|---|
+| Mean monthly $ | $456.72 | -$0.15 (essentially unchanged) |
+| Median monthly $ | $92.73 | -- |
+| Endpoint-marked net P&L | $36,148.94 | +$833.09 |
+| CAGR | 15.38% | +0.23pp |
+| Sharpe / Sortino | 0.64 / 1.13 | -- |
+| Annualized volatility / downside deviation | 28.68% / 16.20% | -- |
+| Max drawdown | 34.29% | +0.15pp (essentially unchanged) |
+| Worst month | -25.13% | -0.05pp (essentially unchanged) |
+| Profitable months | 51.47% | unchanged |
+| Best-symbol contribution share | 9.45% | +0.36pp |
+| Turnover | $1,490,555.16 | -$19,157 |
+| Avg invested positions | 12.07 / 15 max | -- |
+
+Stress (10bps): mean $451.42/month, endpoint net P&L $35,336.00, max drawdown 34.14% -- both net-positive and both marginally better than the M52 baseline's stress case.
+
+Segments (base): identical pattern to the M52 baseline -- 5 of 6 positive (only 2022 negative).
+
+**Gate failures (`TARGET_FEASIBLE`):** base mean $ ($456.72 < $500), base max drawdown (34.29% > 25%), profitable months (51.47% < 55%), worst month (-25.13% < -10%) -- essentially the same failure profile as the unmodified M52 baseline.
+
+**Why the cap barely moved the headline numbers -- diagnosed, not a defect:** a direct check of the exposure multiplier across all 69 real signal dates confirms the cap genuinely engaged during real market stress -- it fell as low as 0.53 in mid-2022 and 0.45 in April-June 2025, both real, sustained volatility episodes. But the strategy's single worst drawdown and worst month (M52's own $76,898.81-to-$50,645.61 decline, 2026-06-22 to 2026-07-29) developed quickly, and the trailing 63-session realized-volatility measure had not yet risen enough by the signal dates leading into it to meaningfully cut exposure. This is a known, structural limitation of lagged volatility targeting -- it reduces exposure only after realized volatility has already risen, so it cannot preempt a fast-onset drawdown -- not an implementation defect. Stage-0 integrity (0 duplicates, 0 unclassified blocked intents) and the diagnostic multiplier trace both confirm the mechanism itself works exactly as specified.
+
+### M53 decision: `PARKED_NO_CREDIBLE_RISK_CONTROL`
+
+Neither arm reached `TARGET_FEASIBLE`, so per the frozen selection rule no arm is promoted -- "best of two" is not sufficient. This bounded risk-control branch is parked. No hand-tuning was applied to either arm, and no automatic M54 follows.
+
+Reported honestly: Arm A demonstrates that reducing concentration measurably improves risk (drawdown, worst month) at a real cost to return and segment consistency; Arm B demonstrates that a lagged market-volatility throttle preserves M52's return profile almost exactly but does not meaningfully reduce its worst-case risk, because the realized drawdown was fast-onset rather than a sustained high-volatility regime the lookback could detect in time. Both are genuine, useful negative/mixed findings about this specific momentum strategy's risk structure, not implementation failures.
