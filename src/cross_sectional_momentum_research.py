@@ -850,6 +850,16 @@ def simulate_cross_sectional_momentum_portfolio(
     for t in transactions:
         txn_by_date.setdefault(t.date, []).append(t)
     running_positions: dict[str, int] = {}
+    # Carry the last observed close forward when `_close_on` has no bar for
+    # a held symbol on a given `master_dates` session (e.g. a genuine
+    # vendor data gap, or a calendar entry that turns out not to be a real
+    # trading day). Marking such a day at $0 instead -- the original
+    # behavior -- fabricates a total, single-day wipeout of every held
+    # position that reverses the moment data resumes, which is not a real
+    # drawdown; carrying the last known price forward is the standard,
+    # conservative treatment (the position's actual market value did not
+    # change on a day with no trading).
+    last_known_close: dict[str, Decimal] = {}
     for d in eval_dates:
         for t in txn_by_date.get(d, ()):
             if t.side == "BUY":
@@ -860,7 +870,14 @@ def simulate_cross_sectional_momentum_portfolio(
                 running_positions[t.symbol] = running_positions.get(t.symbol, 0) - t.quantity
                 if running_positions[t.symbol] <= 0:
                     del running_positions[t.symbol]
-        equity = running_cash + sum((_close_on(s, d) or Decimal(0)) * qty for s, qty in running_positions.items())
+        equity = running_cash
+        for s, qty in running_positions.items():
+            price = _close_on(s, d)
+            if price is not None:
+                last_known_close[s] = price
+            else:
+                price = last_known_close.get(s, Decimal(0))
+            equity += price * qty
         daily_snapshots.append(PortfolioSnapshot(date=d, cash=running_cash, positions=dict(running_positions), equity=equity))
 
     return PortfolioSimulationResult(

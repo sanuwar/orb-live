@@ -395,6 +395,48 @@ def test_simulate_portfolio_no_pre_evaluation_start_transactions():
     assert all(t.date <= evaluation_end for t in result.transactions)
 
 
+def test_simulate_portfolio_marks_missing_bar_using_last_known_close_not_zero():
+    # A `master_dates` session with no bar for a held symbol (a genuine
+    # vendor data gap, or a calendar entry that turns out not to be a real
+    # trading day -- e.g. the M52 live run's 2025-01-09 case, a NYSE/Nasdaq
+    # closure this repo's calendar table had missed) must carry the last
+    # known close forward, not fabricate a total, single-day wipeout that
+    # reverses the moment data resumes.
+    master_dates = _business_days(date(2020, 1, 2), 500)
+    evaluation_start = master_dates[300]
+    evaluation_end = master_dates[-1]
+    gap_date = master_dates[400]
+
+    p = Decimal("300")
+    spy_up = []
+    for _ in master_dates:
+        p = p * Decimal("1.0005")
+        spy_up.append(p)
+    spy_series = DailySeries(symbol="SPY", dates=tuple(master_dates), opens=tuple(spy_up), highs=tuple(c + 1 for c in spy_up), lows=tuple(c - 1 for c in spy_up), closes=tuple(spy_up), volumes=tuple([5_000_000] * len(master_dates)))
+
+    full_aaa = _flat_series("AAA", master_dates, Decimal("777.77"))
+    gap_idx = master_dates.index(gap_date)
+    aaa_dates = tuple(d for i, d in enumerate(full_aaa.dates) if i != gap_idx)
+    aaa_opens = tuple(v for i, v in enumerate(full_aaa.opens) if i != gap_idx)
+    aaa_highs = tuple(v for i, v in enumerate(full_aaa.highs) if i != gap_idx)
+    aaa_lows = tuple(v for i, v in enumerate(full_aaa.lows) if i != gap_idx)
+    aaa_closes = tuple(v for i, v in enumerate(full_aaa.closes) if i != gap_idx)
+    aaa_volumes = tuple(v for i, v in enumerate(full_aaa.volumes) if i != gap_idx)
+    aaa_series = DailySeries(symbol="AAA", dates=aaa_dates, opens=aaa_opens, highs=aaa_highs, lows=aaa_lows, closes=aaa_closes, volumes=aaa_volumes)
+
+    monthly_universes = {d: ("AAA",) for d in master_dates}
+    result = simulate_cross_sectional_momentum_portfolio(
+        monthly_universes=monthly_universes, series_by_symbol={"AAA": aaa_series, "SPY": spy_series}, spy_series=spy_series,
+        master_dates=tuple(master_dates), evaluation_start=evaluation_start, evaluation_end=evaluation_end,
+        cost_bps=Decimal("0.0005"), cost_label="base_5bps",
+    )
+    snapshot_by_date = {s.date: s for s in result.daily_snapshots}
+    gap_snapshot = snapshot_by_date[gap_date]
+    assert "AAA" in gap_snapshot.positions  # sole eligible candidate every month -- must be held by day 400
+    prior_snapshot = snapshot_by_date[master_dates[master_dates.index(gap_date) - 1]]
+    assert gap_snapshot.equity == prior_snapshot.equity  # flat price either side of the gap -- equity must not move
+
+
 def test_simulate_portfolio_whole_shares_only():
     master_dates = _business_days(date(2020, 1, 2), 500)
     evaluation_start = master_dates[300]
