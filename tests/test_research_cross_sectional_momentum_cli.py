@@ -10,11 +10,15 @@ from __future__ import annotations
 import hashlib
 from datetime import date
 
+from decimal import Decimal
+
 import scripts.research_cross_sectional_momentum as cli
 from src.cross_sectional_momentum_research import (
     IWB_CIK,
     IWB_SERIES_ID,
+    MomentumTransaction,
     NportFiling,
+    PortfolioSimulationResult,
     RawHolding,
     ResolvedHolding,
     UniverseSnapshot,
@@ -112,3 +116,45 @@ def test_build_monthly_universes_empty_before_any_filing_is_public():
     monthly_universes, filing_for_signal = cli.build_monthly_universes(signal_dates, snapshots)
     assert monthly_universes[date(2020, 6, 1)] == ()
     assert filing_for_signal[date(2020, 6, 1)] is None
+
+
+def _txn(d: date, symbol: str = "AAA") -> MomentumTransaction:
+    return MomentumTransaction(
+        date=d, symbol=symbol, side="BUY", quantity=10, price=Decimal("100"),
+        notional=Decimal("1000"), cost=Decimal("0.50"), reason="signal",
+    )
+
+
+def _result(cost_label: str, transactions: tuple[MomentumTransaction, ...]) -> PortfolioSimulationResult:
+    return PortfolioSimulationResult(
+        cost_label=cost_label, transactions=transactions, blocked_intents=(), daily_snapshots=(),
+        monthly_signals=(), open_positions_at_end={}, final_cash=Decimal("0"),
+    )
+
+
+def test_stage0_duplicate_check_ignores_expected_base_stress_overlap():
+    # Base and stress are two independent simulations of the same
+    # signals/prices, so identical (date, symbol, side, quantity, price,
+    # reason) tuples routinely recur across the two runs -- that overlap
+    # must not be flagged as a duplicate transaction.
+    shared = _txn(date(2021, 1, 4))
+    base_result = _result("base", (shared,))
+    stress_result = _result("stress", (shared,))
+    checks = cli.run_stage0_checks(
+        snapshots=(), monthly_universes={}, signal_dates=(), series_by_symbol={}, spy_series=None,
+        base_result=base_result, stress_result=stress_result,
+    )
+    assert checks["item9_no_duplicates_no_unclassified_blocked"]["duplicate_transaction_count"] == 0
+    assert checks["item9_no_duplicates_no_unclassified_blocked"]["ok"] is True
+
+
+def test_stage0_duplicate_check_still_catches_a_real_within_run_duplicate():
+    shared = _txn(date(2021, 1, 4))
+    base_result = _result("base", (shared, shared))
+    stress_result = _result("stress", ())
+    checks = cli.run_stage0_checks(
+        snapshots=(), monthly_universes={}, signal_dates=(), series_by_symbol={}, spy_series=None,
+        base_result=base_result, stress_result=stress_result,
+    )
+    assert checks["item9_no_duplicates_no_unclassified_blocked"]["duplicate_transaction_count"] == 1
+    assert checks["item9_no_duplicates_no_unclassified_blocked"]["ok"] is False

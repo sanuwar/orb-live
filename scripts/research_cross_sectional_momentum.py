@@ -535,9 +535,16 @@ def run_stage0_checks(
         "test_trend_filter_excludes_signal_date_bar_from_its_own_sma (no lookahead in the trend filter).",
     }
 
-    all_transactions = list(base_result.transactions) + list(stress_result.transactions)
-    txn_keys = [(t.date, t.symbol, t.side, t.quantity, t.price, t.reason) for t in all_transactions]
-    duplicate_count = len(txn_keys) - len(set(txn_keys))
+    def _duplicate_count(transactions: Any) -> int:
+        keys = [(t.date, t.symbol, t.side, t.quantity, t.price, t.reason) for t in transactions]
+        return len(keys) - len(set(keys))
+
+    # Checked per cost scenario, not pooled: base and stress are two
+    # independent simulations of the same signals/prices, so identical
+    # (date, symbol, side, quantity, price, reason) tuples routinely recur
+    # across the two runs (e.g. cost differences rarely change a rounded
+    # share count) -- that overlap is expected, not a duplicate order.
+    duplicate_count = _duplicate_count(base_result.transactions) + _duplicate_count(stress_result.transactions)
     unclassified_blocked = [b for b in list(base_result.blocked_intents) + list(stress_result.blocked_intents) if not b.reason]
     checks["item9_no_duplicates_no_unclassified_blocked"] = {
         "ok": duplicate_count == 0 and len(unclassified_blocked) == 0,
