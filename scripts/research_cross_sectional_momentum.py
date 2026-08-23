@@ -35,7 +35,7 @@ if os.fspath(ROOT) not in sys.path:
 
 import scripts.research_capital_target_strategy_family as m48_cli
 from src.live_shadow_session import UrllibMarketDataHttpClient
-from src.market_data_provider import AlpacaCredentials
+from src.market_data_provider import AlpacaCredentials, MarketDataProviderError
 from src.orb_capital_target_strategy_family_research import DailySeries, daily_series_from_bars
 from src.orb_research_historical_calendar import research_regular_session_bounds
 from src.orb_universe_expansion_research import CachingHttpClient
@@ -234,6 +234,14 @@ US_SEARCH_EXCHANGES = ("UN", "UW")
 OPENFIGI_REQUEST_DELAY_SECONDS = 5.0
 OPENFIGI_MAX_RETRIES = 8
 
+#: Alpaca's SIP daily-bar endpoint also rate-limits (HTTP 429) under the
+#: sustained ~940-symbol sequential fetch this pipeline performs. Retried
+#: with exponential backoff, same pattern as OPENFIGI_MAX_RETRIES above --
+#: a 429 is a transient capacity signal, not a "no data" result, so it must
+#: never be treated as symbol-level failure.
+ALPACA_RATE_LIMIT_MAX_RETRIES = 6
+ALPACA_RATE_LIMIT_BASE_DELAY_SECONDS = 5.0
+
 #: Corporate-suffix tokens stripped, longest-first, to build a "bare"
 #: name variant. N-PORT filings spell these out in full, all-caps
 #: ("LOCKHEED MARTIN CORPORATION") -- confirmed by a live smoke test to
@@ -392,10 +400,21 @@ async def fetch_daily_bars_for_symbols(symbols: tuple[str, ...], *, fetch_missin
     now = lambda: datetime.now(timezone.utc)  # noqa: E731
     series_by_symbol: dict[str, DailySeries] = {}
     for i, symbol in enumerate(symbols):
-        bars, _raw_pages = await m48_cli.fetch_daily_bars(
-            transport, credentials=credentials, symbol=symbol, start=WARMUP_TARGET_START,
-            end_exclusive=ALPACA_FETCH_END_EXCLUSIVE, now=now, feed=ALPACA_FEED,
-        )
+        bars: list[Any] | None = None
+        for attempt in range(ALPACA_RATE_LIMIT_MAX_RETRIES):
+            try:
+                bars, _raw_pages = await m48_cli.fetch_daily_bars(
+                    transport, credentials=credentials, symbol=symbol, start=WARMUP_TARGET_START,
+                    end_exclusive=ALPACA_FETCH_END_EXCLUSIVE, now=now, feed=ALPACA_FEED,
+                )
+                break
+            except MarketDataProviderError as exc:
+                if "status 429" not in str(exc) or attempt == ALPACA_RATE_LIMIT_MAX_RETRIES - 1:
+                    raise
+                delay = ALPACA_RATE_LIMIT_BASE_DELAY_SECONDS * (2**attempt)
+                print(f"[M52 daily {i+1}/{len(symbols)}] {symbol}: rate limited, retry {attempt + 1}/{ALPACA_RATE_LIMIT_MAX_RETRIES} in {delay:.0f}s")
+                time.sleep(delay)
+        assert bars is not None
         if bars:
             series_by_symbol[symbol] = daily_series_from_bars(bars)
         print(f"[M52 daily {i+1}/{len(symbols)}] {symbol}: {len(bars)} bars")
