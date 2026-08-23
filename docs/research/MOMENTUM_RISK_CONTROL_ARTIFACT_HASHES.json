@@ -1,0 +1,20 @@
+{
+  "arm_a_classification": "POSITIVE_BUT_INSUFFICIENT",
+  "arm_b_classification": "POSITIVE_BUT_INSUFFICIENT",
+  "generated_at": "2026-08-23T05:03:25.525917+00:00",
+  "generation_git_head_sha": "4c43fe96ab80d739fd10a9bd6bfa4c1319f67865",
+  "generation_source_file_sha256": {
+    "scripts/research_momentum_risk_control.py": "67091d5abc02f113b73057739d71317f96b9400f0be3da29a9c96ab46ba9e1c1",
+    "src/cross_sectional_momentum_research.py": "cde0af38c8c3c91b5a2b33d51449b67a03129d0f8bcf59630056194cbd1ce352",
+    "src/momentum_risk_control_research.py": "038196ee99c9fbcd9fb176a0894e13fc5e4f595c2833f708e46cfe0efc5ac3cf"
+  },
+  "generation_working_tree_clean": true,
+  "issue": 358,
+  "m53_decision": {
+    "decision": "PARKED_NO_CREDIBLE_RISK_CONTROL",
+    "reason": "neither_arm_target_feasible",
+    "selected_arm": null
+  },
+  "milestone": "M53",
+  "result_sha256": "a3d3ebbd62f45331115a74583f7f8c378e9f2e786fb693b12865fff8860122c1"
+}

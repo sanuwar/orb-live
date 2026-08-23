@@ -142,3 +142,8 @@ artifacts/research-untouched-2019-2020-validation/
 # hashes document and the results tables in the committed report, same
 # convention as M48-M51 above.
 artifacts/research-cross-sectional-momentum/
+
+# Research tooling: M53 bounded momentum risk-control feasibility
+# (Issue #358). Reuses the M52 caches above directly; this only holds
+# M53's own results JSON. Same never-committed convention.
+artifacts/research-momentum-risk-control/

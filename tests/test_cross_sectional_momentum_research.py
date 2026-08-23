@@ -37,6 +37,7 @@ from src.cross_sectional_momentum_research import (
     compute_portfolio_metrics,
     classify_cross_sectional_momentum,
     evaluate_liquidity_eligibility,
+    compute_market_vol_exposure_multiplier,
     parse_nport_holdings_xml,
     rank_and_select_top_n,
     resolve_holding,
@@ -327,6 +328,59 @@ def test_trend_filter_excludes_signal_date_bar_from_its_own_sma():
 
 
 # ---------------------------------------------------------------------------
+# M53 (Issue #358) Arm B: market-volatility exposure multiplier.
+# ---------------------------------------------------------------------------
+
+
+def test_market_vol_exposure_multiplier_insufficient_history_returns_none():
+    closes = [Decimal("100")] * 10  # far short of the required 64 (63 + 1)
+    assert compute_market_vol_exposure_multiplier(closes, lookback_sessions=63, target_annualized_vol=Decimal("0.15")) is None
+
+
+def test_market_vol_exposure_multiplier_zero_vol_returns_full_exposure():
+    closes = [Decimal("100")] * 64  # flat -- zero realized daily-return volatility
+    result = compute_market_vol_exposure_multiplier(closes, lookback_sessions=63, target_annualized_vol=Decimal("0.15"))
+    assert result == Decimal("1.0")
+
+
+def test_market_vol_exposure_multiplier_never_exceeds_1_when_vol_is_low():
+    # A tiny, non-zero oscillation -- annualized vol well under the 15%
+    # target -- must still cap at exactly 1.0, never lever up.
+    closes = []
+    p = Decimal("100")
+    for i in range(64):
+        p = p * (Decimal("1.0001") if i % 2 == 0 else Decimal("0.9999"))
+        closes.append(p)
+    result = compute_market_vol_exposure_multiplier(closes, lookback_sessions=63, target_annualized_vol=Decimal("0.15"))
+    assert result == Decimal("1.0")
+
+
+def test_market_vol_exposure_multiplier_scales_down_when_vol_exceeds_target():
+    # A large, deterministic daily oscillation -- realized annualized vol
+    # far above the 15% target -- must scale the multiplier down well
+    # below 1.0. The expected value is computed independently here (a
+    # plain sum-of-squares loop), not by re-calling the implementation's
+    # own statistics.pstdev, so this is a genuine cross-check of the math.
+    closes = [Decimal("100")]
+    p = Decimal("100")
+    daily_returns: list[float] = []
+    for i in range(63):
+        r = Decimal("0.03") if i % 2 == 0 else Decimal("-0.03")
+        p = p * (1 + r)
+        closes.append(p)
+        daily_returns.append(float(r))
+    mean = sum(daily_returns) / len(daily_returns)
+    variance = sum((r - mean) ** 2 for r in daily_returns) / len(daily_returns)
+    expected_annualized_vol = Decimal(str((variance ** 0.5) * (252 ** 0.5)))
+    expected_multiplier = min(Decimal("1.0"), Decimal("0.15") / expected_annualized_vol)
+
+    result = compute_market_vol_exposure_multiplier(closes, lookback_sessions=63, target_annualized_vol=Decimal("0.15"))
+    assert result is not None
+    assert abs(result - expected_multiplier) < Decimal("0.0001")
+    assert result < Decimal("1.0")
+
+
+# ---------------------------------------------------------------------------
 # Portfolio simulation: synthetic end-to-end.
 # ---------------------------------------------------------------------------
 
@@ -457,6 +511,123 @@ def test_simulate_portfolio_whole_shares_only():
     for t in result.transactions:
         assert t.quantity == int(t.quantity)
         assert t.quantity > 0
+
+
+# ---------------------------------------------------------------------------
+# M53 (Issue #358) Arm A: breadth (top_n), and Arm B: vol-exposure cap,
+# both as extensions of the same simulate_cross_sectional_momentum_portfolio
+# event loop -- reused, not reimplemented, so M52's own baseline is
+# reproduced by calling it with no new arguments.
+# ---------------------------------------------------------------------------
+
+
+def test_simulate_portfolio_top_n_30_holds_more_positions_than_default_top_15():
+    master_dates = _business_days(date(2020, 1, 2), 500)
+    evaluation_start = master_dates[300]
+    evaluation_end = master_dates[-1]
+    p = Decimal("300")
+    spy_up = []
+    for _ in master_dates:
+        p = p * Decimal("1.0005")
+        spy_up.append(p)
+    spy_series = DailySeries(symbol="SPY", dates=tuple(master_dates), opens=tuple(spy_up), highs=tuple(c + 1 for c in spy_up), lows=tuple(c - 1 for c in spy_up), closes=tuple(spy_up), volumes=tuple([5_000_000] * len(master_dates)))
+
+    symbols = [f"SYM{i:02d}" for i in range(35)]  # more candidates than either top_n
+    series_by_symbol = {"SPY": spy_series}
+    for sym in symbols:
+        up_closes = []
+        price = Decimal("50")
+        for _ in master_dates:
+            price = price * Decimal("1.001")
+            up_closes.append(price)
+        series_by_symbol[sym] = DailySeries(symbol=sym, dates=tuple(master_dates), opens=tuple(up_closes), highs=tuple(c + 1 for c in up_closes), lows=tuple(c - 1 for c in up_closes), closes=tuple(up_closes), volumes=tuple([5_000_000] * len(master_dates)))
+    monthly_universes = {d: tuple(symbols) for d in master_dates}
+
+    result_15 = simulate_cross_sectional_momentum_portfolio(
+        monthly_universes=monthly_universes, series_by_symbol=series_by_symbol, spy_series=spy_series,
+        master_dates=tuple(master_dates), evaluation_start=evaluation_start, evaluation_end=evaluation_end,
+        cost_bps=Decimal("0.0005"), cost_label="base_5bps", top_n=15,
+    )
+    result_30 = simulate_cross_sectional_momentum_portfolio(
+        monthly_universes=monthly_universes, series_by_symbol=series_by_symbol, spy_series=spy_series,
+        master_dates=tuple(master_dates), evaluation_start=evaluation_start, evaluation_end=evaluation_end,
+        cost_bps=Decimal("0.0005"), cost_label="base_5bps", top_n=30,
+    )
+    max_held_15 = max(len(s.positions) for s in result_15.daily_snapshots)
+    max_held_30 = max(len(s.positions) for s in result_30.daily_snapshots)
+    assert max_held_15 <= 15
+    assert 15 < max_held_30 <= 30
+
+
+def test_simulate_portfolio_vol_exposure_cap_scales_down_position_sizing():
+    master_dates = _business_days(date(2020, 1, 2), 500)
+    evaluation_start = master_dates[300]
+    evaluation_end = master_dates[-1]
+
+    up_closes = []
+    price = Decimal("50")
+    for _ in master_dates:
+        price = price * Decimal("1.001")
+        up_closes.append(price)
+    aaa_series = DailySeries(symbol="AAA", dates=tuple(master_dates), opens=tuple(up_closes), highs=tuple(c + 1 for c in up_closes), lows=tuple(c - 1 for c in up_closes), closes=tuple(up_closes), volumes=tuple([5_000_000] * len(master_dates)))
+
+    # Net-uptrending but genuinely volatile SPY (alternating +3%/-1% daily)
+    # -- realized annualized vol far above the 15% target, while still
+    # staying above its own 200-session SMA so the trend filter stays
+    # active in both runs (isolating the vol-cap effect alone).
+    p = Decimal("300")
+    turbulent_spy = []
+    for i in range(len(master_dates)):
+        r = Decimal("0.03") if i % 2 == 0 else Decimal("-0.01")
+        p = p * (1 + r)
+        turbulent_spy.append(p)
+    spy_series = DailySeries(symbol="SPY", dates=tuple(master_dates), opens=tuple(turbulent_spy), highs=tuple(c + 1 for c in turbulent_spy), lows=tuple(c - 1 for c in turbulent_spy), closes=tuple(turbulent_spy), volumes=tuple([5_000_000] * len(master_dates)))
+
+    monthly_universes = {d: ("AAA",) for d in master_dates}
+
+    uncapped = simulate_cross_sectional_momentum_portfolio(
+        monthly_universes=monthly_universes, series_by_symbol={"AAA": aaa_series, "SPY": spy_series}, spy_series=spy_series,
+        master_dates=tuple(master_dates), evaluation_start=evaluation_start, evaluation_end=evaluation_end,
+        cost_bps=Decimal("0.0005"), cost_label="base_5bps", top_n=1,
+    )
+    capped = simulate_cross_sectional_momentum_portfolio(
+        monthly_universes=monthly_universes, series_by_symbol={"AAA": aaa_series, "SPY": spy_series}, spy_series=spy_series,
+        master_dates=tuple(master_dates), evaluation_start=evaluation_start, evaluation_end=evaluation_end,
+        cost_bps=Decimal("0.0005"), cost_label="base_5bps", top_n=1,
+        vol_target_annualized=Decimal("0.15"), vol_lookback_sessions=63,
+    )
+    uncapped_first_buy = next(t for t in uncapped.transactions if t.side == "BUY")
+    capped_first_buy = next(t for t in capped.transactions if t.side == "BUY")
+    assert uncapped.monthly_signals[0].trend_active is True
+    assert capped.monthly_signals[0].trend_active is True  # same trend filter, precedence unaffected
+    assert capped_first_buy.quantity < uncapped_first_buy.quantity
+
+
+def test_simulate_portfolio_vol_exposure_cap_is_zero_when_trend_filter_inactive():
+    # The trend filter must still take precedence: when it is off,
+    # selected is empty regardless of the vol-cap multiplier, so applying
+    # a vol cap never re-enables exposure the trend filter has blocked.
+    master_dates = _business_days(date(2020, 1, 2), 500)
+    evaluation_start = master_dates[300]
+    evaluation_end = master_dates[-1]
+
+    up_closes = []
+    price = Decimal("50")
+    for _ in master_dates:
+        price = price * Decimal("1.001")
+        up_closes.append(price)
+    aaa_series = DailySeries(symbol="AAA", dates=tuple(master_dates), opens=tuple(up_closes), highs=tuple(c + 1 for c in up_closes), lows=tuple(c - 1 for c in up_closes), closes=tuple(up_closes), volumes=tuple([5_000_000] * len(master_dates)))
+    flat_spy = _flat_series("SPY", master_dates, Decimal("400"))  # close == SMA -> not strictly greater -> trend inactive
+
+    monthly_universes = {d: ("AAA",) for d in master_dates}
+    result = simulate_cross_sectional_momentum_portfolio(
+        monthly_universes=monthly_universes, series_by_symbol={"AAA": aaa_series, "SPY": flat_spy}, spy_series=flat_spy,
+        master_dates=tuple(master_dates), evaluation_start=evaluation_start, evaluation_end=evaluation_end,
+        cost_bps=Decimal("0.0005"), cost_label="base_5bps", top_n=1,
+        vol_target_annualized=Decimal("0.15"), vol_lookback_sessions=63,
+    )
+    assert result.transactions == ()
+    assert result.open_positions_at_end == {}
 
 
 # ---------------------------------------------------------------------------

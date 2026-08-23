@@ -27,6 +27,7 @@ genuinely knowable at the time.
 from __future__ import annotations
 
 import re
+import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -100,6 +101,7 @@ __all__ = [
     "MomentumRanking",
     "rank_and_select_top_n",
     "trend_filter_active",
+    "compute_market_vol_exposure_multiplier",
     "MomentumPosition",
     "MomentumTransaction",
     "BlockedIntent",
@@ -531,6 +533,36 @@ def trend_filter_active(spy_closes: Sequence[Decimal]) -> bool | None:
     return signal_close > sma
 
 
+def compute_market_vol_exposure_multiplier(
+    spy_closes: Sequence[Decimal], *, lookback_sessions: int, target_annualized_vol: Decimal,
+) -> Decimal | None:
+    """M53 Arm B (Issue #358): lagged monthly market-volatility exposure
+    cap, generic over `lookback_sessions`/`target_annualized_vol` so this
+    stays reusable pure logic rather than an M53-specific hardcode --
+    M53's own frozen 63-session/15% constants are supplied by its
+    caller, not baked in here. `spy_closes` must be exactly the trailing
+    `lookback_sessions + 1` adjusted closes ending at (and including) the
+    signal session -- the same ends-at-signal-date, no-lookahead
+    convention `compute_12_1_momentum` and `trend_filter_active` use
+    elsewhere in this module. Annualized volatility uses the same
+    population-stdev annualization convention as
+    `annualized_volatility_pct` (src/orb_capital_target_strategy_family_research.py),
+    applied to daily instead of monthly returns and sqrt(252) instead of
+    sqrt(12). Returns `None` (never a guess) if there is not enough
+    history -- the caller must treat that the same as an inactive trend
+    filter (zero exposure), never substitute a default multiplier."""
+    required = lookback_sessions + 1
+    if len(spy_closes) < required:
+        return None
+    trailing = spy_closes[-required:]
+    returns = [float(trailing[i] / trailing[i - 1] - 1) for i in range(1, len(trailing))]
+    stdev = statistics.pstdev(returns)
+    if stdev <= 0:
+        return Decimal("1.0")  # no observed volatility -- no cap needed, still bounded by the min(1.0, ...) below
+    annualized_vol = Decimal(str(stdev * (252 ** 0.5)))
+    return min(Decimal("1.0"), target_annualized_vol / annualized_vol)
+
+
 # ---------------------------------------------------------------------------
 # Portfolio mechanics: monthly rebalance, equal-capital weighting, whole
 # shares, deterministic ticker-ascending event ordering.
@@ -672,15 +704,31 @@ def simulate_cross_sectional_momentum_portfolio(
     cost_label: str,
     starting_capital: Decimal = STARTING_CAPITAL,
     filing_accession_for_signal: Mapping[date, str] | None = None,
+    top_n: int = TOP_N,
+    vol_target_annualized: Decimal | None = None,
+    vol_lookback_sessions: int = 63,
 ) -> PortfolioSimulationResult:
     """The single frozen monthly-rebalance event loop (Issue #356): at
     each month-end signal date, evaluate the SPY trend filter and (if
     active) rank the point-in-time-eligible, liquidity-filtered universe
-    by 12-1 momentum, selecting the top `TOP_N`; execute at the next
-    session's open with equal-capital weighting, whole shares, sells
-    before buys, deterministic ticker-ascending tie-breaks, and cash
-    that never goes negative. Marks the endpoint at `evaluation_end`'s
-    exact close, never a positional lookup."""
+    by 12-1 momentum, selecting the top `top_n` (defaults to the frozen
+    M52 `TOP_N`); execute at the next session's open with equal-capital
+    weighting, whole shares, sells before buys, deterministic
+    ticker-ascending tie-breaks, and cash that never goes negative.
+    Marks the endpoint at `evaluation_end`'s exact close, never a
+    positional lookup.
+
+    `top_n` and `vol_target_annualized` are M53 (Issue #358) additions,
+    both defaulting to exactly reproduce M52's original behavior when
+    left unset (`top_n=TOP_N`, no volatility exposure cap at all) --
+    M52's own baseline is reproduced by calling this function with no
+    new arguments, the same code path, not a separately maintained
+    copy. When `vol_target_annualized` is set, each signal date's
+    equal-capital target is scaled by
+    `compute_market_vol_exposure_multiplier(...)` (M53 Arm B only);
+    the existing SPY trend filter still takes precedence -- when it is
+    inactive, `selected` is already empty and the multiplier has no
+    effect, so exposure is zero either way."""
     signal_dates = month_end_signal_dates(master_dates, start=evaluation_start, end=evaluation_end)
     transactions: list[MomentumTransaction] = []
     blocked: list[BlockedIntent] = []
@@ -713,9 +761,20 @@ def simulate_cross_sectional_momentum_portfolio(
         spy_window = _closes_ending_at(spy_series, as_of=signal_date, window=TREND_FILTER_SMA_SESSIONS + 1)
         trend_active = trend_filter_active(spy_window) if spy_window is not None else None
 
+        exposure_multiplier = Decimal("1.0")
+        if vol_target_annualized is not None:
+            vol_window = _closes_ending_at(spy_series, as_of=signal_date, window=vol_lookback_sessions + 1)
+            multiplier = (
+                compute_market_vol_exposure_multiplier(
+                    vol_window, lookback_sessions=vol_lookback_sessions, target_annualized_vol=vol_target_annualized,
+                )
+                if vol_window is not None else None
+            )
+            exposure_multiplier = multiplier if multiplier is not None else Decimal(0)
+
         selected: tuple[str, ...] = ()
         eligible_count = 0
-        shortfall = TOP_N
+        shortfall = top_n
         if trend_active:
             universe = monthly_universes.get(signal_date, ())
             momentum_by_symbol: dict[str, Decimal] = {}
@@ -740,7 +799,7 @@ def simulate_cross_sectional_momentum_portfolio(
                 if momentum is None:
                     continue
                 momentum_by_symbol[symbol] = momentum
-            ranking = rank_and_select_top_n(momentum_by_symbol, signal_date=signal_date, top_n=TOP_N)
+            ranking = rank_and_select_top_n(momentum_by_symbol, signal_date=signal_date, top_n=top_n)
             selected = ranking.selected
             eligible_count = ranking.eligible_count
             shortfall = ranking.shortfall
@@ -776,7 +835,7 @@ def simulate_cross_sectional_momentum_portfolio(
         target_count = len(selected) if selected else 0
         if target_count > 0:
             portfolio_value = cash + sum((_price_on(s, execution_date) or Decimal(0)) * positions[s].quantity for s in continuing)
-            target_dollars_per_position = portfolio_value / target_count
+            target_dollars_per_position = (portfolio_value * exposure_multiplier) / target_count
 
             # Step 2: trim overweight continuing holdings.
             for symbol in continuing:
