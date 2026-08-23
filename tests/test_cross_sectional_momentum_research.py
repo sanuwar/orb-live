@@ -206,6 +206,32 @@ def test_resolve_holding_same_ticker_from_two_us_venues_still_resolves():
     assert result.ticker == "HON"
 
 
+def test_resolve_holding_normalizes_openfigi_slash_share_class_to_dot():
+    # OpenFIGI's own notation is "BRK/B"; confirmed live against Alpaca
+    # that "BRK.B" is the format its API actually accepts.
+    candidates = [ResolutionCandidate(ticker="BRK/B", exch_code="UN", name="BERKSHIRE HATHAWAY INC-CL B")]
+    result = resolve_holding(_raw(), candidates)
+    assert result.resolution_status == "RESOLVED"
+    assert result.ticker == "BRK.B"
+
+
+def test_resolve_holding_rejects_openfigi_placeholder_ticker_for_delisted_security():
+    # A live run found OpenFIGI returns an internal placeholder "ticker"
+    # (not a real, tradeable symbol) for securities with no current
+    # listing -- e.g. Pluralsight LLC, acquired/delisted in 2021.
+    candidates = [ResolutionCandidate(ticker="0673085D", exch_code="UN", name="PLURALSIGHT LLC")]
+    result = resolve_holding(_raw(), candidates)
+    assert result.resolution_status == "UNRESOLVED"
+    assert result.ticker is None
+
+
+def test_resolve_holding_accepts_dot_share_class_unchanged():
+    candidates = [ResolutionCandidate(ticker="BF.A", exch_code="UN", name="BROWN-FORMAN CORP-CLASS A")]
+    result = resolve_holding(_raw(), candidates)
+    assert result.resolution_status == "RESOLVED"
+    assert result.ticker == "BF.A"
+
+
 # ---------------------------------------------------------------------------
 # Liquidity eligibility.
 # ---------------------------------------------------------------------------

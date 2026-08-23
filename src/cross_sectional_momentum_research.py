@@ -26,6 +26,7 @@ genuinely knowable at the time.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -337,15 +338,47 @@ class ResolvedHolding:
     candidates: tuple[ResolutionCandidate, ...] = field(default_factory=tuple)
 
 
+#: A plausible US common-stock ticker: 1-5 uppercase letters, optionally
+#: a share-class suffix. OpenFIGI's own tickers use "/" for share
+#: classes (e.g. "BRK/B" for Berkshire Hathaway Class B); confirmed live
+#: against Alpaca that its API instead expects "." (e.g. "BRK.B" --
+#: "BRK-B" 400s, "BRKB" silently returns no bars). Both real, valid
+#: share-class notations are accepted here; `_normalize_ticker` below
+#: converts to the "." form Alpaca actually expects. OpenFIGI's search
+#: was ALSO found, via a live run, to sometimes return an internal
+#: placeholder "ticker" (e.g. "0673085D" for Pluralsight LLC, acquired/
+#: delisted in 2021, or "9990302D" for Apache Corp) for securities with
+#: no currently tradeable listing -- exactly the "delisted/renamed/
+#: acquired... never silently replace" case the frozen protocol
+#: anticipates. Such values match neither notation and are filtered out
+#: here, before the uniqueness check, rather than accepted as a
+#: resolution.
+_PLAUSIBLE_TICKER_PATTERN = re.compile(r"^[A-Z]{1,5}([./][A-Z]{1,2})?$")
+
+
+def _is_plausible_ticker(ticker: str) -> bool:
+    return bool(_PLAUSIBLE_TICKER_PATTERN.match(ticker))
+
+
+def _normalize_ticker(ticker: str) -> str:
+    """OpenFIGI's "/" share-class notation (e.g. "BRK/B") normalized to
+    the "." notation Alpaca's API actually expects ("BRK.B"), confirmed
+    live. A ticker with no "/" is returned unchanged."""
+    return ticker.replace("/", ".")
+
+
 def resolve_holding(raw: RawHolding, candidates: Sequence[ResolutionCandidate]) -> ResolvedHolding:
     """Deterministic, fail-closed resolution from already-fetched
     candidate search results: resolves only if filtering to recognized
-    US primary-exchange codes yields EXACTLY ONE distinct ticker.
-    Zero matches -> `UNRESOLVED`; more than one distinct ticker ->
-    `AMBIGUOUS`. Never guesses, never substitutes a current successor
-    for an unresolved historical security."""
-    us_candidates = tuple(c for c in candidates if c.exch_code in US_PRIMARY_EXCHANGE_CODES)
-    distinct_tickers = sorted({c.ticker for c in us_candidates})
+    US primary-exchange codes AND plausible ticker formatting yields
+    EXACTLY ONE distinct NORMALIZED ticker. Zero matches -> `UNRESOLVED`;
+    more than one distinct ticker -> `AMBIGUOUS`. Never guesses, never
+    substitutes a current successor for an unresolved historical
+    security."""
+    us_candidates = tuple(
+        c for c in candidates if c.exch_code in US_PRIMARY_EXCHANGE_CODES and _is_plausible_ticker(c.ticker)
+    )
+    distinct_tickers = sorted({_normalize_ticker(c.ticker) for c in us_candidates})
     if len(distinct_tickers) == 1:
         return ResolvedHolding(raw=raw, ticker=distinct_tickers[0], resolution_status="RESOLVED", candidates=tuple(us_candidates))
     if len(distinct_tickers) == 0:
