@@ -134,3 +134,11 @@ artifacts/research-practical-core-satellite-portfolio/
 # methodology/findings report, not by committing the generated JSON
 # itself.
 artifacts/research-untouched-2019-2020-validation/
+
+# Research tooling: M52 cross-sectional momentum feasibility (Issue
+# #356). Raw SEC EDGAR N-PORT-P filing cache, OpenFIGI identifier-
+# resolution cache, and Alpaca SIP daily-bar cache -- all local-only,
+# never committed. Reproducibility is carried by the committed SHA-256
+# hashes document and the results tables in the committed report, same
+# convention as M48-M51 above.
+artifacts/research-cross-sectional-momentum/
