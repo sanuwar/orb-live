@@ -1,0 +1,13 @@
+{
+  "classification": "POSITIVE_BUT_INSUFFICIENT",
+  "generated_at": "2026-08-23T03:34:17.371724+00:00",
+  "generation_git_head_sha": "3d345ebca19c7159678aaad801cdb66299f9ba6b",
+  "generation_source_file_sha256": {
+    "scripts/research_cross_sectional_momentum.py": "411391271c0e8adf5f866233fe9f9ebc9515eddd99adb5dd8bb31cee651dff66",
+    "src/cross_sectional_momentum_research.py": "484b7b6af03649ca519c60191de6a3a97073e72755e32eb6c55e69b86d6ca9ea"
+  },
+  "generation_working_tree_clean": true,
+  "issue": 356,
+  "milestone": "M52",
+  "result_sha256": "590672f029a519b665b856106d0b35d701b464aa3f12b5a0b1978f18b18ac8f9"
+}

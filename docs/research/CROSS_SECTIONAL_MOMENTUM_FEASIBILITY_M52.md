@@ -100,6 +100,77 @@ No threshold, universe source, lookback, skip period, portfolio size, liquidity 
 
 ---
 
-## Stage-0 result and classification (added in the results commit)
+## Stage-0 result and classification
 
-_Pending -- see the results commit for the full evidence (filing list, universe-snapshot resolution counts, daily-bar coverage), the Stage-0 gate outcome, base/stress metrics by calendar segment, the final classification, and the exact implementation/results-generating commit SHAs._
+Generated `2026-08-23T03:34:17Z` from commit `3d345ebca19c7159678aaad801cdb66299f9ba6b` (clean working tree, both source files' SHA-256 hashes recorded in `artifacts/research-cross-sectional-momentum/results/m52_result.json` / `docs/research/CROSS_SECTIONAL_MOMENTUM_ARTIFACT_HASHES.json`).
+
+### Stage-0 gate: PASS (`_all_ok = True`)
+
+1. **Universe coverage:** a qualifying N-PORT-P filing was available for every one of the 69 monthly signal dates.
+2. **No future-snapshot leakage:** structurally guaranteed, unit-tested.
+3. **Identifier resolution:** 27 filings, 25,054 total holdings across all snapshots, 5,223 (20.85%) unresolved/ambiguous -- reported honestly, per the documented UN/UW-only exchange-search trade-off above. Every resolved holding is a deterministic, never-guessed ticker.
+4. **Daily-bar coverage:** SPY available; all 942 requested resolved tickers returned at least some Alpaca data (0 symbols with zero coverage).
+5. **Corporate actions:** `adjustment=all` used throughout.
+6. **Calendar:** `research_regular_session_bounds` used throughout for session membership.
+7. **Parity:** M48 metric primitives reused unchanged.
+8. **Synthetic proofs:** all pass, including the new `test_simulate_portfolio_marks_missing_bar_using_last_known_close_not_zero` regression added during this run (see below).
+9. **No duplicates / unclassified blocked intents:** 0 duplicate transactions (a Stage-0 harness bug that pooled base+stress transactions before deduplicating was found and fixed -- see "Defects found and fixed" below), 0 unclassified blocked intents.
+10. **Provenance:** clean generating commit, source hashes recorded above.
+
+### Defects found and fixed during this run (all in pipeline/harness code, none in the frozen economic rules)
+
+- **OpenFIGI placeholder tickers / share-class notation:** a live run crashed fetching Alpaca data for `0673085D`, an OpenFIGI-returned internal placeholder (not a real ticker) for Pluralsight LLC, delisted after its 2021 acquisition. `resolve_holding` now requires a plausible ticker format before accepting a candidate, and normalizes OpenFIGI's `/` share-class notation (e.g. `BRK/B`) to Alpaca's required `.` notation (e.g. `BRK.B`), confirmed live.
+- **Alpaca rate limiting:** the ~940-symbol sequential daily-bar fetch triggered Alpaca's SIP 429 rate limit partway through; `fetch_daily_bars_for_symbols` now retries with exponential backoff, scoped to this M52-owned CLI wrapper only.
+- **Stage-0 duplicate-transaction false positive:** the item9 check pooled base and stress transactions before deduplicating, flagging 669 harmless base/stress overlaps (two independent simulations of the same signals routinely produce identical transaction tuples) as duplicates. Fixed to dedup each cost scenario separately.
+- **Single-day equity-marking artifact (the one that changed the classification):** the first Stage-0-clean run classified `NOT_PROMISING` on a 97% max drawdown that turned out to be fabricated -- 2025-01-09 was a full-day NYSE/Nasdaq closure (National Day of Mourning for former President Jimmy Carter) not yet in this repo's research-only calendar table, so the equity-marking loop's `_close_on(...) or Decimal(0)` fallback marked every held position at $0 for that single day, reversing the moment data resumed. Fixed by carrying the last known close forward on a missing bar instead of the calendar itself (adding the missing holiday was rejected -- it shifts 252-session lookback boundaries enough to create a 1-day overlap between two unrelated, already-completed out-of-sample validation periods, Issue #321's fourth-period baseline study, which is out of M52's scope to reopen). Confirmed the corrected max drawdown reflects a real, gradual multi-week decline (equity peak $76,898.81 on 2026-06-22 to trough $50,645.61 on 2026-07-29), not another artifact.
+
+### Base (5bps) metrics
+
+| Metric | Value |
+|---|---|
+| Mean monthly $ | **$456.87** |
+| Endpoint-marked net P&L | $35,315.86 |
+| Gross P&L | $36,070.72 |
+| CAGR | 15.15% |
+| Sharpe | 0.62 |
+| Sortino | 1.08 |
+| Max drawdown | 34.14% ($26,253.20) |
+| Worst month | -25.08% (2026-07, -$7,525.37) |
+| 5th-percentile month | -10.52% |
+| Profitable months | 51.47% |
+| Longest losing streak | 3 months |
+| Total costs | $754.86 |
+| Avg / max invested positions | 12.07 / 15 |
+| Avg cash utilization | 76.35% |
+| Best-symbol contribution share | 9.09% |
+| Signals / intended orders / fills / blocked | 69 / 840 / 1016 / 0 |
+
+### Stress (10bps) metrics
+
+Mean monthly $ **$439.23**; endpoint-marked net P&L $32,857.36; max drawdown 34.23%; worst month -25.19%; profitable months 51.47%.
+
+### Calendar-segment net P&L (base)
+
+| Segment | Net P&L | Positive? |
+|---|---|---|
+| 2021 | $3,892.36 | Yes |
+| 2022 | -$6,724.93 | No |
+| 2023 | $1,063.53 | Yes |
+| 2024 | $16,490.35 | Yes |
+| 2025 | $4,284.92 | Yes |
+| 2026 YTD | $12,060.89 | Yes |
+
+5 of 6 segments positive.
+
+### SPY buy-and-hold comparison (reference only)
+
+Net P&L $37,870.23, final equity $67,870.23, max drawdown 18.69% -- a smoother path than the strategy's, as expected for a single diversified index versus a concentrated 15-stock momentum sleeve.
+
+### Classification: `POSITIVE_BUT_INSUFFICIENT`
+
+`TARGET_FEASIBLE` gates that passed: pooled base/stress net P&L both positive, >=5 of 6 segments positive, best-symbol contribution share <=35%, stress mean monthly $ > $0.
+`TARGET_FEASIBLE` gates that failed: base mean monthly $ ($456.87 < $500 target), base max drawdown (34.14% > 25% limit), profitable months (51.47% < 55%), worst month (-25.08% < -10% floor).
+`NOT_PROMISING` triggers, all false: base/stress endpoint P&L both positive, base max drawdown 34.14% <= 35%, 5/6 segments positive (>= 3 required).
+`POSITIVE_BUT_INSUFFICIENT` conditions, all true: pooled base/stress net P&L positive, base max drawdown <= 35%, >= 1 segment positive.
+
+**Interpretation:** the frozen strategy is directionally profitable on this $30,000 account after realistic costs -- positive CAGR, positive net P&L in both cost scenarios, 5 of 6 calendar years/YTD periods profitable -- but falls short of the $500/month practical target primarily on drawdown depth (34% vs a 25% limit) and single-month tail risk (-25% worst month vs a -10% floor), both driven by the concentrated 15-name, no-hedge construction. Not a rejection of the underlying momentum signal; a statement that this specific sizing/risk configuration is not yet practically deployable without further risk controls (position-level stops, volatility targeting, or a wider/less concentrated book) that were explicitly out of scope for this one frozen run. No follow-on tuning was performed -- per Issue #356, one bounded run, one deterministic classification.
