@@ -69,11 +69,24 @@ VALID_INFERENTIAL_EVALUABILITY = {
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _is_shallow_clone() -> bool:
+    completed = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0 and completed.stdout.strip() == "true"
+
+
 def _git_blob_hash_at_commit(commit_sha: str, relative_path: str) -> str:
     """Resolve the blob hash for `relative_path` as it existed at `commit_sha`.
 
     Uses only the local Git object database already present in this
-    checkout -- no network access, no market-data cache.
+    checkout -- no network access, no market-data cache. Historical commits
+    are only reachable in a full (non-shallow) clone; callers should skip
+    via `_is_shallow_clone()` rather than let this raise in CI's default
+    shallow checkout.
     """
     completed = subprocess.run(
         ["git", "rev-parse", f"{commit_sha}:{relative_path}"],
@@ -446,7 +459,14 @@ def test_ledger_citations_resolve_against_actual_git_history_offline(ledger):
     """For every ledger citation, confirm commit:path exists, resolve the
     blob at that historical commit, and confirm it equals the ledger's
     recorded blob hash -- using only the local Git object database already
-    present in this checkout. No network or market-data access."""
+    present in this checkout. No network or market-data access.
+
+    Requires a full (non-shallow) clone, since it resolves historical
+    commits that predate HEAD; CI's default `actions/checkout` uses
+    fetch-depth: 1, so this is skipped (not failed, not silently passed)
+    there, and runs for real wherever full history is available."""
+    if _is_shallow_clone():
+        pytest.skip("shallow clone: historical commits not fetched, cannot verify offline")
     for entry in ledger["entries"]:
         resolved = _git_blob_hash_at_commit(entry["commit_sha"], entry["authoritative_artifact_path"])
         assert resolved == entry["git_blob_hash"], (
@@ -464,6 +484,10 @@ def test_ledger_citations_resolve_against_actual_git_history_offline(ledger):
 
 
 def test_m55_checkpoint_ledger_hash_matches_cited_evidence_cutoff(ledger):
+    """Requires a full (non-shallow) clone for the same reason as
+    test_ledger_citations_resolve_against_actual_git_history_offline."""
+    if _is_shallow_clone():
+        pytest.skip("shallow clone: historical commits not fetched, cannot verify offline")
     m55_stage = next(s for s in ledger["non_ledger_evidence_stages"] if s["milestone"] == "M55")
     checkpoint_path = m55_stage["checkpoint_ledger_path"]
     expected_hash = m55_stage["checkpoint_ledger_blob_hash"]
