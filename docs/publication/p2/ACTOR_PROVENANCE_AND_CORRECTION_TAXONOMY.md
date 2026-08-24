@@ -1,0 +1,45 @@
+# Actor Provenance and Correction Taxonomy
+
+**Purpose:** define a schema for classifying who/what performed each research activity and what kind of defect each correction addressed, so that a future manuscript never states an attribution the committed record cannot support. This document defines the schema and applies it to the M43–M55 correction record already summarized in P1's `HUMAN_LLM_WORKFLOW_AUDIT.md`; it does not reclassify any figure, and where the underlying commit history does not distinguish actors precisely, the entry is marked `UNKNOWN` rather than guessed.
+
+## Actor categories
+
+| Category | Definition |
+|---|---|
+| `HUMAN_OPERATOR` | The repository owner/operator, acting directly (defining scope, approving protocols, authorizing runs, merging PRs). |
+| `CLAUDE_CODE` | Claude Code / Claude Sonnet 5 (or the specific model identified in the milestone's own record), acting under a human work order. |
+| `CHATGPT_CODEX` | ChatGPT/Codex, used for the P1 audit and draft materials per `AI_USE_DISCLOSURE_DRAFT.md` (exact scope of use not committed beyond that statement). |
+| `AUTOMATED_TEST` | A committed pytest/regression test executing deterministically, with no human or AI judgment involved in that specific execution. |
+| `CI` | GitHub Actions or an equivalent automated pipeline, executing committed test/check commands. |
+| `MIXED_HUMAN_AI` | An activity the commit record shows as jointly performed (e.g., an AI-drafted diagnosis a human then verified against a specific artifact before accepting it) where neither party alone is a complete or accurate attribution. |
+| `UNKNOWN` | The committed record does not distinguish which actor(s) performed this specific activity. **This category exists precisely so P2 never fabricates a more specific attribution than the evidence supports; using it is not a gap in this taxonomy, it is this taxonomy working correctly.** |
+
+## Activity categories (applied per research or correction event)
+
+`PROPOSAL`, `PROTOCOL_DRAFTING`, `IMPLEMENTATION`, `EXECUTION`, `DEFECT_INTRODUCTION`, `DEFECT_DETECTION`, `DIAGNOSIS`, `CORRECTION`, `RERUN`, `VERIFICATION`, `INTERPRETATION`, `APPROVAL`, `MERGE_ACCOUNTABILITY`.
+
+## Defect categories
+
+`DATA_PROVENANCE`, `UNIVERSE_CONSTRUCTION`, `TIMING_LOOKAHEAD`, `ENTRY_EXIT_LOGIC`, `CAPITAL_ACCOUNTING`, `COST_MODELING`, `AGGREGATION`, `STALE_ARTIFACT`, `NARRATIVE_ARTIFACT_INCONSISTENCY`, `CONFIGURATION_SAFETY`, `CITATION_PROVENANCE_AMBIGUITY`.
+
+## Applied classification of the M43–M55 defect-and-correction record
+
+Reproduced from P1's `HUMAN_LLM_WORKFLOW_AUDIT.md` observed-defect table, with the two taxonomies above layered on. Where P1's own audit already states an attribution is not actor-labeled, that is preserved as `UNKNOWN` here rather than resolved by inference.
+
+| Milestone | Defect category | `DEFECT_INTRODUCTION` actor | `DEFECT_DETECTION` actor | `CORRECTION` actor | `VERIFICATION` actor | Evidence |
+|---|---|---|---|---|---|---|
+| M45 | `AGGREGATION` (wrong session-calendar provider) | `UNKNOWN` (implementation actor for the original aggregation code not separately recorded) | `UNKNOWN` (P1: "manual cross-check against P2 row-level outcomes" — does not state who performed the cross-check) | `UNKNOWN` (commit record shows corrected code and regenerated results, not which actor authored the fix) | `AUTOMATED_TEST` (regression tests added and passing) | `docs/research/ORB_LATER_FIRST_ENTRY_RECOVERY_EXPERIMENT.md` |
+| M46 | `DATA_PROVENANCE` + `AGGREGATION` (wrong market feed for liquidity; concentration denominator/unit/key mismatches) | `UNKNOWN` | `UNKNOWN` (P1: "implausible zero-candidate run and later review of concentration math") | `UNKNOWN` | `AUTOMATED_TEST` | `docs/research/ORB_SMALL_MIDCAP_MOMENTUM_LANE_FEASIBILITY.md` |
+| M47 | `UNIVERSE_CONSTRUCTION` + `CONFIGURATION_SAFETY` (wrong gap/RVOL config; wrong evaluation universe; DST display) | `UNKNOWN` | `UNKNOWN` (P1: "baseline parity failure and independent review" — "independent review" is not actor-labeled per P1's own provenance-limitations note) | `UNKNOWN` | `AUTOMATED_TEST` (full six-period rerun preserved n=0) | `docs/research/ORB_SEQUENTIAL_SECOND_TRADE_FEASIBILITY.md` |
+| M48 | `COST_MODELING` + `CAPITAL_ACCOUNTING` + `TIMING_LOOKAHEAD` (19 findings: IEX/SIP feed, compounding, rebalance, same-day stop, endpoint accounting, warm-up trading, one-session lookahead, anchor, downside deviation, counts, segment completeness) | `UNKNOWN` | `UNKNOWN` (P1: "repeated independent-review passes and internal reconciliation failures") | `UNKNOWN` | `AUTOMATED_TEST` (hash manifests, tests, reran from clean commits) | `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_FEASIBILITY.md`, `ORB_CAPITAL_TARGET_STRATEGY_FAMILY_ARTIFACT_HASHES.json` |
+| M50 | `NARRATIVE_ARTIFACT_INCONSISTENCY` (first revision incorrectly treated universe sourcing as the blocker) | `UNKNOWN` | `UNKNOWN` (P1: "review supplied an alternate route to the same official SEC documents") | `UNKNOWN` | `HUMAN_OPERATOR` implied by the retrieval-route change requiring an operator-supplied accession number per the report's own correction note, though not explicitly actor-labeled in P1 | `docs/research/ORB_UNTOUCHED_2019_2020_VALIDATION_FEASIBILITY.md` |
+| M52 | `DATA_PROVENANCE` + `AGGREGATION` (placeholder tickers, rate limiting, cross-scenario duplicate false positive, zero-marking on a missing bar that fabricated a 97% drawdown) | `UNKNOWN` | `UNKNOWN` (P1: "live failures and Stage-0 checks" — Stage-0 checks are `AUTOMATED_TEST`, but "live failures" observation is not actor-labeled) | `UNKNOWN` | `AUTOMATED_TEST` (Stage-0 checks, tests, corrected rerun) | `docs/research/CROSS_SECTIONAL_MOMENTUM_FEASIBILITY_M52.md` |
+| M55 | `TIMING_LOOKAHEAD` (parity master-dates array extended beyond M52's cutoff) + `CONFIGURATION_SAFETY` (safety grep matched its own denylist) | `CLAUDE_CODE` implementing the initialization CLI | `AUTOMATED_TEST` (the initialization gate itself failed both checks — this is the one case in the record where the detecting actor is unambiguous, because a committed, executable gate is what failed, not an informal review) | `CLAUDE_CODE` (per this session's own commit history, though outside the P1/P2 evidence boundary of "committed record only" this specific attribution rests on session continuity rather than a committed artifact) | `AUTOMATED_TEST` (all ten initialization gates passed on rerun; two new regression tests added) | `scripts/monitor_momentum_prospective.py`, `tests/test_monitor_momentum_prospective_cli.py` |
+
+## What this taxonomy demonstrates, honestly
+
+Every `DEFECT_DETECTION` and `CORRECTION` actor cell above except M55 is `UNKNOWN`. This is not a defect in this document — it is the correct, evidence-grounded output of applying the taxonomy to a record that (as P1's `HUMAN_LLM_WORKFLOW_AUDIT.md` already stated) does not consistently actor-label "independent review." A future manuscript must not upgrade any `UNKNOWN` cell to `HUMAN_OPERATOR`, `CLAUDE_CODE`, or `MIXED_HUMAN_AI` without new evidence (e.g., retained prompt/session logs reviewed and cited by a human before submission, per `AI_USE_DISCLOSURE_DRAFT.md`'s own verification checklist).
+
+## Rules for future milestones
+
+To avoid perpetuating this gap, any milestone from P3 onward should record, at minimum, the `EXECUTION` and `VERIFICATION` actor for each defect found, at the time it is found — not reconstructed retroactively. This is a process recommendation for future work, not a retroactive correction of M43–M55 (see the P1 correction boundary: P2 does not rewrite P1 or earlier milestones).
