@@ -1,0 +1,103 @@
+[
+  {
+    "base_ledger": {
+      "cash": "30000",
+      "positions": {},
+      "transaction_count": 0
+    },
+    "blocked_intents": [],
+    "checkpoint_index": 0,
+    "checkpoint_sha256": "6c044d546095c14a4f15375eea1afcef7c9b79df0896f05165df93f654b82d39",
+    "checkpoint_type": "INITIALIZATION",
+    "execution_date": null,
+    "first_eligible_execution_date": "2026-09-01",
+    "first_eligible_signal_date": "2026-08-31",
+    "frozen_config": {
+      "base_cost_bps": "0.0005",
+      "starting_capital": "30000",
+      "stress_cost_bps": "0.0010",
+      "top_n": 15,
+      "vol_target_annualized": null
+    },
+    "generation_git_head_sha": "aab1cd3be7e1e21d3b1003cd3dcc1578605361d1",
+    "generation_source_file_sha256": {
+      "scripts/monitor_momentum_prospective.py": "4e0c52a8e3e81d4206614c6fe6606c30975668861657685d8f0b8c937ee562ac",
+      "src/momentum_prospective_monitor.py": "691647ac5d586405cf1c6447bb48794237185a0c052fd17e3acb4286763fa0da"
+    },
+    "initialization_gate": {
+      "item10_safety": {
+        "no_broker_call_path_check": {
+          "forbidden_pattern_hits": [],
+          "ok": true
+        },
+        "ok": true,
+        "strategy_enabled_check": {
+          "ok": true,
+          "strategy_enabled": false
+        }
+      },
+      "item1_m52_baseline_parity": {
+        "compared_scalar_fields": 58,
+        "compared_segments": 12,
+        "m52_generated_at": "2026-08-23T03:34:17.371724+00:00",
+        "m52_git_head_sha": "3d345ebca19c7159678aaad801cdb66299f9ba6b",
+        "ok": true
+      },
+      "item2_no_m53_leakage": {
+        "ok": true,
+        "top_n": 15,
+        "vol_target_annualized": null
+      },
+      "item3_point_in_time_universe": {
+        "filings_known": 27,
+        "note": "select_filing_for_signal_date reused unmodified from M52; covered by existing M52 unit tests.",
+        "ok": true,
+        "snapshots_built": 27
+      },
+      "item4_no_pre_freeze_transactions": {
+        "ok": true
+      },
+      "item5_base_stress_ledger_separation": {
+        "ok": true
+      },
+      "item6_whole_shares_nonnegative_cash": {
+        "note": "Whole-share sizing enforced by simulate_cross_sectional_momentum_portfolio, covered by M52's existing tests.",
+        "ok": true
+      },
+      "item7_no_duplicate_checkpoints": {
+        "existing_checkpoint_count": 0,
+        "ok": true
+      },
+      "item8_hash_chain_valid": {
+        "ok": true
+      },
+      "item9_session_handling": {
+        "note": "Covered by tests/test_momentum_prospective_monitor.py.",
+        "ok": true
+      }
+    },
+    "latest_completed_regular_session": "2026-08-21",
+    "most_recent_publicly_available_filing": {
+      "accession": "0001004726-26-003726",
+      "document_url": "https://www.sec.gov/Archives/edgar/data/1100663/000100472626003726/primary_doc.xml",
+      "file_date": "2026-05-22",
+      "period_ending": "2026-03-31"
+    },
+    "previous_checkpoint_sha256": null,
+    "processing_cutoff_ny_date": "2026-08-23",
+    "processing_cutoff_utc": "2026-08-24T00:07:06.586335+00:00",
+    "protocol_freeze_commit_sha": "aab1cd3be7e1e21d3b1003cd3dcc1578605361d1",
+    "protocol_freeze_commit_timestamp_utc": "2026-08-24T00:02:30+00:00",
+    "protocol_freeze_date_ny": "2026-08-23",
+    "selected_symbols": null,
+    "signal_date": null,
+    "spy_trend_filter_state": null,
+    "status": "INITIALIZED_WAITING_FOR_FIRST_SIGNAL",
+    "stress_ledger": {
+      "cash": "30000",
+      "positions": {},
+      "transaction_count": 0
+    },
+    "total_filings_known": 27
+  }
+]

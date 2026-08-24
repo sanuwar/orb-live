@@ -94,4 +94,40 @@ This report preserves: the human-defined protocol and decision boundary (the ope
 
 ## Initialization results
 
-_Pending -- added in the results/checkpoint commit, after the monitor is run once from this clean commit. See that commit for the exact protocol-freeze timestamp (UTC and America/New_York), the M52 baseline-parity result, the initialization-gate outcome, the first eligible prospective signal and execution dates, and confirmation of whether any prospective signal or transaction exists yet (expected: none)._
+Generated from commit `aab1cd3be7e1e21d3b1003cd3dcc1578605361d1` (the frozen-protocol commit itself -- this is the initialization run's own freeze point). Checkpoint ledger: `docs/research/MOMENTUM_PROSPECTIVE_MONITOR_M55_CHECKPOINTS.json`, checkpoint index 0.
+
+### Protocol freeze
+
+- **Commit:** `aab1cd3be7e1e21d3b1003cd3dcc1578605361d1`
+- **Timestamp (UTC):** `2026-08-24T00:02:30+00:00`
+- **Timestamp (America/New_York calendar date):** `2026-08-23`
+
+### Two genuine defects found and fixed during the initialization run
+
+The first initialization attempt failed with `initialization gate all_ok=False`, on two independent items -- both fixed with regression tests before the run that actually produced this checkpoint:
+
+1. **Master_dates-truncation bug (item 1, baseline parity):** the CLI's forward-looking `master_dates` array deliberately extends into 2027 so the run-decision logic can see future sessions -- but that same array was mistakenly reused for the parity recomputation. `month_end_signal_dates` picks the last session of each calendar month *present in the array it's given*, not the true calendar month-end; extending past M52's original fetch cutoff (`ALPACA_FETCH_END_EXCLUSIVE`, 2026-08-14) silently shifted "August 2026's month-end" from 2026-08-13 (M52's actual, fetch-window-truncated last signal) to 2026-08-31 (a date outside M52's own `EVALUATION_END`), which then dropped that signal from the recomputation entirely -- 68 signals and 825 intended orders recomputed against M52's committed 69 and 840. Fixed by building a second, separately-truncated `parity_master_dates` array (`WARMUP_TARGET_START` through `ALPACA_FETCH_END_EXCLUSIVE`, bit-for-bit identical to M52's own) used only for the parity recomputation, while the extended array remains reserved for the forward-looking decision logic. Regression test: `test_month_end_signal_dates_sensitive_to_master_dates_truncation`.
+2. **Self-referential broker-call-pattern grep (item 10, safety):** `_no_broker_call_path_check` greps the monitor's own source for forbidden patterns (`robin_stocks`, `place_order`, etc.) -- but the denylist tuple itself, defined in that same source file, trivially contains every one of its own pattern strings, so the check always "found" all eight patterns inside its own definition line and always failed. Fixed by excluding any line that defines `_FORBIDDEN_SOURCE_PATTERNS` from the scan. Regression test: `test_no_broker_call_path_check_passes_on_actual_current_source` (must pass on the real file) and `test_no_broker_call_path_check_still_catches_a_genuine_hit` (must still catch a real violation in a synthetic file).
+
+Neither defect involved the frozen candidate's economics, universe, or thresholds -- both were harness-level bugs in this milestone's own new code, caught by the initialization gate doing exactly what it was built to do.
+
+### M52 baseline parity: PASS
+
+58 scalar metric fields and 12 calendar-segment entries (base + stress) compared as exact `Decimal` values against the committed M52 result (commit `3d345ebca19c7159678aaad801cdb66299f9ba6b`) -- zero mismatches, using the corrected, identically-truncated `master_dates`.
+
+### Initialization gate: all 10 items PASS
+
+Item 1 (baseline parity) and item 10 (safety) detailed above; items 2-9 all passed on the first corrected run -- no M53 leakage (`top_n=15`, `vol_target_annualized=None`), point-in-time universe selection reused unmodified, no pre-freeze transactions (empty ledgers), base/stress ledger separation, whole shares/nonnegative cash by construction, no duplicate checkpoints (ledger was empty before this run), a valid (trivially empty) hash chain before the append, and session handling covered by the pure-module test suite.
+
+### Initial run outcome
+
+- **Status:** `INITIALIZED_WAITING_FOR_FIRST_SIGNAL`
+- **Latest completed regular session as of the freeze:** `2026-08-21`
+- **First eligible prospective signal date:** `2026-08-31` (August 2026's month-end session -- strictly after the 2026-08-23 freeze date, so it qualifies as the first prospective signal per the boundary rule)
+- **First eligible execution date:** `2026-09-01` (the next regular session after the signal date)
+- **Most recently known public N-PORT-P filing:** accession `0001004726-26-003726`, period ending 2026-03-31, filed 2026-05-22 (unchanged from M52's own last-known filing -- no newer filing has been publicly filed yet)
+- **Prospective signal or transaction:** **none exists.** No transaction was manufactured to populate this report -- base and stress paper ledgers both hold their full, untouched $30,000 starting cash with zero positions and zero transactions, exactly as the boundary rule requires before the first eligible signal has occurred.
+
+Idempotency was directly verified: rerunning the monitor immediately afterward reproduced the identical run decision and exited without writing a second checkpoint (`checkpoint count after rerun: 1`).
+
+The next useful run of this monitor is not before `2026-09-01`. No further checkpoint is scheduled or started by this milestone -- per the future checkpoint workflow above, a genuine checkpoint issue/branch/PR is only opened when there is new evidence to record.

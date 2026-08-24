@@ -114,12 +114,18 @@ def _load_checkpoint_ledger() -> list[dict[str, Any]]:
 
 
 def _no_broker_call_path_check() -> dict[str, Any]:
+    """Greps this milestone's own source for forbidden broker-call
+    patterns. Excludes any line that defines `_FORBIDDEN_SOURCE_
+    PATTERNS` itself -- otherwise this check trivially "finds" every
+    pattern inside its own denylist literal and always fails."""
     hits: list[str] = []
     for p in SOURCE_FILES_FOR_HASHING:
-        text = p.read_text(encoding="utf-8")
-        for pattern in _FORBIDDEN_SOURCE_PATTERNS:
-            if pattern in text:
-                hits.append(f"{p.name}: {pattern!r}")
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if "_FORBIDDEN_SOURCE_PATTERNS" in line:
+                continue
+            for pattern in _FORBIDDEN_SOURCE_PATTERNS:
+                if pattern in line:
+                    hits.append(f"{p.name}: {pattern!r}")
     return {"ok": len(hits) == 0, "forbidden_pattern_hits": hits}
 
 
@@ -275,7 +281,18 @@ async def main(argv: list[str] | None = None) -> int:
     parity_filings = tuple(f for f in filings if f.file_date <= EVALUATION_END)
     snapshots = await m52_cli.build_all_universe_snapshots(parity_filings, fetch_missing=False)
 
-    signal_dates = month_end_signal_dates(master_dates, start=EVALUATION_START, end=EVALUATION_END)
+    # Parity requires master_dates truncated EXACTLY as M52's own run
+    # truncated it (ALPACA_FETCH_END_EXCLUSIVE, 2026-08-14) -- the
+    # forward-looking `master_dates` built above deliberately extends
+    # into 2027 so checkpoint_run_decision can see future sessions, but
+    # that same extension silently changes which date month_end_signal_
+    # dates treats as August 2026's month-end (the true 2026-08-31
+    # instead of M52's own fetch-window-truncated 2026-08-13), which
+    # would drop a real signal from the parity recomputation. Confirmed
+    # by a live run: an untruncated master_dates produced 68 signals
+    # and 825 intended orders against M52's committed 69/840.
+    parity_master_dates = tuple(m52_cli._all_research_calendar_sessions(m52_cli.WARMUP_TARGET_START, m52_cli.ALPACA_FETCH_END_EXCLUSIVE))
+    signal_dates = month_end_signal_dates(parity_master_dates, start=EVALUATION_START, end=EVALUATION_END)
     monthly_universes, filing_accession_for_signal = m52_cli.build_monthly_universes(signal_dates, snapshots)
     all_tickers = sorted({t for tickers in monthly_universes.values() for t in tickers})
     series_by_symbol = await m52_cli.fetch_daily_bars_for_symbols(tuple(all_tickers + ["SPY"]), fetch_missing=False)
@@ -285,7 +302,7 @@ async def main(argv: list[str] | None = None) -> int:
 
     gate = await run_initialization_gate(
         filings=filings, snapshots=snapshots, monthly_universes=monthly_universes,
-        series_by_symbol=series_by_symbol, spy_series=spy_series, master_dates=master_dates,
+        series_by_symbol=series_by_symbol, spy_series=spy_series, master_dates=parity_master_dates,
     )
     print(f"Initialization gate all_ok={gate['_all_ok']}")
     if not gate["_all_ok"]:
