@@ -7,12 +7,14 @@
 **Qualifications:** a PhD-level or equivalent-experience researcher or practitioner with published or applied work in at least two of: multiple-testing/data-snooping correction in trading-strategy evaluation, factor-model attribution, transaction-cost-aware backtesting, or quantitative portfolio risk management. No named reviewer is proposed anywhere in this document, per the P2 instructions.
 
 **Review rubric:**
-1. Does `FROZEN_STATISTICAL_ANALYSIS_PROTOCOL.md`'s hypothesis-family and primary-endpoint assignment (§1) match how a domain expert would group these strategies?
+1. Does `STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md`'s hypothesis-family and primary-endpoint assignment (§1) match how a domain expert would group these strategies, including the corrected placement of M46 in the intraday-ORB family rather than the ETF family?
 2. Is the joint time-block resampling design (§4–§7) statistically sound given the documented window overlaps in `HYPOTHESIS_LEDGER_M43_M55.md`?
 3. Is Romano–Wolf stepdown (§8) an appropriate primary multiplicity procedure here, or would the reviewer recommend a different family-wise or FDR method?
 4. Does the White's Reality Check / Hansen's SPA benchmark-set definition (§10) fairly represent "everything actually tried," including non-decision-eligible controls and diagnostic sleeves?
 5. Is the factor-regression design (§14), including the alpha-language prohibition, sufficient to prevent an overclaimed intercept?
 6. Given `STATISTICAL_INPUT_INVENTORY.md`'s current availability findings, which planned P3 analyses are the reviewer confident are actually executable, and which would the reviewer expect to fail for a reason this inventory did not anticipate?
+7. For each of the 8 items in `STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md`'s Unresolved Decisions Registry (bootstrap replication count, random seed, exact block lengths, common-vs-family-specific block selection, null hypotheses, comparators, test-statistic standardization, treatment of non-evaluable variants), what value or rule does the reviewer recommend, and does the candidate default proposed in §1a for non-evaluable variants (restrict Romano–Wolf/BH to the 11 `INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA` variants; report the 2 `DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE` and 1 `NOT_EVALUABLE_STRUCTURAL_NULL` variants descriptively only) hold up?
+8. Is restricting formal inference to variants with a real, non-trivial committed sample (per the `inferential_evaluability` field in `HYPOTHESIS_LEDGER_M43_M55.json`) the right line to draw, or should the reviewer recommend a different evaluability criterion?
 
 ## 2. Research-software/reproducibility reviewer
 

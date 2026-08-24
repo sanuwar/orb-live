@@ -16,39 +16,68 @@ All three totals below are produced by filtering the same 21-entry ledger; no hi
 
 No hidden or invented experiments were created to force these totals. All three totals are produced by filtering the same 21-entry ledger on the fields above; see scripts/publication/generate_p2_hypothesis_ledger.py for the deterministic reconciliation used to generate HYPOTHESIS_LEDGER_M43_M55.md.
 
+**14 is the decision-eligible tested-variant count, not necessarily the final number of valid hypothesis tests.** A variant being decision-eligible (predeclared, not a control or diagnostic sleeve) is a different question from whether it is presently evaluable by a formal inferential procedure. See the Inferential evaluability breakdown below and `docs/publication/p2/STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md` for that distinction; no p-value or resampled interval is computed anywhere in this repository for any variant.
+
 ## Authoritative table (all 21 arm-by-entry-policy evaluations)
 
-| Milestone | Arm | Entry policy | Control | Diagnostic | Decision-eligible | Classification | Artifact |
-|---|---|---|---|---|---|---|---|
-| M43 | BASELINE | primary | yes | no | no | Unchanged simulator/ExitEngine behavior; not itself classif… | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
-| M43 | BE_AFTER_050R | primary | no | no | yes | SUPPORTED on primary (WAITED_FIRST_VALID_0950); MIXED on CU… | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
-| M43 | PROFIT_LADDER | primary | no | no | yes | Secondary protection arm; not the leading arm (BE_AFTER_050… | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
-| M43 | STRUCTURE_TRAIL_AFTER_1R | primary | no | no | yes | Weakest of the three protection arms on pooled expectancy | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
-| M43 | BASELINE | sensitivity | yes | yes | no | Sensitivity benchmark, not independently classified | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
-| M43 | BE_AFTER_050R | sensitivity | no | yes | no | MIXED on this sensitivity benchmark (does not beat CURRENT_… | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
-| M43 | PROFIT_LADDER | sensitivity | no | yes | no | Sensitivity benchmark, not independently classified | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
-| M43 | STRUCTURE_TRAIL_AFTER_1R | sensitivity | no | yes | no | Sensitivity benchmark, not independently classified | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
-| M44 | FALLBACK_FIRST_VALID_0950 | primary | no | no | yes | INSUFFICIENT_EVIDENCE | `docs/research/ORB_FALLBACK_CANDIDATE_RECOVERY_EXPERIMENT.md` |
-| M45 | LATER_FIRST_VALID_1020 | primary | no | no | yes | MIXED (later-only expectancy 0.021R, negative excluding NVD… | `docs/research/ORB_LATER_FIRST_ENTRY_RECOVERY_EXPERIMENT.md` |
-| M46 | MID | primary | no | yes | no | Diagnostic sleeve within NOT_PROMISING combined-lane decisi… | `docs/research/ORB_SMALL_MIDCAP_MOMENTUM_LANE_FEASIBILITY.md` |
-| M46 | SMALL | primary | no | yes | no | Diagnostic sleeve within NOT_PROMISING combined-lane decisi… | `docs/research/ORB_SMALL_MIDCAP_MOMENTUM_LANE_FEASIBILITY.md` |
-| M46 | SMALL_MID | primary | no | no | yes | NOT_PROMISING | `docs/research/ORB_SMALL_MIDCAP_MOMENTUM_LANE_FEASIBILITY.md` |
-| M47 | SEQUENTIAL_SECOND_VALID_1020 | primary | no | no | yes | INSUFFICIENT_EVIDENCE, structurally null | `docs/research/ORB_SEQUENTIAL_SECOND_TRADE_FEASIBILITY.md` |
-| M48 | ETF_PULLBACK_RSI2 | primary | no | no | yes | POSITIVE_BUT_INSUFFICIENT | `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_FEASIBILITY.md` |
-| M48 | SECTOR_MOMENTUM_12_1 | primary | no | no | yes | POSITIVE_BUT_INSUFFICIENT | `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_FEASIBILITY.md` |
-| M48 | DIVERSIFIED_TREND_12M | primary | no | no | yes | POSITIVE_BUT_INSUFFICIENT | `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_FEASIBILITY.md` |
-| M49 | PRACTICAL_CORE_SATELLITE_30K | primary | no | no | yes | SAFE_BUT_BELOW_TARGET; supported practical range $150-$250/… | `docs/research/ORB_PRACTICAL_CORE_SATELLITE_PORTFOLIO_FEASIBILITY.md` |
-| M52 | TOP15_MOMENTUM_BASELINE | primary | no | no | yes | POSITIVE_BUT_INSUFFICIENT | `docs/research/CROSS_SECTIONAL_MOMENTUM_FEASIBILITY_M52.md` |
-| M53 | BREADTH_30 | primary | no | no | yes | POSITIVE_BUT_INSUFFICIENT | `docs/research/MOMENTUM_RISK_CONTROL_FEASIBILITY_M53.md` |
-| M53 | MARKET_VOL_15 | primary | no | no | yes | POSITIVE_BUT_INSUFFICIENT | `docs/research/MOMENTUM_RISK_CONTROL_FEASIBILITY_M53.md` |
+| Milestone | Arm | Entry policy | Control | Diagnostic | Decision-eligible | Inferential evaluability | Classification | Artifact |
+|---|---|---|---|---|---|---|---|---|
+| M43 | BASELINE | primary | yes | no | no | CONTROL_OR_DIAGNOSTIC_ONLY | Unchanged simulator/ExitEngine behavior; not itself classif… | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
+| M43 | BE_AFTER_050R | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | SUPPORTED on primary (WAITED_FIRST_VALID_0950); MIXED on CU… | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
+| M43 | PROFIT_LADDER | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | Secondary protection arm; not the leading arm (BE_AFTER_050… | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
+| M43 | STRUCTURE_TRAIL_AFTER_1R | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | Weakest of the three protection arms on pooled expectancy | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
+| M43 | BASELINE | sensitivity | yes | yes | no | CONTROL_OR_DIAGNOSTIC_ONLY | Sensitivity benchmark, not independently classified | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
+| M43 | BE_AFTER_050R | sensitivity | no | yes | no | CONTROL_OR_DIAGNOSTIC_ONLY | MIXED on this sensitivity benchmark (does not beat CURRENT_… | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
+| M43 | PROFIT_LADDER | sensitivity | no | yes | no | CONTROL_OR_DIAGNOSTIC_ONLY | Sensitivity benchmark, not independently classified | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
+| M43 | STRUCTURE_TRAIL_AFTER_1R | sensitivity | no | yes | no | CONTROL_OR_DIAGNOSTIC_ONLY | Sensitivity benchmark, not independently classified | `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md` |
+| M44 | FALLBACK_FIRST_VALID_0950 | primary | no | no | yes | DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE | INSUFFICIENT_EVIDENCE | `docs/research/ORB_FALLBACK_CANDIDATE_RECOVERY_EXPERIMENT.md` |
+| M45 | LATER_FIRST_VALID_1020 | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | MIXED (later-only expectancy 0.021R, negative excluding NVD… | `docs/research/ORB_LATER_FIRST_ENTRY_RECOVERY_EXPERIMENT.md` |
+| M46 | MID | primary | no | yes | no | CONTROL_OR_DIAGNOSTIC_ONLY | Diagnostic sleeve within NOT_PROMISING combined-lane decisi… | `docs/research/ORB_SMALL_MIDCAP_MOMENTUM_LANE_FEASIBILITY.md` |
+| M46 | SMALL | primary | no | yes | no | CONTROL_OR_DIAGNOSTIC_ONLY | Diagnostic sleeve within NOT_PROMISING combined-lane decisi… | `docs/research/ORB_SMALL_MIDCAP_MOMENTUM_LANE_FEASIBILITY.md` |
+| M46 | SMALL_MID | primary | no | no | yes | DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE | NOT_PROMISING | `docs/research/ORB_SMALL_MIDCAP_MOMENTUM_LANE_FEASIBILITY.md` |
+| M47 | SEQUENTIAL_SECOND_VALID_1020 | primary | no | no | yes | NOT_EVALUABLE_STRUCTURAL_NULL | INSUFFICIENT_EVIDENCE, structurally null | `docs/research/ORB_SEQUENTIAL_SECOND_TRADE_FEASIBILITY.md` |
+| M48 | ETF_PULLBACK_RSI2 | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | POSITIVE_BUT_INSUFFICIENT | `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_FEASIBILITY.md` |
+| M48 | SECTOR_MOMENTUM_12_1 | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | POSITIVE_BUT_INSUFFICIENT | `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_FEASIBILITY.md` |
+| M48 | DIVERSIFIED_TREND_12M | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | POSITIVE_BUT_INSUFFICIENT | `docs/research/ORB_CAPITAL_TARGET_STRATEGY_FAMILY_FEASIBILITY.md` |
+| M49 | PRACTICAL_CORE_SATELLITE_30K | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | SAFE_BUT_BELOW_TARGET; supported practical range $150-$250/… | `docs/research/ORB_PRACTICAL_CORE_SATELLITE_PORTFOLIO_FEASIBILITY.md` |
+| M52 | TOP15_MOMENTUM_BASELINE | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | POSITIVE_BUT_INSUFFICIENT | `docs/research/CROSS_SECTIONAL_MOMENTUM_FEASIBILITY_M52.md` |
+| M53 | BREADTH_30 | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | POSITIVE_BUT_INSUFFICIENT | `docs/research/MOMENTUM_RISK_CONTROL_FEASIBILITY_M53.md` |
+| M53 | MARKET_VOL_15 | primary | no | no | yes | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | POSITIVE_BUT_INSUFFICIENT | `docs/research/MOMENTUM_RISK_CONTROL_FEASIBILITY_M53.md` |
+
+## Inferential evaluability breakdown (14-count basis: novel decision-eligible variants only)
+
+Classifies each of the 14 novel decision-eligible variants by whether it is presently evaluable by a formal inferential procedure, independent of its decision-eligible status. No observation was invented and no p-value was assigned to any variant to produce this table.
+
+| Inferential evaluability | Count | Variants |
+|---|---:|---|
+| DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE | 2 | M44:FALLBACK_FIRST_VALID_0950, M46:SMALL_MID |
+| INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | 11 | M43:BE_AFTER_050R, M43:PROFIT_LADDER, M43:STRUCTURE_TRAIL_AFTER_1R, M45:LATER_FIRST_VALID_1020, M48:ETF_PULLBACK_RSI2, M48:SECTOR_MOMENTUM_12_1, M48:DIVERSIFIED_TREND_12M, M49:PRACTICAL_CORE_SATELLITE_30K, M52:TOP15_MOMENTUM_BASELINE, M53:BREADTH_30, M53:MARKET_VOL_15 |
+| NOT_EVALUABLE_STRUCTURAL_NULL | 1 | M47:SEQUENTIAL_SECOND_VALID_1020 |
+
+| Milestone | Arm | Inferential evaluability | Rationale |
+|---|---|---|---|
+| M43 | BE_AFTER_050R | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | 122 pooled trades across six periods; per-trade R-multiple series exists but is not committed at granular level (see STATISTICAL_INPUT_INVENTORY.md). |
+| M43 | PROFIT_LADDER | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | 122 pooled trades across six periods; per-trade R-multiple series not committed at granular level. |
+| M43 | STRUCTURE_TRAIL_AFTER_1R | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | 122 pooled trades across six periods; per-trade R-multiple series not committed at granular level. |
+| M44 | FALLBACK_FIRST_VALID_0950 | DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE | Only 2 genuine closed fallback-only trades (7 of 9 nominal selections were DATA_INVALID); no resampling or hypothesis test can be credibly fit to n=2. |
+| M45 | LATER_FIRST_VALID_1020 | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | 129 later-only closed trades across six periods, a real sample; granular per-trade series not committed. |
+| M46 | SMALL_MID | DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE | 20 trades over a single 90-session period (P3 only, not pooled); the report itself labels this a feasibility screen, not a full backtest -- too thin for a credible block-bootstrap or multiplicity-adjusted test. |
+| M47 | SEQUENTIAL_SECOND_VALID_1020 | NOT_EVALUABLE_STRUCTURAL_NULL | Zero valid second-trade candidates and zero second trades (n=0); structurally null, not a statistical null from low power. No p-value or resampled interval can be computed on zero observations. |
+| M48 | ETF_PULLBACK_RSI2 | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | Full chronological daily simulation, 2022-01-03 to 2026-08-13; granular daily-return series not committed (see STATISTICAL_INPUT_INVENTORY.md). |
+| M48 | SECTOR_MOMENTUM_12_1 | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | Full chronological daily simulation, 2022-01-03 to 2026-08-13; granular daily-return series not committed. |
+| M48 | DIVERSIFIED_TREND_12M | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | Full chronological daily simulation, 2022-01-03 to 2026-08-13; granular daily-return series not committed. |
+| M49 | PRACTICAL_CORE_SATELLITE_30K | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | Full chronological shared-cash simulation, 2022-01-03 to 2026-08-13; granular daily-return series not committed. |
+| M52 | TOP15_MOMENTUM_BASELINE | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | 69 monthly signals, full chronological simulation, 2021-01-04 to 2026-08-13; granular daily-return series not committed. |
+| M53 | BREADTH_30 | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | Same window/signal cadence as M52; granular daily-return series not committed. |
+| M53 | MARKET_VOL_15 | INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA | Same window/signal cadence as M52; granular daily-return series not committed. |
 
 ## Strategy-family totals (14-count basis: novel decision-eligible variants only)
 
 | Strategy family | Novel decision-eligible variants |
 |---|---:|
 | Cross-sectional equity momentum | 3 |
-| ETF pullback / sector momentum / diversified trend | 5 |
-| Large-cap intraday ORB entry/exit/frequency | 6 |
+| ETF pullback / sector momentum / diversified trend | 4 |
+| Intraday ORB entry/exit/frequency/universe extension | 7 |
 
 ## Evidence-class totals
 

@@ -99,24 +99,64 @@ def render_markdown(ledger: dict) -> str:
     lines.append("")
     lines.append(rules["note"])
     lines.append("")
+    lines.append(
+        "**14 is the decision-eligible tested-variant count, not necessarily the final number of "
+        "valid hypothesis tests.** A variant being decision-eligible (predeclared, not a control or "
+        "diagnostic sleeve) is a different question from whether it is presently evaluable by a formal "
+        "inferential procedure. See the Inferential evaluability breakdown below and "
+        "`docs/publication/p2/STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md` for that distinction; no "
+        "p-value or resampled interval is computed anywhere in this repository for any variant."
+    )
+    lines.append("")
 
     lines.append("## Authoritative table (all 21 arm-by-entry-policy evaluations)")
     lines.append("")
     lines.append(
-        "| Milestone | Arm | Entry policy | Control | Diagnostic | Decision-eligible | Classification | Artifact |"
+        "| Milestone | Arm | Entry policy | Control | Diagnostic | Decision-eligible | Inferential evaluability | Classification | Artifact |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for e in all_evals:
         lines.append(
-            "| {m} | {a} | {ep} | {c} | {d} | {de} | {cl} | `{art}` |".format(
+            "| {m} | {a} | {ep} | {c} | {d} | {de} | {ie} | {cl} | `{art}` |".format(
                 m=e["milestone"],
                 a=e["arm_id"],
                 ep=e["entry_policy"],
                 c="yes" if e["control_status"] else "no",
                 d="yes" if e["diagnostic_sleeve"] else "no",
                 de="yes" if e["decision_eligible"] else "no",
+                ie=e["inferential_evaluability"],
                 cl=_escape_pipes(_short(e["final_classification"])),
                 art=e["authoritative_artifact_path"],
+            )
+        )
+    lines.append("")
+
+    lines.append("## Inferential evaluability breakdown (14-count basis: novel decision-eligible variants only)")
+    lines.append("")
+    lines.append(
+        "Classifies each of the 14 novel decision-eligible variants by whether it is presently "
+        "evaluable by a formal inferential procedure, independent of its decision-eligible status. "
+        "No observation was invented and no p-value was assigned to any variant to produce this table."
+    )
+    lines.append("")
+    ie_totals: dict[str, int] = {}
+    for e in novel:
+        ie_totals[e["inferential_evaluability"]] = ie_totals.get(e["inferential_evaluability"], 0) + 1
+    lines.append("| Inferential evaluability | Count | Variants |")
+    lines.append("|---|---:|---|")
+    for category in sorted(ie_totals):
+        members = ", ".join(f"{e['milestone']}:{e['arm_id']}" for e in novel if e["inferential_evaluability"] == category)
+        lines.append(f"| {category} | {ie_totals[category]} | {members} |")
+    lines.append("")
+    lines.append("| Milestone | Arm | Inferential evaluability | Rationale |")
+    lines.append("|---|---|---|---|")
+    for e in novel:
+        lines.append(
+            "| {m} | {a} | {ie} | {r} |".format(
+                m=e["milestone"],
+                a=e["arm_id"],
+                ie=e["inferential_evaluability"],
+                r=_escape_pipes(e["inferential_evaluability_rationale"]),
             )
         )
     lines.append("")

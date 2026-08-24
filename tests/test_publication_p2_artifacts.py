@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 P2_DIR = ROOT / "docs" / "publication" / "p2"
 LEDGER_JSON_PATH = P2_DIR / "HYPOTHESIS_LEDGER_M43_M55.json"
 LEDGER_MD_PATH = P2_DIR / "HYPOTHESIS_LEDGER_M43_M55.md"
+PROTOCOL_CANDIDATE_PATH = P2_DIR / "STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md"
+READINESS_DECISION_PATH = P2_DIR / "P2_READINESS_DECISION.md"
 
 REQUIRED_ENTRY_FIELDS = {
     "milestone",
@@ -42,6 +45,8 @@ REQUIRED_ENTRY_FIELDS = {
     "correction_lineage",
     "limitations",
     "m55_prospective_status",
+    "inferential_evaluability",
+    "inferential_evaluability_rationale",
 }
 
 VALID_EVIDENCE_CLASSES = {
@@ -54,7 +59,34 @@ VALID_EVIDENCE_CLASSES = {
 
 VALID_ENTRY_POLICIES = {"primary", "sensitivity"}
 
+VALID_INFERENTIAL_EVALUABILITY = {
+    "INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA",
+    "DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE",
+    "NOT_EVALUABLE_STRUCTURAL_NULL",
+    "CONTROL_OR_DIAGNOSTIC_ONLY",
+}
+
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _git_blob_hash_at_commit(commit_sha: str, relative_path: str) -> str:
+    """Resolve the blob hash for `relative_path` as it existed at `commit_sha`.
+
+    Uses only the local Git object database already present in this
+    checkout -- no network access, no market-data cache.
+    """
+    completed = subprocess.run(
+        ["git", "rev-parse", f"{commit_sha}:{relative_path}"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"git could not resolve {commit_sha}:{relative_path} -- "
+            f"stderr: {completed.stderr.strip()}"
+        )
+    return completed.stdout.strip()
 
 FORBIDDEN_CLAIM_PATTERNS = [
     re.compile(r"\bproduction[- ]ready\b", re.IGNORECASE),
@@ -260,7 +292,7 @@ def test_p2_deliverable_manifest_is_complete():
         "HYPOTHESIS_LEDGER_M43_M55.json",
         "HYPOTHESIS_LEDGER_M43_M55.md",
         "STATISTICAL_INPUT_INVENTORY.md",
-        "FROZEN_STATISTICAL_ANALYSIS_PROTOCOL.md",
+        "STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md",
         "LITERATURE_AND_NOVELTY_MAP.md",
         "DATA_LICENSE_REDISTRIBUTION_MATRIX.md",
         "ACTOR_PROVENANCE_AND_CORRECTION_TAXONOMY.md",
@@ -270,3 +302,182 @@ def test_p2_deliverable_manifest_is_complete():
     }
     actual = {p.name for p in P2_DIR.iterdir() if p.is_file()}
     assert expected == actual
+    # The old frozen-protocol filename must not linger anywhere in the package.
+    assert not (P2_DIR / "FROZEN_STATISTICAL_ANALYSIS_PROTOCOL.md").exists()
+
+
+def test_inferential_evaluability_values_are_valid(ledger):
+    for entry in ledger["entries"]:
+        assert entry["inferential_evaluability"] in VALID_INFERENTIAL_EVALUABILITY, entry["inferential_evaluability"]
+        assert isinstance(entry["inferential_evaluability_rationale"], str)
+        assert entry["inferential_evaluability_rationale"].strip()
+
+
+def test_inferential_evaluability_breakdown_of_the_14_matches_spec(ledger):
+    novel = [e for e in ledger["entries"] if gen._is_novel_decision_eligible(e)]
+    assert len(novel) == 14
+
+    by_category: dict[str, set[str]] = {}
+    for e in novel:
+        by_category.setdefault(e["inferential_evaluability"], set()).add(f"{e['milestone']}:{e['arm_id']}")
+
+    assert by_category["INFERENTIALLY_EVALUABLE_PENDING_GRANULAR_DATA"] == {
+        "M43:BE_AFTER_050R",
+        "M43:PROFIT_LADDER",
+        "M43:STRUCTURE_TRAIL_AFTER_1R",
+        "M45:LATER_FIRST_VALID_1020",
+        "M48:ETF_PULLBACK_RSI2",
+        "M48:SECTOR_MOMENTUM_12_1",
+        "M48:DIVERSIFIED_TREND_12M",
+        "M49:PRACTICAL_CORE_SATELLITE_30K",
+        "M52:TOP15_MOMENTUM_BASELINE",
+        "M53:BREADTH_30",
+        "M53:MARKET_VOL_15",
+    }
+    assert by_category["DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE"] == {
+        "M44:FALLBACK_FIRST_VALID_0950",
+        "M46:SMALL_MID",
+    }
+    assert by_category["NOT_EVALUABLE_STRUCTURAL_NULL"] == {"M47:SEQUENTIAL_SECOND_VALID_1020"}
+    # No entry among the 14 may be CONTROL_OR_DIAGNOSTIC_ONLY -- that category
+    # is definitionally for the 7 excluded controls/diagnostics, not the 14.
+    assert "CONTROL_OR_DIAGNOSTIC_ONLY" not in by_category
+
+
+def test_m44_and_m47_carry_no_fabricated_inference(ledger):
+    # Regression test for the specific correction: M44 (n=2) and M47 (n=0)
+    # must never be assigned a p-value, confidence interval, or any
+    # fabricated observation anywhere in the ledger.
+    m44 = next(e for e in ledger["entries"] if e["milestone"] == "M44" and e["arm_id"] == "FALLBACK_FIRST_VALID_0950")
+    m47 = next(e for e in ledger["entries"] if e["milestone"] == "M47" and e["arm_id"] == "SEQUENTIAL_SECOND_VALID_1020")
+    assert m44["inferential_evaluability"] == "DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE"
+    assert m47["inferential_evaluability"] == "NOT_EVALUABLE_STRUCTURAL_NULL"
+    for field in ("final_classification", "inferential_evaluability_rationale", "limitations"):
+        for forbidden in ("p=0.", "p-value of 0.", "95% CI", "confidence interval of"):
+            assert forbidden not in m44[field]
+            assert forbidden not in m47[field]
+
+
+def test_m46_family_membership_is_corrected(ledger):
+    m46_entries = [e for e in ledger["entries"] if e["milestone"] == "M46"]
+    assert len(m46_entries) == 3
+    for e in m46_entries:
+        assert e["strategy_family"] == "Intraday ORB entry/exit/frequency/universe extension", e["arm_id"]
+        assert e["strategy_family"] != "ETF pullback / sector momentum / diversified trend"
+
+    # And the ETF family must now contain exactly the 4 genuine ETF/core-satellite arms.
+    etf_novel = {
+        (e["milestone"], e["arm_id"])
+        for e in ledger["entries"]
+        if gen._is_novel_decision_eligible(e) and e["strategy_family"] == "ETF pullback / sector momentum / diversified trend"
+    }
+    assert etf_novel == {
+        ("M48", "ETF_PULLBACK_RSI2"),
+        ("M48", "SECTOR_MOMENTUM_12_1"),
+        ("M48", "DIVERSIFIED_TREND_12M"),
+        ("M49", "PRACTICAL_CORE_SATELLITE_30K"),
+    }
+
+
+def test_every_novel_variant_appears_in_protocol_family_table_exactly_once(ledger):
+    novel = [e for e in ledger["entries"] if gen._is_novel_decision_eligible(e)]
+    assert len(novel) == 14
+
+    protocol_text = PROTOCOL_CANDIDATE_PATH.read_text(encoding="utf-8")
+    # Extract just the §1 family *table* itself (the block of "|"-prefixed
+    # lines), not the surrounding prose, which legitimately re-mentions an
+    # arm_id (e.g. explaining the M46 correction) without that counting as a
+    # second table entry.
+    section_1 = protocol_text.split("## 1. Hypothesis families", 1)[1]
+    section_1 = section_1.split("### 1a.", 1)[0]
+    table_lines = [line for line in section_1.splitlines() if line.strip().startswith("|")]
+    table_text = "\n".join(table_lines)
+
+    for e in novel:
+        occurrences = table_text.count(e["arm_id"])
+        assert occurrences == 1, (
+            f"{e['milestone']}:{e['arm_id']} appears {occurrences} times in the "
+            f"protocol's §1 family table (expected exactly once)"
+        )
+
+    # Sum of the per-family "Count" column must equal 14.
+    counts = re.findall(r"\|\s*[\w /\-]+\|\s*[^|]+\|\s*(\d+)\s*\|", table_text)
+    assert counts, "could not locate the family-count column in the protocol table"
+    assert sum(int(c) for c in counts) == 14
+
+
+def test_protocol_candidate_is_not_labeled_executable_or_frozen():
+    text = PROTOCOL_CANDIDATE_PATH.read_text(encoding="utf-8")
+    assert "DRAFT CANDIDATE FOR EXTERNAL FINANCE/ECONOMETRICS REVIEW" in text
+    assert "NOT AUTHORIZED FOR EXECUTION" in text
+    assert "Status: FROZEN, NOT EXECUTED" not in text
+    assert "Unresolved Decisions Registry" in text
+    for item in (
+        "Bootstrap replication count",
+        "Random seed",
+        "Exact block lengths",
+        "Common vs. family-specific block selection",
+        "Null hypotheses",
+        "Comparators",
+        "Test-statistic standardization",
+        "Treatment of non-evaluable variants",
+    ):
+        assert item in text, f"missing unresolved-decision item: {item}"
+
+
+def test_p3_readiness_remains_blocked_pending_review_and_preflight():
+    text = READINESS_DECISION_PATH.read_text(encoding="utf-8")
+    section_6 = text.split("## 6. Is the project ready to start P3 statistical reanalysis?", 1)[1]
+    section_6 = section_6.split("## 7.", 1)[0]
+    assert section_6.strip().startswith("**BLOCKED")
+    assert "external finance/econometrics reviewer" in section_6
+    assert "preflight" in section_6.lower()
+
+    section_3 = text.split("## 3. Which P3 analyses are executable from committed evidence?", 1)[1]
+    section_3 = section_3.split("## 4.", 1)[0]
+    assert section_3.strip().startswith("**BLOCKED")
+
+    section_7 = text.split("## 7. Can methods-manuscript drafting begin in parallel?", 1)[1]
+    section_7 = section_7.split("## 8.", 1)[0]
+    assert section_7.strip().startswith("**READY_WITH_LIMITATIONS")
+
+
+def test_ledger_citations_resolve_against_actual_git_history_offline(ledger):
+    """For every ledger citation, confirm commit:path exists, resolve the
+    blob at that historical commit, and confirm it equals the ledger's
+    recorded blob hash -- using only the local Git object database already
+    present in this checkout. No network or market-data access."""
+    for entry in ledger["entries"]:
+        resolved = _git_blob_hash_at_commit(entry["commit_sha"], entry["authoritative_artifact_path"])
+        assert resolved == entry["git_blob_hash"], (
+            f"{entry['milestone']}:{entry['arm_id']} -- ledger blob hash "
+            f"{entry['git_blob_hash']} does not match the actual blob "
+            f"{resolved} at {entry['commit_sha']}:{entry['authoritative_artifact_path']}"
+        )
+    for stage in ledger.get("non_ledger_evidence_stages", []):
+        resolved = _git_blob_hash_at_commit(stage["commit_sha"], stage["authoritative_artifact_path"])
+        assert resolved == stage["git_blob_hash"], (
+            f"{stage['milestone']} -- ledger blob hash {stage['git_blob_hash']} "
+            f"does not match the actual blob {resolved} at "
+            f"{stage['commit_sha']}:{stage['authoritative_artifact_path']}"
+        )
+
+
+def test_m55_checkpoint_ledger_hash_matches_cited_evidence_cutoff(ledger):
+    m55_stage = next(s for s in ledger["non_ledger_evidence_stages"] if s["milestone"] == "M55")
+    checkpoint_path = m55_stage["checkpoint_ledger_path"]
+    expected_hash = m55_stage["checkpoint_ledger_blob_hash"]
+
+    # The blob at M55's own cited commit must match.
+    resolved_at_m55_commit = _git_blob_hash_at_commit(m55_stage["commit_sha"], checkpoint_path)
+    assert resolved_at_m55_commit == expected_hash
+
+    # The blob at the ledger's overall evidence cutoff (main, post-merge)
+    # must also still match -- proving the M55 checkpoint has not been
+    # touched since it was cited.
+    resolved_at_cutoff = _git_blob_hash_at_commit(ledger["evidence_cutoff_main_sha"], checkpoint_path)
+    assert resolved_at_cutoff == expected_hash, (
+        "M55 checkpoint ledger blob differs between its cited commit and the "
+        "P2 evidence cutoff -- it may have been altered, which would violate "
+        "the M55 untouched-evidence boundary"
+    )

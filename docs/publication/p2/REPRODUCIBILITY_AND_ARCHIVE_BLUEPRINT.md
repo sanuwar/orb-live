@@ -6,7 +6,7 @@
 
 - **Include:** all research/simulation source code (`src/`, `scripts/research_*`, `scripts/monitor_*`, `scripts/publication/`), all tests, all committed `docs/research/*.md` reports and hash manifests, all `docs/publication/` content (P1 and P2), the M55 append-only checkpoint ledger, and CI configuration.
 - **Exclude unconditionally, per `CLAUDE.md`:** `data/.rh_tokens.json`, any production SQLite database under `data/`, `local.yaml` or equivalent private configuration, and any credential/account material.
-- **Exclude pending the license review in `DATA_LICENSE_REDISTRIBUTION_MATRIX.md`:** every gitignored `artifacts/research-*/results/` raw-vendor cache (Alpaca bars, OpenFIGI resolutions, SEC filing text) — the Alpaca row's unresolved redistribution status alone blocks including raw bar data in any public release today.
+- **Exclude:** every gitignored `artifacts/research-*/results/` Alpaca-derived raw-vendor cache — confirmed not redistributable per `DATA_LICENSE_REDISTRIBUTION_MATRIX.md` (Alpaca's official redistribution page states directly that Alpaca API data cannot be redistributed). OpenFIGI raw responses and SEC filing text are not blocked by the same prohibition (both confirmed shareable/likely-shareable respectively), but excluding them from a first public release remains reasonable pending the full license review, since they were fetched as part of the same Alpaca-dependent research pipeline.
 - **Exclude:** the unrelated pre-existing untracked files this session has consistently preserved (`.claude/`, `.runtime/`, `CHECKPOINT_*.md`, `CLAUDE.md`, `MILESTONE_*.md`, `checkpoint_7c_*` scripts, `site/.vite/`) — these are operator working files unrelated to the publication package and are not research artifacts.
 
 ## 2. OSI-license decision requirements
@@ -27,7 +27,7 @@ A frozen container image (e.g., a pinned Python base image plus the locked depen
 
 ## 6. Synthetic or redistributable fixtures
 
-None exist yet. A future work item: hand-craft small synthetic OHLCV/N-PORT-P/OpenFIGI-response fixtures (not derived from real Alpaca/SEC data, to sidestep the unresolved Alpaca redistribution question entirely) sufficient to exercise every Stage-0 gate, parity check, and classification rule end-to-end, so a reader can run the pipeline without any vendor account.
+None exist yet. A future work item: hand-craft small synthetic OHLCV/N-PORT-P/OpenFIGI-response fixtures (not derived from real Alpaca/SEC data, since real Alpaca-sourced data is confirmed non-redistributable per `DATA_LICENSE_REDISTRIBUTION_MATRIX.md`) sufficient to exercise every Stage-0 gate, parity check, and classification rule end-to-end, so a reader can run the pipeline without any vendor account.
 
 ## 7. One-command generation of publication tables
 
@@ -37,8 +37,9 @@ Partially present: `scripts/publication/generate_p2_hypothesis_ledger.py` alread
 
 | Tier | Contents | Shareable today? |
 |---|---|---|
-| Raw vendor data | Alpaca bars, SEC filing XML, OpenFIGI raw responses (gitignored `artifacts/research-*/results/`) | No (Alpaca redistribution unresolved; SEC/OpenFIGI likely fine but not independently reconfirmed this session for the SEC leg) |
-| Derived shareable data | Committed hash manifests, committed scalar results in `docs/research/*.md`, the P2 hypothesis ledger | Yes — already committed |
+| Raw vendor data | Alpaca bars, SEC filing XML, OpenFIGI raw responses (gitignored `artifacts/research-*/results/`) | **No.** Alpaca's official redistribution page states directly that Alpaca API data cannot be redistributed (see `DATA_LICENSE_REDISTRIBUTION_MATRIX.md`) — this now applies to all Alpaca-sourced raw bars without qualification. SEC EDGAR is likely fine (public government record) but its exact current automated-access/fair-use text was not independently reconfirmed this session. OpenFIGI raw responses are confirmed shareable (MIT license + explicit FAQ redistribution statement). |
+| Derived shareable data — non-Alpaca-derived | Committed hash manifests, the P2 hypothesis ledger, any committed scalar result that does not derive from Alpaca market data (e.g., OpenFIGI resolution statistics, SEC filing counts/dates) | Yes — already committed |
+| Derived data — Alpaca-derived scalars | Committed mean-monthly-$, drawdown, CAGR, and similar scalar figures in `docs/research/*.md` for M43–M53 (all computed from Alpaca SIP/IEX bars) | **Not called unconditionally shareable.** Alpaca's redistribution prohibition is confirmed for *raw* API data; whether it extends to a derived aggregate statistic (a single committed number computed from many bars, not the bars themselves) is an open question `DATA_LICENSE_REDISTRIBUTION_MATRIX.md` explicitly leaves unresolved pending human/legal review. These figures remain committed to this private repository (permitted, since P2 makes no visibility change) but must not be characterized as cleared for public redistribution until that review happens. |
 | Non-shareable | `data/.rh_tokens.json`, production SQLite, `local.yaml` | Never (permanent `CLAUDE.md` prohibition) |
 
 ## 9. Artifact checksums and manifests

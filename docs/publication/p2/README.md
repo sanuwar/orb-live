@@ -24,7 +24,7 @@ P2 converts P1's identified publication gaps into a precise, auditable, machine-
 | `HYPOTHESIS_LEDGER_M43_M55.json` | hand-authored, canonical | Single source of truth for every displayed empirical arm across M43-M55. |
 | `HYPOTHESIS_LEDGER_M43_M55.md` | **generated** | Deterministic rendering of the JSON ledger. Do not hand-edit. |
 | `STATISTICAL_INPUT_INVENTORY.md` | hand-authored | Per-planned-analysis input availability classification. |
-| `FROZEN_STATISTICAL_ANALYSIS_PROTOCOL.md` | hand-authored | The frozen P3 analysis protocol (not executed in P2). |
+| `STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md` | hand-authored | Draft candidate P3 analysis protocol, not yet frozen or authorized for execution — pending external finance/econometrics review (not executed in P2). |
 | `LITERATURE_AND_NOVELTY_MAP.md` | hand-authored | Primary-source literature map and narrow novelty statement. |
 | `DATA_LICENSE_REDISTRIBUTION_MATRIX.md` | hand-authored | Per-source redistribution/licensing review. |
 | `ACTOR_PROVENANCE_AND_CORRECTION_TAXONOMY.md` | hand-authored | Evidence-grounded actor/activity/defect taxonomy. |
