@@ -1,6 +1,6 @@
 # Experiment Registry — M43 through M55
 
-**Evidence cutoff:** b789517d856b5cc546c21d7f5562e301429b252b.  
+**Evidence cutoff:** b789517d856b5cc546c21d7f5562e301429b252b.
 This registry records one authoritative row per numbered milestone. “Frozen protocol” means time-stamped and version-controlled; it does not mean formal preregistration. Figures labeled superseded remain part of the audit history but are not headline evidence.
 
 | Milestone | Research question and frozen protocol | Evaluation window / evidence type | Authoritative result and classification | Corrections and limitations | Final committed artifact |

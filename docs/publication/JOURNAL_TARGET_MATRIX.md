@@ -1,6 +1,6 @@
 # Journal Target Matrix
 
-**Policy check date:** 2026-08-24.  
+**Policy check date:** 2026-08-24.
 Only official journal or publisher pages are cited. Fees and policies can change and must be rechecked immediately before submission.
 
 ## Targets

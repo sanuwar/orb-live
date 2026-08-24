@@ -1,8 +1,8 @@
 # Publication P1 — Publication-Readiness Dossier
 
-**Issue:** [#364](https://github.com/sanuwar/orb-live/issues/364)  
-**Evidence cutoff:** main at b789517d856b5cc546c21d7f5562e301429b252b  
-**Audit date:** 2026-08-24  
+**Issue:** [#364](https://github.com/sanuwar/orb-live/issues/364)
+**Evidence cutoff:** main at b789517d856b5cc546c21d7f5562e301429b252b
+**Audit date:** 2026-08-24
 **Scope:** committed M43–M55 evidence only; no market-data fetch, strategy run, parameter experiment, or M55 advancement.
 
 ## Recommendation

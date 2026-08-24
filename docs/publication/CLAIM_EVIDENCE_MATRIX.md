@@ -1,6 +1,6 @@
 # Claim–Evidence Matrix
 
-**Audit basis:** committed state at b789517d856b5cc546c21d7f5562e301429b252b.  
+**Audit basis:** committed state at b789517d856b5cc546c21d7f5562e301429b252b.
 Strength labels: **SUPPORTED**, **PARTIALLY SUPPORTED**, **UNSUPPORTED**, **PROSPECTIVE**.
 
 | Proposed manuscript claim | Strength | Exact committed evidence | Permitted wording / guardrail |
