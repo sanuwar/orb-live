@@ -6,7 +6,9 @@
 
 **The original maximum of 11 executable candidates remains possible.** No required cache directory is missing, so no test instance is `NOT_READY_FOR_PHASE2` on presence grounds.
 
-**That is a statement about presence only.** Nine of the eleven depend on raw caches with no directly comparable committed hash; four of those additionally have no committed source-file pin; and one has an unresolved input-location dependency. Phase 1 moved every instance from "cache status unknown" to "cache present, integrity unresolved" — a real advance, and a smaller one than a bare candidate count suggests.
+**That is a statement about presence only.** Nine of the eleven depend on raw caches with no directly comparable committed hash, and four of those additionally lack explicit output-to-generation-source linkage. Phase 1 moved every instance from "cache status unknown" to "cache present, integrity unresolved" — a real advance, and a smaller one than a bare candidate count suggests.
+
+TI-08's input location, recorded as unresolved in an earlier draft of this package, has since been traced statically and all three of its input trees confirmed present; it therefore remains a candidate on resolved rather than assumed evidence. See `CACHE_TO_TEST_INSTANCE_MAP.md`.
 
 ## Counts
 
@@ -20,29 +22,39 @@
 
 | Family | Instances | Cache tree | Verification strength | Readiness |
 |---|---|---|---|---|
-| FH-1 | TI-01, TI-02, TI-03, TI-04 | M43 and M45 period checkpoints | **Weakest.** No manifest of any kind for M43/M45: no results hash, no source-file pin. Pickle serialization adds a load-failure ambiguity. | `CANDIDATE_AVAILABLE_FOR_PHASE2`, lowest confidence |
-| FH-2 | TI-05, TI-06, TI-07, TI-08 | M48 daily-bar cache; TI-08 additionally needs ORB minute inputs from outside its own directory | **Mixed.** M48 and M49 results both hash-match and both have source-file pins; the raw bar cache is unverified; TI-08's input location is unresolved. | `CANDIDATE_AVAILABLE_FOR_PHASE2`; TI-08 carries an extra dependency |
+| FH-1 | TI-01, TI-02, TI-03, TI-04 | M43 and M45 period checkpoints | **Weakest.** No committed artifact-hash manifest for M43/M45, so no explicit output-to-generation-source linkage; indirect Git-tree provenance exists. Pickle serialization adds a load-failure ambiguity. | `CANDIDATE_AVAILABLE_FOR_PHASE2`, lowest confidence |
+| FH-2 | TI-05, TI-06, TI-07, TI-08 | M48 `daily-bar-cache/sip/` shared by all four; TI-08 additionally consumes M43's period checkpoints and the `research-universe-expansion/bar-cache/` minute cache | **Mixed.** M48 and M49 results both hash-match and both carry explicit source pins; the raw bar cache is unverified; TI-08's extra inputs are resolved and present. | `CANDIDATE_AVAILABLE_FOR_PHASE2`; TI-08 carries two additional dependencies |
 | FH-3 | TI-09, TI-10, TI-11 | the shared M52 cross-sectional-momentum tree | **Strongest.** M52 and M53 results both hash-match, both have source-file pins, all three sub-caches present, JSON throughout. | `CANDIDATE_AVAILABLE_FOR_PHASE2`, highest confidence |
 
 ## Per-instance readiness
 
 | TI | Milestone | Status | Principal qualification |
 |---|---|---|---|
-| TI-01 | M43 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | No manifest; pickle; no source pin |
+| TI-01 | M43 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | No committed artifact-hash manifest; no explicit source linkage; pickle |
 | TI-02 | M43 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-01 |
 | TI-03 | M43 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-01 |
 | TI-04 | M45 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-01; also needs the per-session no-trade record |
 | TI-05 | M48 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | Raw bar cache unverified; results hash-match |
 | TI-06 | M48 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-05 |
 | TI-07 | M48 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-05 |
-| TI-08 | M49 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | **Unresolved input location**; depends on M48 plus ORB minute inputs |
+| TI-08 | M49 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | Input locations statically resolved and all present; depends on three trees (M48 `sip/`, M43 checkpoints, `research-universe-expansion/bar-cache/`) |
 | TI-09 | M52 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | Raw caches unverified; results hash-match |
 | TI-10 | M53 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | Delegates to M52 caches by design |
 | TI-11 | M53 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-10 |
 
 ## Shared-cache concentration risk
 
-Because FH-2 and FH-3 each rest on a single shared cache tree, a Phase-2 regeneration failure would not remove one instance — it would remove a family. A failure in the M52 tree takes TI-09, TI-10, and TI-11 together; a failure in the M48 bar cache takes TI-05 through TI-08. The eleven candidates are far less independent than the count implies, which mirrors the dependence P3A already recorded for multiplicity purposes.
+An earlier draft of this document said every Phase-2 failure would remove an entire family. That was too coarse, and the TI-08 trace shows why: the blast radius depends on *which* tree fails.
+
+| Cache tree | Instances affected by its failure |
+|---|---|
+| M52 cross-sectional-momentum tree | **TI-09, TI-10, TI-11** — the whole of FH-3, since TI-10 and TI-11 are paired against TI-09 on the identical cache |
+| M48 `daily-bar-cache/sip/` | **TI-05, TI-06, TI-07, TI-08** — the whole of FH-2, since all four consume it |
+| M43 `period-checkpoint/` | **TI-01, TI-02, TI-03, and TI-08** — a cross-family radius: three FH-1 instances plus one FH-2 instance |
+| `research-universe-expansion/bar-cache/` | **TI-08 only** |
+| M45 `period-checkpoint/` | **TI-04 only** |
+
+So a failure of TI-08's additional ORB minute inputs removes TI-08 alone and leaves TI-05–TI-07 intact — **not every Phase-2 failure removes a whole family.** Conversely, a failure of M43's checkpoints reaches *across* families, which no earlier document anticipated. The eleven candidates remain far less independent than the count implies, mirroring the dependence P3A recorded for multiplicity purposes.
 
 ## What this decision explicitly does not say
 

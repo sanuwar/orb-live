@@ -13,14 +13,28 @@ Maps every P3A test instance and non-executable evaluation to the caches a Phase
 | TI-05 | CH-4 / FH-2 | M48 | `research-capital-target-strategy-family/daily-bar-cache/` (40 json) | daily portfolio return / equity series | `PRESENT_UNVERIFIED` (raw); results `PRESENT_DIRECT_HASH_MATCH` | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-06 | CH-4 / FH-2 | M48 | same as TI-05 | same | same | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-07 | CH-4 / FH-2 | M48 | same as TI-05 | same | same | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
-| TI-08 | CH-5 / FH-2 | M49 | **cross-directory**: M48 `daily-bar-cache/` + ORB IEX minute inputs across six periods; M49 itself holds results only | shared-account daily equity series + per-sleeve attribution | `PARTIAL` | `CANDIDATE_AVAILABLE_FOR_PHASE2` **with an unresolved input-location dependency** |
+| TI-08 | CH-5 / FH-2 | M49 | **cross-directory, now statically resolved** (three locations, all present — see below) | shared-account daily equity series + per-sleeve attribution | `PARTIAL` (own dir holds results only; inputs confirmed elsewhere) | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-09 | CH-6 / FH-3 | M52 | `research-cross-sectional-momentum/daily-bar-cache/` (942), `sec-nport-cache/` (29), `openfigi-cache/` (5,243) | daily series preserving within-date cross-sectional structure | `PRESENT_UNVERIFIED` (raw); results `PRESENT_DIRECT_HASH_MATCH` | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-10 | CH-7 / FH-3 | M53 | the immutable M52 caches above, by design | daily series for both arms from the identical cache | `PARTIAL` (delegated by design) | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-11 | CH-7 / FH-3 | M53 | same as TI-10 | same | `PARTIAL` (delegated by design) | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 
-**All eleven remain candidates. None is `NOT_READY_FOR_PHASE2`, because no required cache directory is missing.**
+**All eleven remain candidates. None is `NOT_READY_FOR_PHASE2`, because every required input location is now identified and present.**
 
-That is a statement about *presence*, not integrity. Nine of the eleven depend on raw caches with no directly comparable committed hash, and TI-08 additionally depends on inputs that do not live in its own milestone directory. Both qualifications carry forward to `P3B_PHASE1_READINESS_DECISION.md`.
+That is a statement about *presence*, not integrity. Nine of the eleven depend on raw caches with no directly comparable committed hash. That qualification carries forward to `P3B_PHASE1_READINESS_DECISION.md`.
+
+## TI-08 input locations — statically resolved
+
+An earlier draft of this package recorded TI-08's ORB input location as unresolved while still counting it as a candidate. Those two statements were inconsistent, since `CANDIDATE_AVAILABLE_FOR_PHASE2` asserts that required inputs appear present. The location has now been traced by **static reading of committed source only** — no import, no execution — and all three inputs are confirmed present.
+
+| # | Input | Location resolved from | Repo-relative path | Present |
+|---|---|---|---|---|
+| 1 | Frozen ORB baseline checkpoints (6 periods) | `ORB_CHECKPOINT_DIR`, `scripts/research_orb_practical_core_satellite_portfolio.py:81` | `artifacts/research-profit-protection-exit/period-checkpoint/` | yes — 6 files, 724 KB |
+| 2 | ORB minute bars | `ORB_MINUTE_CACHE_DIR`, same file line 88, consumed flat at line 127 with `feed=ORB_FEED` (`"iex"`, line 89) | `artifacts/research-universe-expansion/bar-cache/` | yes — 3,141 files, 3.2 GB, flat content-addressed `.json` |
+| 3 | ETF daily bars (ARM_A / ARM_B) | `m48_cli.cache_dir_for_feed(args.feed)` at line 475, resolving to `CACHE_ROOT / feed` (`scripts/research_capital_target_strategy_family.py:62,80-81`) with `--feed` defaulting to `sip` (line 470) | `artifacts/research-capital-target-strategy-family/daily-bar-cache/sip/` | yes — 20 files |
+
+Two independent cross-checks agree with the trace: M49's committed manifest records `orb_feed: iex`, matching `ORB_FEED = "iex"`; and it records `feed: sip`, matching the CLI's `--feed` default and the presence of a `sip/` subdirectory with no `iex/` sibling.
+
+Note that input 1 is **M43's** checkpoint directory. TI-08 therefore shares a cache tree with TI-01, TI-02, and TI-03 across family boundaries — a dependency between FH-1 and FH-2 that was not visible before this trace.
 
 ## Non-executable evaluations
 
@@ -37,14 +51,14 @@ All three caches exist and are recorded here for completeness and for search-acc
 | Family | Instances | Distinct cache trees required |
 |---|---|---|
 | FH-1 | TI-01–TI-04 | 2 (M43, M45 period checkpoints) |
-| FH-2 | TI-05–TI-08 | 1 shared (M48 daily-bar cache) + ORB minute inputs for TI-08 |
+| FH-2 | TI-05–TI-08 | 1 shared (M48 `daily-bar-cache/sip/`) + two additional trees for TI-08 alone: M43's period checkpoints and the `research-universe-expansion/bar-cache/` minute cache |
 | FH-3 | TI-09–TI-11 | 1 shared (the M52 cross-sectional-momentum tree) |
 
-The sharing within FH-2 and FH-3 is the same structural dependence P3A already flagged for multiplicity purposes: TI-10 and TI-11 are paired against TI-09 on the identical cache, and TI-08 reuses TI-05–TI-07's arms. A Phase-2 failure on one shared cache tree would therefore remove an entire family, not a single instance.
+The sharing within FH-2 and FH-3 is the same structural dependence P3A already flagged for multiplicity purposes: TI-10 and TI-11 are paired against TI-09 on the identical cache, and TI-08 reuses TI-05–TI-07's arms. The blast radius of a Phase-2 failure differs by tree, and is set out precisely in `P3B_PHASE1_READINESS_DECISION.md`.
 
 ## Missing or ambiguous dependencies
 
-- **No cache directory is missing.**
-- **TI-08 input location is the one genuinely unresolved dependency.** M49's own directory holds results only. Its manifest declares an IEX ORB feed and six periods, so the minute-level inputs must come from elsewhere; Phase 1 did not resolve which directory supplies them, because doing so reliably would require reading generation code paths rather than filesystem metadata. Recorded as unresolved rather than guessed.
+- **No cache directory is missing, and no input location remains unresolved.** TI-08's three input locations were traced statically and all are present (table above).
+- **The resolution surfaced a cross-family dependency**: TI-08 consumes M43's period-checkpoint directory, which TI-01 through TI-03 also depend on.
 - **Factor series remain absent entirely.** No Fama–French or UMD data exists in any cache. P2 classified this `NOT_AVAILABLE` and Phase 1 confirms no local cache changes that: any factor-attribution component of TI-08–TI-11 remains blocked on a new, license-reviewed acquisition outside P3B scope.
 - **Benchmark series** for the contested-comparator instances (TI-05–TI-09) would be drawn from the same Alpaca-derived caches and inherit both their unverified status and the redistribution constraint recorded in P2's licensing matrix.

@@ -15,13 +15,13 @@ Filesystem inspection: directory and file existence, relative paths, file counts
 
 ## What was deliberately not done
 
-No market, benchmark, factor, SEC, OpenFIGI, or broker data was fetched. No outbound network beyond routine GitHub issue/branch/PR operations. No strategy CLI, research CLI, backtest, simulation, or regeneration was run. **No strategy or research module was imported or executed.** No price row, trade, holding, or return series was parsed. No daily, monthly, trade-level, or equity-curve series was reconstructed. No performance statistic was computed. **No cache file was altered, normalized, renamed, moved, copied, repaired, truncated, or deleted.** No archive of raw data was created. Phase 2, M55, and M56 were not run.
+No market, benchmark, factor, SEC, OpenFIGI, or broker data was fetched. No outbound network beyond routine GitHub issue/branch/PR operations. No strategy CLI, research CLI, backtest, simulation, or regeneration was run. **No strategy or research module was imported or executed.** No price row, trade, holding, or return series was parsed. No daily, monthly, trade-level, or equity-curve series was reconstructed. No performance statistic was computed. **No cache file was altered, normalized, renamed, moved, copied, repaired, truncated, or deleted.** No archive of raw data was created. No pickle was deserialized — Python pickle deserialization is code-execution-capable and may import or invoke referenced globals and classes, so it is not passive data inspection. Phase 2, M55, and M56 were not run.
 
 ## The integrity distinction this package turns on
 
 A committed `study_results_json_sha256` is **not** the expected hash of a raw cache file. It is the hash of a *generated results artifact*. The two are different objects, and comparing them would be meaningless.
 
-Accordingly, a hash comparison was performed **only** where a manifest field names the exact byte-level artifact it hashes — `study_results_json_sha256` against `results/study_results.json`, `result_sha256` against `results/m52_result.json`, and so on. Those five comparisons are genuine. **They say nothing about the raw bar caches that produced those results**, for which no directly comparable committed hash exists anywhere in the repository.
+Accordingly, a hash comparison was performed **only** where a manifest field names the exact byte-level artifact it hashes — `study_results_json_sha256` against `results/study_results.json`, `result_sha256` against `results/m52_result.json`, and so on. Those five comparisons are genuine, and each proves exactly one thing: the local artifact is byte-identical to the artifact the manifest names and hashes. **They say nothing about the raw bar caches that produced those results**, for which no directly comparable committed hash exists anywhere in the repository, and — because Phase 1 did not parse them — nothing about which report figures were derived from them.
 
 Existence, plausible filenames, plausible timestamps, and matching aggregate counts are **not** integrity evidence. Timestamps appear in this package as diagnostic metadata only.
 
@@ -45,7 +45,7 @@ Existence, plausible filenames, plausible timestamps, and matching aggregate cou
 
 ## Privacy and licensing
 
-Only aggregate inventory information is committed: repository-relative directory paths, file counts, aggregate sizes, and file extensions. No raw price, trade, or holdings rows; no symbol-level cache contents; no API responses; no absolute paths, usernames, secrets, tokens, or vendor account identifiers; no redistributable copy of licensed market data.
+Only aggregate inventory information is committed: repository-relative directory paths, file counts, aggregate sizes, and file extensions. Per-source redistribution statuses are reconciled against `docs/publication/p2/DATA_LICENSE_REDISTRIBUTION_MATRIX.md` in `PHASE1_INTEGRITY_FINDINGS.md`; the caches are **not** uniformly Alpaca-derived. No raw price, trade, or holdings rows; no symbol-level cache contents; no API responses; no absolute paths, usernames, secrets, tokens, or vendor account identifiers; no redistributable copy of licensed market data.
 
 ## Deliverables
 
