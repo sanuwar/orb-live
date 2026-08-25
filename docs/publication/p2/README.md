@@ -7,7 +7,7 @@
 
 P2 converts P1's identified publication gaps into a precise, auditable, machine-checkable evidence and reproducibility plan **before** any new statistical analysis or full manuscript draft is written. It:
 
-1. Freezes the hypothesis-counting and statistical-analysis rules a later P3 analysis will follow.
+1. Freezes the hypothesis-counting reconciliation (14/17/21) as machine-checkable, and drafts — without freezing or authorizing execution of — a candidate statistical-analysis protocol for a later P3 analysis. These are two different states: the counting reconciliation is settled; the analysis protocol itself is a **draft candidate for external finance/econometrics review**, not yet finalized. P3 remains `BLOCKED` until that protocol is externally reviewed, its remaining unresolved decisions are frozen in a subsequent, separately time-stamped commit, and the required granular inputs pass the cache-integrity preflight described in `STATISTICAL_INPUT_INVENTORY.md`. See `STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md` and `P2_READINESS_DECISION.md` for the exact status and blockers.
 2. Determines exactly which required statistical inputs already exist in committed artifacts.
 3. Identifies inputs that are derivable offline, summary-only, missing, license-restricted, or prospective-pending.
 4. Formalizes actor provenance and defect/correction classification.

@@ -23,6 +23,7 @@ LEDGER_JSON_PATH = P2_DIR / "HYPOTHESIS_LEDGER_M43_M55.json"
 LEDGER_MD_PATH = P2_DIR / "HYPOTHESIS_LEDGER_M43_M55.md"
 PROTOCOL_CANDIDATE_PATH = P2_DIR / "STATISTICAL_ANALYSIS_PROTOCOL_CANDIDATE.md"
 READINESS_DECISION_PATH = P2_DIR / "P2_READINESS_DECISION.md"
+ACTOR_TAXONOMY_PATH = P2_DIR / "ACTOR_PROVENANCE_AND_CORRECTION_TAXONOMY.md"
 
 REQUIRED_ENTRY_FIELDS = {
     "milestone",
@@ -434,8 +435,47 @@ def test_protocol_candidate_is_not_labeled_executable_or_frozen():
         "Comparators",
         "Test-statistic standardization",
         "Treatment of non-evaluable variants",
+        "White's Reality Check / Hansen's SPA formal model-comparison universe",
     ):
         assert item in text, f"missing unresolved-decision item: {item}"
+
+
+def test_reality_check_spa_does_not_include_non_evaluable_variants_as_executable(ledger):
+    """Regression test for the specific correction: SS10 must not state that
+    the n=2 (M44) or n=0 (M47) variants are directly included in an
+    executable White's Reality Check / SPA model-comparison set with a
+    real or fabricated return series. It may (and must) keep them in the
+    search-accounting narrative of what was tried."""
+    text = PROTOCOL_CANDIDATE_PATH.read_text(encoding="utf-8")
+    section_10 = text.split("## 10. White's Reality Check", 1)[1]
+    section_10 = section_10.split("## 11.", 1)[0]
+
+    # Must not claim these variants are inserted into an executable test.
+    forbidden_phrases = [
+        "M44 and M47 are included in the Reality Check",
+        "M44 and M47 are included in the SPA",
+        "including M44 and M47 in the executable",
+        "n=0 variant is included in the model set",
+        "n=2 variant is included in the model set",
+    ]
+    for phrase in forbidden_phrases:
+        assert phrase not in section_10, f"section 10 wrongly claims: {phrase!r}"
+
+    # Must explicitly say these variants cannot supply a defined
+    # loss/return-differential series without fabrication.
+    assert "fabricat" in section_10.lower()
+    assert "M44" in section_10 and "M47" in section_10
+
+    # Must explicitly defer model-set membership to the reviewer and block execution.
+    assert "UNRESOLVED" in section_10 or "Unresolved Decisions Registry item #9" in section_10
+    assert "must not execute" in section_10.lower() or "must not** execute" in section_10
+
+    # Cross-check against the ledger: M44 and M47's own evaluability
+    # classification must still say what they are (not silently promoted).
+    m44 = next(e for e in ledger["entries"] if e["milestone"] == "M44" and e["arm_id"] == "FALLBACK_FIRST_VALID_0950")
+    m47 = next(e for e in ledger["entries"] if e["milestone"] == "M47" and e["arm_id"] == "SEQUENTIAL_SECOND_VALID_1020")
+    assert m44["inferential_evaluability"] == "DESCRIPTIVE_ONLY_INSUFFICIENT_SAMPLE"
+    assert m47["inferential_evaluability"] == "NOT_EVALUABLE_STRUCTURAL_NULL"
 
 
 def test_p3_readiness_remains_blocked_pending_review_and_preflight():
@@ -453,6 +493,55 @@ def test_p3_readiness_remains_blocked_pending_review_and_preflight():
     section_7 = text.split("## 7. Can methods-manuscript drafting begin in parallel?", 1)[1]
     section_7 = section_7.split("## 8.", 1)[0]
     assert section_7.strip().startswith("**READY_WITH_LIMITATIONS")
+
+
+def test_m50_verification_actor_is_unknown_not_inferred():
+    """Regression test: an earlier draft inferred HUMAN_OPERATOR for M50's
+    VERIFICATION cell from workflow context (the retrieval-route fix
+    plausibly required an operator-supplied accession number). That is an
+    inference from context, not a committed actor label, and this taxonomy
+    must not do that -- the cell must be UNKNOWN."""
+    text = ACTOR_TAXONOMY_PATH.read_text(encoding="utf-8")
+    m50_row = next(line for line in text.splitlines() if line.startswith("| M50 |"))
+    columns = [c.strip() for c in m50_row.split("|")]
+    # | (empty) | Milestone | Defect category | DEFECT_INTRODUCTION | DEFECT_DETECTION | CORRECTION | VERIFICATION | Evidence | (empty) |
+    verification_cell = columns[6]
+    assert verification_cell.startswith("`UNKNOWN`"), (
+        f"M50 VERIFICATION cell must be UNKNOWN, found: {verification_cell!r}"
+    )
+
+
+def test_m55_introduction_and_correction_remain_unknown():
+    text = ACTOR_TAXONOMY_PATH.read_text(encoding="utf-8")
+    m55_row = next(line for line in text.splitlines() if line.startswith("| M55 |"))
+    columns = [c.strip() for c in m55_row.split("|")]
+    defect_introduction_cell = columns[3]
+    correction_cell = columns[5]
+    assert defect_introduction_cell.startswith("`UNKNOWN`"), defect_introduction_cell
+    assert correction_cell.startswith("`UNKNOWN`"), correction_cell
+
+
+def test_m55_detection_remains_automated_test_not_weakened_to_unknown():
+    text = ACTOR_TAXONOMY_PATH.read_text(encoding="utf-8")
+    m55_row = next(line for line in text.splitlines() if line.startswith("| M55 |"))
+    columns = [c.strip() for c in m55_row.split("|")]
+    defect_detection_cell = columns[4]
+    assert defect_detection_cell.startswith("`AUTOMATED_TEST`"), (
+        f"M55 DEFECT_DETECTION must remain AUTOMATED_TEST (a committed executable "
+        f"gate actually failed), found: {defect_detection_cell!r}"
+    )
+    # And the summary prose must not claim every DEFECT_DETECTION cell is UNKNOWN.
+    assert "M55's `DEFECT_DETECTION` is `AUTOMATED_TEST`, not `UNKNOWN`" in text
+
+
+def test_no_uncaveated_exact_claude_model_appears_as_established_fact():
+    # No P2 document may assert a specific Claude model/version (e.g. a
+    # named Sonnet/Opus/Haiku/Fable release) as established fact. Model
+    # identity is explicitly deferred to retained-record verification.
+    forbidden = re.compile(r"\bclaude[\s-]+(sonnet|opus|haiku|fable)\b", re.IGNORECASE)
+    for path in P2_DIR.glob("*.md"):
+        text = path.read_text(encoding="utf-8")
+        assert not forbidden.search(text), f"{path.name} names a specific Claude model as established fact"
 
 
 def test_ledger_citations_resolve_against_actual_git_history_offline(ledger):
