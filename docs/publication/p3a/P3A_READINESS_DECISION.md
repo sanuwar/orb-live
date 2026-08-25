@@ -7,7 +7,8 @@
 | Gate | Status |
 |---|---|
 | a. External methodological review | **READY** |
-| b. P3B cache and data preflight | **READY** |
+| b. P3B Phase 1 — read-only cache inventory | **READY** |
+| b2. P3B Phase 2 — deterministic regeneration verification | **READY_WITH_LIMITATIONS** — requires separate operator authorization |
 | c. Protocol freezing | **BLOCKED** |
 | d. Statistical execution | **BLOCKED** |
 
@@ -15,21 +16,35 @@ This is the expected split: the package is ready to be *reviewed* and the data c
 
 ## a. External methodological review — READY
 
-`EXTERNAL_ECONOMETRICS_REVIEW_PACKET.md` is self-contained: it states the repository context, the four highest-stakes questions, the tables a reviewer needs, and the constraints that bound any advice. All 12 decisions in `STATISTICAL_DECISION_REGISTER.md` carry alternatives, consequences, and an exact reviewer question. Hypothesis levels are separated so a reviewer is not asked to accept 11 test instances as 11 independent hypotheses.
+`EXTERNAL_ECONOMETRICS_REVIEW_PACKET.md` is self-contained: it states the repository context, the four highest-stakes questions, the tables a reviewer needs, and the constraints that bound any advice. All 13 decisions in `STATISTICAL_DECISION_REGISTER.md` carry alternatives, consequences, and an exact reviewer question. Hypothesis levels are separated so a reviewer is not asked to accept 11 test instances as 11 independent hypotheses.
 
 **Limitation:** no reviewer has been identified or contacted, and no named reviewer is proposed anywhere in this package. Readiness here means the packet is complete enough to send, not that sending has been authorized.
 
-## b. P3B cache and data preflight — READY
+## b. P3B cache and data preflight — split into two phases with different authorization requirements
 
-The preflight is fully specified and can proceed independently of the review, because it asks a factual question (does the granular data exist and is it intact) rather than a methodological one. Requirements are already committed in `docs/publication/p2/STATISTICAL_INPUT_INVENTORY.md`: confirm each `artifacts/research-*/results/` cache exists; confirm contents are unmodified against the milestone hash manifest; confirm regeneration reproduces the pinned `study_results_json_sha256`; and commit the pass/fail result as its own artifact.
+An earlier draft of this document treated the preflight as one undifferentiated step that "may start immediately." That conflated two materially different activities, and the boundary is now drawn explicitly.
 
-**Two gates can therefore run in parallel.** This is the main scheduling finding of P3A.
+### P3B Phase 1 — read-only cache inventory — READY
 
-**Limitation:** if the preflight fails for a given milestone, the affected test instances fall below 11, and the multiplicity denominator debate in D8 changes shape. The preflight is not a formality.
+Confirms that the required directories and files exist, and inspects committed manifests and recorded hashes. **Alters nothing. Runs no strategy code and no simulation.** It is a filesystem-and-manifest inspection: does `artifacts/research-*/results/` exist for each milestone, what does it contain, and what do the committed hash manifests record about it.
+
+This is genuinely read-only, carries no execution risk, and can proceed in parallel with external methodological review, because it asks a factual question rather than a methodological one.
+
+### P3B Phase 2 — deterministic regeneration verification — READY_WITH_LIMITATIONS, SEPARATE AUTHORIZATION REQUIRED
+
+Reproduces historical strategy outputs from the existing caches in order to confirm that regeneration reproduces the pinned `study_results_json_sha256` recorded in each milestone hash manifest.
+
+**This is a historical simulation rerun, even though every parameter remains frozen and no market data is fetched.** Executing committed strategy code over cached bars is strategy execution regardless of whether the output is expected to be identical to a committed hash. It therefore falls outside routine offline documentation work and **requires separate explicit operator authorization before it may begin.**
+
+Phase 2 constraints, if authorized: fetch no market data; perform no parameter search; alter no cache; change no strategy, configuration, or M55 file; and commit the pass/fail result as its own artifact.
+
+**Phase 1 may begin without further authorization. Phase 2 may not.** P3A does not authorize Phase 2 and did not perform any part of either phase.
+
+**Limitation:** if either phase fails for a given milestone, the affected test instances drop out and the executable model set falls below 11, which changes the shape of the D8 and D9 discussion. Neither phase is a formality.
 
 ## c. Protocol freezing — BLOCKED
 
-**All 12 decisions block freezing.** A protocol cannot be frozen while its replication count, seed, block length, resampling scheme, nulls, comparators, standardization, non-evaluable treatment, model-comparison universe, inference level, family structure, and search denominator are all open. P3A deliberately did not resolve any of them; resolving them by convenience to make the protocol look finished is precisely the defect the second P2 review corrected.
+**All 13 decisions block freezing.** A protocol cannot be frozen while its replication count, seed, block length, resampling scheme, nulls, comparators, standardization, non-evaluable treatment, model-comparison universe, inference level, family structure, and search denominator are all open. P3A deliberately did not resolve any of them; resolving them by convenience to make the protocol look finished is precisely the defect the second P2 review corrected.
 
 Freezing requires, in order: external review returns; decisions are resolved and recorded; a **separate, later, time-stamped commit** freezes the resulting protocol. That commit is not this one and not P3A's.
 
@@ -47,10 +62,11 @@ Six decisions (D1, D2, D3, D4, D5, D8) block **all** execution; no subset of the
 
 ## Recommended next steps, in order
 
-1. Run the P3B cache-integrity preflight (independent of review; may start immediately).
-2. Send the review packet once an operator authorizes contact and a reviewer is identified.
-3. Record the reviewer's resolutions against all 12 decisions.
-4. Freeze the resulting protocol in a separate time-stamped commit.
-5. Only then execute P3 statistical analysis, scoped to whatever test instances survived the preflight.
+1. Run **P3B Phase 1** (read-only cache inventory). Independent of review; may start without further authorization; alters nothing.
+2. Obtain separate explicit operator authorization for **P3B Phase 2** (deterministic regeneration verification), which is a historical simulation rerun, then run it under the Phase 2 constraints.
+3. Send the review packet once an operator authorizes contact and a reviewer is identified. This may proceed in parallel with steps 1 and 2.
+4. Record the reviewer's resolutions against all 13 decisions.
+5. Freeze the resulting protocol in a separate time-stamped commit.
+6. Only then execute P3 statistical analysis, scoped to whatever test instances survived both preflight phases.
 
-Steps 3, 4, and 5 must not be reordered or merged.
+Steps 4, 5, and 6 must not be reordered or merged.

@@ -29,6 +29,8 @@ P2 established that 11 of 14 decision-eligible variants are `INFERENTIALLY_EVALU
 
 One conceptual hypothesis (CH-3, ORB universe extension) has **zero** executable test instances. This is a genuine finding about the limits of the committed record, not a gap in this catalog.
 
+The 11 executable instances are the only candidates for a formal model set, because Romano-Wolf, White Reality Check, and Hansen SPA each require a defined test statistic or observation-level loss differential from every member. The 14, 17, and 21 counts serve a separate and equally necessary purpose: transparent search-history and selection-bias disclosure. Neither substitutes for the other, and the wider counts cannot simply be used as a larger correction denominator.
+
 ## Deliverables
 
 | File | Purpose |
@@ -38,9 +40,9 @@ One conceptual hypothesis (CH-3, ORB universe extension) has **zero** executable
 | `FORMAL_HYPOTHESIS_CATALOG_CANDIDATE.md` | Conceptual, family-level, and variant-level catalog with nulls, alternatives, and evidence citations. |
 | `COMPARATOR_ESTIMAND_AND_OUTCOME_MAP.md` | Comparator, estimand, observation unit, outcomes, and required data per test instance. |
 | `MULTIPLE_TESTING_AND_MODEL_SET_OPTIONS.md` | Candidate family structure, search-universe accounting, FWER/FDR and Reality Check/SPA options. |
-| `STATISTICAL_DECISION_REGISTER.md` | All unresolved decisions with alternatives, recommendations, consequences, reviewer questions, blocking status. |
+| `STATISTICAL_DECISION_REGISTER.md` | All 13 unresolved decisions with alternatives, recommendations, consequences, reviewer questions, blocking status. |
 | `EXTERNAL_ECONOMETRICS_REVIEW_PACKET.md` | Concise reviewer-facing package. |
-| `P3A_READINESS_DECISION.md` | Readiness for external review, P3B preflight, protocol freeze, and statistical execution. |
+| `P3A_READINESS_DECISION.md` | Readiness for external review, P3B Phase 1 and Phase 2, protocol freeze, and statistical execution. |
 
 ## Status of the protocol
 

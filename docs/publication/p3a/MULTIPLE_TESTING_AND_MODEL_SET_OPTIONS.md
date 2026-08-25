@@ -12,9 +12,14 @@ The denominator of any multiplicity claim must reflect what was actually tried, 
 | Decision-eligible variants | 14 | Novel, predeclared, decision-eligible strategy variants | **The honest denominator for selection-bias narrative** |
 | Displayed arm labels | 17 | 14 plus M43 `BASELINE` control and M46 `MID`/`SMALL` diagnostic sleeves | Broader look-count |
 | Arm-by-entry-policy evaluations | 21 | 17 plus 4 M43 `CURRENT_FIRST_VALID` sensitivity replays | Widest look-count |
-| **Candidate executable test instances** | **11** | Variants with a credible defined estimand, pending preflight | **The correction denominator, if and only if a reviewer confirms it** |
+| **Candidate executable test instances** | **11** | Variants with a credible defined estimand, pending preflight | **The only candidates for an executable model set**, subject to reviewer confirmation |
 
-**The gap between 11 and 21 is the central honesty problem of this package.** Correcting over 11 while 21 looks were taken understates the search. Correcting over 21 when 10 of those looks cannot produce a test statistic overstates the procedure's applicability. Neither is obviously right, and P3A does not resolve it; it is Decision 8 combined with Decision 9.
+**The gap between 11 and 21 is the central honesty problem of this package, but it is not a single choice of "denominator."** Two distinct things must both be reported, and conflating them is the error this section exists to prevent:
+
+- **The executable model set** is bounded by evaluability, not by preference. Romano-Wolf, White Reality Check, and Hansen SPA each require a defined test statistic or an observation-level loss differential for every member. A variant with n=0 (SN-01) or n=2 (DO-01) supplies neither and **cannot be numerically inserted into a resampling procedure at all**. There is no arithmetic that substitutes for observations that do not exist.
+- **The search-history accounting** (14 decision-eligible, 17 displayed, 21 arm-by-entry, plus unenumerable pre-M43 antecedents) is required for transparent selection-bias disclosure regardless of what the executable set contains. Dropping it because those looks are not testable would understate the search.
+
+A further correction to an earlier draft: adjusted p-values from a stepdown procedure **do not generally scale linearly with the number of hypotheses**. They depend on the joint null distribution of the test statistics, so changing model-set membership changes the resampled maxima rather than multiplying a scalar. Any report that shows adjusted results at a hypothetical larger denominator must be labelled a **heuristic selection-sensitivity analysis**, not a formally valid Romano-Wolf or SPA correction. This is Decision 8 combined with Decision 9, and P3A does not resolve it.
 
 Additionally, the record documents **pre-M43 exploratory antecedents** (ORB discovery/selection work referenced by M43-M47 and listed in P1's `HYPOTHESIS_AND_WINDOW_AUDIT.md` as outside the formal registry). Their raw candidate count cannot be reconstructed. Any multiplicity claim must state qualitatively that the true search was larger than 21, even though only 21 are enumerable.
 
@@ -24,19 +29,21 @@ Three families, matching P2's corrected `strategy_family` split:
 
 | Family | Test instances | Unit | Internal dependence |
 |---|---|---|---|
-| FH-1 | TI-01, TI-02, TI-03, TI-04 | R-multiples | Very high. TI-01 to TI-03 are paired contrasts on the identical 122 occurrences against a shared baseline; TI-04 shares the same sessions |
-| FH-2 | TI-05, TI-06, TI-07, TI-08 | Dollars on $30,000 | Very high. TI-08 reuses TI-05 to TI-07 arms inside a shared allocator on identical dates |
-| FH-3 | TI-09, TI-10, TI-11 | Dollars on $30,000 | Very high. TI-10 and TI-11 are paired contrasts against TI-09 on the identical 69 signal dates and the identical cache |
+| FH-1 | TI-01, TI-02, TI-03, TI-04 | R-multiples | Shared inputs: TI-01 to TI-03 are paired contrasts on the identical 122 occurrences against a shared baseline; TI-04 shares the same sessions. Substantial positive dependence is plausible; magnitude unverified |
+| FH-2 | TI-05, TI-06, TI-07, TI-08 | Dollars on $30,000 | Shared inputs: TI-08 reuses the TI-05 to TI-07 arms inside a shared allocator on identical dates. Substantial positive dependence is plausible; magnitude unverified |
+| FH-3 | TI-09, TI-10, TI-11 | Dollars on $30,000 | Shared inputs: TI-10 and TI-11 are paired contrasts against TI-09 on the identical 69 signal dates and the identical cache. Substantial positive dependence is plausible; magnitude unverified |
 
-**Every family is internally near-degenerate.** Within-family test statistics are strongly positively dependent by construction, not by coincidence. This is favorable for Romano-Wolf, which is designed to exploit dependence rather than assume independence, and unfavorable for naive Bonferroni, which would be extremely conservative here.
+**Substantial positive dependence within each family is plausible**, given shared observations, shared baselines, shared dates, and shared strategy components. An earlier draft asserted that every family is "internally near-degenerate" and predicted which procedures would and would not reject; both claims went beyond the evidence and are withdrawn.
+
+The **magnitude and structure** of that dependence are unverified and will remain so until the granular series pass the P3B preflight and the joint dependence can actually be measured. Romano-Wolf **may** offer power advantages if the joint dependence structure can be validly resampled, because it accommodates dependence rather than assuming independence. Holm and Bonferroni remain transparent fallbacks that **may** be conservative under positive dependence. **No prediction is made here about which hypotheses any procedure will or will not reject** — that is the analysis itself, and stating an expectation in advance would prejudge it.
 
 ## 3. FWER options
 
 | Option | Fit to this evidence | Concern |
 |---|---|---|
-| **Romano-Wolf stepdown, within-family** (preliminary recommendation) | Strong. Handles arbitrary dependence via joint resampling; unit-consistent within each family | Requires the joint resampling design (Decisions 1-4) to be settled first |
-| Romano-Wolf stepdown, across all 11 | Possible only after Decision 7 resolves the R-multiple vs. dollars unit mismatch | Would require an arbitrary standardization the reviewer has not sanctioned |
-| Bonferroni / Holm | Simple, defensible, transparent | Severely conservative under the near-degenerate dependence documented above; would likely reject nothing and mislead readers into treating that as evidence of absence |
+| **Romano-Wolf stepdown, within-family** (preliminary recommendation) | Accommodates arbitrary dependence via joint resampling; observation units are consistent within each family | Requires the joint resampling design (Decisions 1-4) to be settled first, and its power advantage over Holm is conditional on the dependence structure being validly resampled |
+| Romano-Wolf stepdown, across all 11 | Technically available using reviewer-approved studentized statistics, which are dimensionless and do not require converting R-multiples into dollars | Requires cross-family observation alignment (session-clustered vs. monthly) and preservation of contemporaneous dependence across overlapping windows; see Decision 7 |
+| Bonferroni / Holm | Simple, defensible, transparent; no resampling design required | May be conservative if the positive dependence suggested by shared inputs is in fact substantial. Whether that conservatism is material here is unverified. Any non-rejection must be reported as non-rejection, never as evidence of absence |
 
 ## 4. FDR options
 
