@@ -1,0 +1,56 @@
+# P3B Phase 1 Readiness Decision
+
+**Evidence cutoff:** main at `eef11e7b368918c35ffb3ecb4b7bca2d2413cfb2`.
+
+## Headline
+
+**The original maximum of 11 executable candidates remains possible.** No required cache directory is missing, so no test instance is `NOT_READY_FOR_PHASE2` on presence grounds.
+
+**That is a statement about presence only.** Nine of the eleven depend on raw caches with no directly comparable committed hash; four of those additionally have no committed source-file pin; and one has an unresolved input-location dependency. Phase 1 moved every instance from "cache status unknown" to "cache present, integrity unresolved" — a real advance, and a smaller one than a bare candidate count suggests.
+
+## Counts
+
+| Status | Count | Instances |
+|---|---:|---|
+| `CANDIDATE_AVAILABLE_FOR_PHASE2` | **11** | TI-01 … TI-11 |
+| `NOT_READY_FOR_PHASE2` | **0** | — |
+| `NOT_APPLICABLE` | 3 | DO-01, DO-02, SN-01 |
+
+## Per-family readiness
+
+| Family | Instances | Cache tree | Verification strength | Readiness |
+|---|---|---|---|---|
+| FH-1 | TI-01, TI-02, TI-03, TI-04 | M43 and M45 period checkpoints | **Weakest.** No manifest of any kind for M43/M45: no results hash, no source-file pin. Pickle serialization adds a load-failure ambiguity. | `CANDIDATE_AVAILABLE_FOR_PHASE2`, lowest confidence |
+| FH-2 | TI-05, TI-06, TI-07, TI-08 | M48 daily-bar cache; TI-08 additionally needs ORB minute inputs from outside its own directory | **Mixed.** M48 and M49 results both hash-match and both have source-file pins; the raw bar cache is unverified; TI-08's input location is unresolved. | `CANDIDATE_AVAILABLE_FOR_PHASE2`; TI-08 carries an extra dependency |
+| FH-3 | TI-09, TI-10, TI-11 | the shared M52 cross-sectional-momentum tree | **Strongest.** M52 and M53 results both hash-match, both have source-file pins, all three sub-caches present, JSON throughout. | `CANDIDATE_AVAILABLE_FOR_PHASE2`, highest confidence |
+
+## Per-instance readiness
+
+| TI | Milestone | Status | Principal qualification |
+|---|---|---|---|
+| TI-01 | M43 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | No manifest; pickle; no source pin |
+| TI-02 | M43 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-01 |
+| TI-03 | M43 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-01 |
+| TI-04 | M45 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-01; also needs the per-session no-trade record |
+| TI-05 | M48 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | Raw bar cache unverified; results hash-match |
+| TI-06 | M48 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-05 |
+| TI-07 | M48 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-05 |
+| TI-08 | M49 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | **Unresolved input location**; depends on M48 plus ORB minute inputs |
+| TI-09 | M52 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | Raw caches unverified; results hash-match |
+| TI-10 | M53 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | Delegates to M52 caches by design |
+| TI-11 | M53 | `CANDIDATE_AVAILABLE_FOR_PHASE2` | as TI-10 |
+
+## Shared-cache concentration risk
+
+Because FH-2 and FH-3 each rest on a single shared cache tree, a Phase-2 regeneration failure would not remove one instance — it would remove a family. A failure in the M52 tree takes TI-09, TI-10, and TI-11 together; a failure in the M48 bar cache takes TI-05 through TI-08. The eleven candidates are far less independent than the count implies, which mirrors the dependence P3A already recorded for multiplicity purposes.
+
+## What this decision explicitly does not say
+
+- **No instance is statistically executable.** Phase 1 establishes cache presence, nothing more. Statistical execution additionally requires the 13 unresolved decisions in `docs/publication/p3a/STATISTICAL_DECISION_REGISTER.md` to be resolved by a qualified external finance/econometrics reviewer — six of which block all execution — and a successful Phase 2.
+- **No P2 input classification changes.** Every input remains `SUMMARY_ONLY`, `NOT_AVAILABLE`, or `PROSPECTIVE_PENDING` as P2 recorded it.
+- **No integrity claim is made for any raw cache.** Presence is confirmed; integrity is unresolved pending Phase 2.
+- **The protocol is not frozen and P3 has not begun.**
+
+## Standing safety state
+
+`strategy.enabled=false`. M55 remains `INITIALIZED_WAITING_FOR_FIRST_SIGNAL` with zero transactions and empty base and stress positions, ledger blob `ce8f022d1fc9f734042de4c08feef35b9de00465`, untouched by this milestone.
