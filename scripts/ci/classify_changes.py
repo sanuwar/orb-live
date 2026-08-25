@@ -71,14 +71,62 @@ PROTECTED_EXACT: frozenset = frozenset(
     }
 )
 
-# Tier-1-eligible: publication prose and approved publication data
-# artifacts. These do not affect runtime behaviour.
-TIER_1_SUFFIXES: tuple[str, ...] = (".md", ".json")
+# Tier-1-eligible: publication prose only. Structured data is NOT
+# Tier-1-eligible: an arbitrary .json/.csv/.yaml under docs/publication/
+# may well be an input that a generator consumes, so it needs the focused
+# verification that only Tier 2 (or the full tier) provides.
 TIER_1_PREFIX = "docs/publication/"
+TIER_1_SUFFIX = ".md"
 
-# Tier-2-eligible additions: publication generators and their tests.
-TIER_2_PREFIX_SCRIPTS = "scripts/publication/"
-TIER_2_PREFIX_TESTS = "tests/test_publication_"
+
+class ToolingEntry:
+    """One publication artifact together with the exact checks that cover it.
+
+    The manifest is the whole Tier-2 allowlist. A publication generator,
+    test, or structured-data artifact earns Tier 2 only by appearing here
+    with a named test module and, where it is generated, a regeneration
+    command. Anything not listed -- including a brand-new
+    scripts/publication/*.py or tests/test_publication_*.py -- falls to
+    the full tier until its focused verification is added here and wired
+    into the workflow.
+    """
+
+    __slots__ = ("path", "tests", "regeneration")
+
+    def __init__(self, path: str, tests: tuple, regeneration=None):
+        self.path = path
+        self.tests = tests
+        self.regeneration = regeneration
+
+    def __repr__(self) -> str:
+        return "ToolingEntry({0!r})".format(self.path)
+
+
+#: The P2 hypothesis ledger is the only publication tooling with focused
+#: verification wired up today. Its generated Markdown is included
+#: deliberately: hand-editing the generated file must trigger the
+#: regeneration-determinism check rather than passing as Tier-1 prose.
+_P2_TESTS = ("tests/test_publication_p2_artifacts.py",)
+_P2_REGEN = "python -m scripts.publication.generate_p2_hypothesis_ledger"
+
+PUBLICATION_TOOLING_MANIFEST: tuple = (
+    ToolingEntry("scripts/publication/generate_p2_hypothesis_ledger.py", _P2_TESTS, _P2_REGEN),
+    ToolingEntry("tests/test_publication_p2_artifacts.py", _P2_TESTS),
+    ToolingEntry("docs/publication/p2/HYPOTHESIS_LEDGER_M43_M55.json", _P2_TESTS, _P2_REGEN),
+    ToolingEntry("docs/publication/p2/HYPOTHESIS_LEDGER_M43_M55.md", _P2_TESTS, _P2_REGEN),
+)
+
+MANIFEST_PATHS: frozenset = frozenset(entry.path for entry in PUBLICATION_TOOLING_MANIFEST)
+
+#: Prefixes that look like publication tooling but are only Tier-2
+#: eligible when the exact file is in the manifest. Anything matching
+#: these prefixes and absent from the manifest is explicitly rejected to
+#: the full tier, so adding a new generator cannot silently inherit the
+#: P2 checks.
+TOOLING_LOOKALIKE_PREFIXES: tuple = (
+    "scripts/publication/",
+    "tests/test_publication_",
+)
 
 
 @dataclass(frozen=True)
@@ -125,17 +173,36 @@ def _is_protected(path: str) -> bool:
 
 
 def _is_tier1_path(path: str) -> bool:
+    """Publication prose only, and never a manifest-managed file.
+
+    A generated Markdown artifact lives in the manifest so that editing
+    it triggers the regeneration-determinism check instead of passing as
+    ordinary prose.
+    """
+    if path in MANIFEST_PATHS:
+        return False
     if not path.startswith(TIER_1_PREFIX):
         return False
-    return path.endswith(TIER_1_SUFFIXES)
+    return path.endswith(TIER_1_SUFFIX)
 
 
 def _is_tier2_path(path: str) -> bool:
-    if path.startswith(TIER_2_PREFIX_SCRIPTS) and path.endswith(".py"):
-        return True
-    if path.startswith(TIER_2_PREFIX_TESTS) and path.endswith(".py"):
-        return True
-    return False
+    """Tier-2 eligibility is manifest membership. Nothing else."""
+    return path in MANIFEST_PATHS
+
+
+def _is_unlisted_tooling_lookalike(path: str) -> bool:
+    """True for publication-tooling-shaped paths absent from the manifest."""
+    if path in MANIFEST_PATHS:
+        return False
+    return any(path.startswith(prefix) for prefix in TOOLING_LOOKALIKE_PREFIXES)
+
+
+def checks_for(paths) -> tuple:
+    """Return the manifest entries covering `paths`, for workflow wiring."""
+    return tuple(
+        entry for entry in PUBLICATION_TOOLING_MANIFEST if entry.path in set(paths)
+    )
 
 
 def classify(paths, force_full: bool = False) -> Classification:
@@ -172,6 +239,15 @@ def classify(paths, force_full: bool = False) -> Classification:
         if protected:
             reasons = tuple(
                 "protected path requires full verification: " + p for p in protected[:5]
+            )
+            return Classification(TIER_3, reasons, ordered)
+
+        unlisted_tooling = [p for p in ordered if _is_unlisted_tooling_lookalike(p)]
+        if unlisted_tooling:
+            reasons = tuple(
+                "publication tooling not in the verification manifest, "
+                "defaulting to full until its focused checks are wired up: " + p
+                for p in unlisted_tooling[:5]
             )
             return Classification(TIER_3, reasons, ordered)
 

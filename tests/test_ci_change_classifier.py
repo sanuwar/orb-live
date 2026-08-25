@@ -41,7 +41,7 @@ def test_case_01_publication_markdown_only_is_tier_1():
 def test_case_02_publication_generator_and_publication_test_is_tier_2():
     result = classify(
         [
-            "docs/publication/p2/HYPOTHESIS_LEDGER_M43_M55.md",
+            "docs/publication/p2/README.md",
             "scripts/publication/generate_p2_hypothesis_ledger.py",
             "tests/test_publication_p2_artifacts.py",
         ]
@@ -155,7 +155,6 @@ def test_publication_path_with_executable_extension_is_not_tier_1():
 
 
 def test_non_publication_test_file_is_tier_3():
-    # Only tests/test_publication_*.py are publication-scoped.
     assert classify(["tests/test_trade_state.py"]).tier == TIER_3
     assert classify(["tests/test_ci_change_classifier.py"]).tier == TIER_3
 
@@ -241,3 +240,116 @@ def test_cli_exit_code_is_zero_so_workflow_reads_the_tier_not_an_error():
     for args in (["src/x.py"], ["docs/publication/a.md"], []):
         proc = _cli(*args, "--format", "github", stdin="\n")
         assert proc.returncode == 0
+
+
+# --- correction pass: rename/move safety ------------------------------------
+
+
+def test_protected_path_renamed_into_publication_is_tier_3():
+    # The GitHub files API reports both names for a rename. The workflow
+    # sends both, so the old protected path is present and forces full.
+    result = classify(["docs/publication/example.md", "src/example.py"])
+    assert result.tier == TIER_3
+    assert any("src/example.py" in r for r in result.reasons)
+
+
+def test_docs_research_renamed_into_publication_is_tier_3():
+    result = classify(
+        ["docs/publication/moved.md", "docs/research/CROSS_SECTIONAL_MOMENTUM_FEASIBILITY_M52.md"]
+    )
+    assert result.tier == TIER_3
+
+
+def test_m55_checkpoint_renamed_into_publication_is_tier_3():
+    result = classify(
+        [
+            "docs/publication/p3a/notes.md",
+            "docs/research/MOMENTUM_PROSPECTIVE_MONITOR_M55_CHECKPOINTS.json",
+        ]
+    )
+    assert result.tier == TIER_3
+
+
+def test_publication_markdown_renamed_within_publication_stays_tier_1():
+    # Both old and new names are publication prose, so nothing escalates.
+    result = classify(["docs/publication/p3a/new_name.md", "docs/publication/p3a/old_name.md"])
+    assert result.tier == TIER_1
+
+
+# --- correction pass: manifest-bounded Tier 2 -------------------------------
+
+
+def test_tier_2_is_exactly_the_manifest():
+    from scripts.ci.classify_changes import MANIFEST_PATHS
+
+    for path in MANIFEST_PATHS:
+        assert classify([path]).tier == TIER_2, path
+
+
+def test_unlisted_publication_generator_is_tier_3():
+    result = classify(["scripts/publication/generate_p3a_tables.py"])
+    assert result.tier == TIER_3
+    assert any("manifest" in r for r in result.reasons)
+
+
+def test_unlisted_publication_test_is_tier_3():
+    result = classify(["tests/test_publication_p3a_artifacts.py"])
+    assert result.tier == TIER_3
+    assert any("manifest" in r for r in result.reasons)
+
+
+def test_generated_markdown_artifact_is_tier_2_not_tier_1():
+    # Hand-editing the generated ledger must trigger the regeneration
+    # determinism check, not pass as ordinary prose.
+    result = classify(["docs/publication/p2/HYPOTHESIS_LEDGER_M43_M55.md"])
+    assert result.tier == TIER_2
+
+
+# --- correction pass: structured data ---------------------------------------
+
+
+def test_approved_ledger_json_is_tier_2():
+    assert classify(["docs/publication/p2/HYPOTHESIS_LEDGER_M43_M55.json"]).tier == TIER_2
+
+
+def test_unknown_publication_json_is_tier_3():
+    result = classify(["docs/publication/p3a/new_dataset.json"])
+    assert result.tier == TIER_3
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/publication/p2/table.csv",
+        "docs/publication/p2/config.yaml",
+        "docs/publication/p2/config.yml",
+        "docs/publication/p2/data.parquet",
+        "docs/publication/p2/notes.txt",
+    ],
+)
+def test_publication_structured_or_unknown_data_is_tier_3(path):
+    assert classify([path]).tier == TIER_3
+
+
+def test_publication_markdown_remains_tier_1():
+    assert classify(["docs/publication/p3a/README.md"]).tier == TIER_1
+
+
+def test_manifest_entries_declare_their_own_verification():
+    from scripts.ci.classify_changes import PUBLICATION_TOOLING_MANIFEST
+
+    assert PUBLICATION_TOOLING_MANIFEST, "manifest must not be empty"
+    for entry in PUBLICATION_TOOLING_MANIFEST:
+        assert entry.tests, f"{entry.path} declares no focused tests"
+        for test_path in entry.tests:
+            assert (ROOT / test_path).exists(), f"{entry.path} names a missing test {test_path}"
+        assert (ROOT / entry.path).exists(), f"manifest lists a missing file: {entry.path}"
+
+
+def test_checks_for_returns_covering_manifest_entries():
+    from scripts.ci.classify_changes import checks_for
+
+    covered = checks_for(["scripts/publication/generate_p2_hypothesis_ledger.py"])
+    assert len(covered) == 1
+    assert covered[0].regeneration is not None
+    assert checks_for(["docs/publication/p3a/README.md"]) == ()
