@@ -284,6 +284,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -303,7 +305,13 @@ jobs:
             exit 1
           fi
 
-          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
+          # The pull_request checkout runs with persist-credentials: false,
+          # so `origin` has no usable credentials. Fetch the two commits
+          # over an explicitly authenticated URL instead of persisting a
+          # token into .git/config for every later step. The token is a
+          # short-lived job token and is masked in logs.
+          FETCH_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch --no-tags --depth=1 "$FETCH_URL" "$BASE_SHA" "$HEAD_SHA"
           echo "base=$BASE_SHA"
           echo "head=$HEAD_SHA"
           git diff --check "$BASE_SHA" "$HEAD_SHA"

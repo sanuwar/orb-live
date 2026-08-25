@@ -199,3 +199,24 @@ def test_tier_2_steps_do_not_run_checks_for_unlisted_tooling():
     )
     referenced = set(re.findall(r"tests/test_publication_[A-Za-z0-9_]+\.py", tier2_bodies))
     assert referenced <= declared, f"workflow runs undeclared publication tests: {referenced - declared}"
+
+
+def test_whitespace_check_fetches_with_explicit_credentials():
+    """The pull_request checkout uses persist-credentials: false, so a
+    plain `git fetch origin` fails with 'could not read Username'. The
+    step must fetch over an explicitly authenticated URL, and must not
+    persist that credential into .git/config for later steps."""
+    step = _step("Check whitespace on the committed base-to-head diff")
+    body = step["run"]
+    assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert step["env"]["REPO"] == "${{ github.repository }}"
+    assert "x-access-token:${GH_TOKEN}@github.com/${REPO}.git" in body
+    assert 'git fetch --no-tags --depth=1 "$FETCH_URL" "$BASE_SHA" "$HEAD_SHA"' in body
+    # No credential helper or global config mutation.
+    assert "credential.helper" not in body
+    assert "git config --global" not in body
+
+
+def test_pull_request_checkout_still_does_not_persist_credentials():
+    checkout = _step("Check out event revision")
+    assert checkout["with"]["persist-credentials"] is False
