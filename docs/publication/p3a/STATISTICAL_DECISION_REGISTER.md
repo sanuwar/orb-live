@@ -7,7 +7,7 @@
 - `BLOCKS_ALL` — no test instance can execute until this is settled.
 - `BLOCKS_FAMILY(x)` — only the named family or instances are blocked.
 
-Nine decisions carry forward from P2 (D1-D9). Four are added by P3A (D10-D13): three from separating hypothesis levels, and one (D13) from recognizing that path-dependent risk measures are not per-period observations.
+Nine decisions carry forward from P2 (D1-D9). Four are added by P3A (D10-D13): three from separating hypothesis levels, and one (D13) from recognizing that nonlinear risk and tail statistics are not per-period observations, and are not a single statistical category.
 
 ---
 
@@ -92,7 +92,7 @@ Nine decisions carry forward from P2 (D1-D9). Four are added by P3A (D10-D13): t
 
 ## Decisions added by P3A
 
-D10 to D12 arise from separating conceptual hypotheses from variant-level test instances, a distinction P2 did not draw. D13 arises from a distinct correction: risk functionals had been specified as if they were per-period paired observations.
+D10 to D12 arise from separating conceptual hypotheses from variant-level test instances, a distinction P2 did not draw. D13 arises from a distinct correction: risk statistics had been specified as if they were per-period paired observations, and were subsequently over-grouped as uniformly path-dependent when only maximum drawdown is order-dependent.
 
 ## D10 — Inference level: conceptual hypothesis versus test instance
 
@@ -121,18 +121,23 @@ D10 to D12 arise from separating conceptual hypotheses from variant-level test i
 - **Reviewer question:** Is a clearly-labelled heuristic selection-sensitivity analysis at hypothetical denominators scientifically honest, or does it invite over-interpretation of an unknowable quantity that no formal procedure can bound?
 - **Blocking:** `BLOCKS_FREEZE`.
 
-## D13 — Path-dependent risk estimands, endpoint status, and multiplicity treatment
+## D13 — Nonlinear risk and tail estimands, endpoint status, and multiplicity treatment
 
-- **Statement:** maximum drawdown, worst month, downside deviation, and expected shortfall are functionals of the complete equity path, not per-month observations. They cannot enter a paired-mean estimand or a per-period block-resampling scheme the way returns can. Three sub-questions follow: how should their uncertainty be characterized, are they primary or secondary endpoints, and how do they enter the multiplicity treatment alongside return endpoints?
+- **Statement:** the risk endpoints in this package are **not a single statistical category**, and an earlier draft of this register wrongly grouped them all as "path-dependent functionals of the complete equity path." That grouping was too broad. Three distinct kinds are involved, and they demand different resampling treatments:
+  - **Path-dependent statistics** — value depends on temporal *ordering* and running peaks. **Maximum drawdown** is the clear case: it is defined by the running maximum of the equity curve, so reordering the same returns changes it.
+  - **Extreme / order statistics** — value is an order statistic over a fixed-length sample, and does not depend on the order in which observations occur. **Worst month** is the minimum of the monthly-return sample; permuting the months leaves it unchanged.
+  - **Distributional tail statistics** — value is a moment or tail functional of the return distribution, again order-invariant. **Downside deviation** is a downside-distribution moment; **expected shortfall** is a tail-distribution functional.
+
+  What unites them is that all are **nonlinear risk and tail statistics** with no additive per-period decomposition, so none can enter an ordinary paired-mean estimand or a per-period block-resampling scheme the way returns can. What separates them is *why*: only maximum drawdown is path-order-dependent. Three sub-questions follow: how should each kind's uncertainty be characterized, are they primary or secondary endpoints, and how do they enter the multiplicity treatment alongside return endpoints?
 - **Alternatives:**
-  - *Uncertainty:* read the functional off the empirical distribution of resampled equity paths; use a functional-specific procedure; or report the point estimate with no interval and say so.
-  - *Endpoint status:* risk functionals primary (matching the CH-7 research question, which is explicitly about the risk-return trade-off); risk secondary and descriptive; or co-primary with a stated multivariate rule.
-  - *Multiplicity:* correct return and risk endpoints in one family; correct them in separate families; or correct returns only and report risk descriptively.
-- **Preliminary recommendation:** characterize risk-functional uncertainty from the distribution of resampled paths; treat return as primary and risk as co-reported but separately corrected; and **do not** construct a joint null combining mean monthly return and max drawdown unless the reviewer supplies an explicit multivariate decision rule. Not adopted.
-- **Statistical consequences:** treating drawdown as a paired monthly mean would be a category error and would produce intervals with no valid interpretation. Correcting return and risk endpoints in one family without a multivariate rule risks an incoherent verdict, where an arm "wins" on one dimension and "loses" on the other with no stated resolution.
-- **Reproducibility consequences:** the path-functional resampling must be committed as code, since a drawdown distribution depends on the exact resampling scheme used to generate the paths.
-- **Reviewer question:** How should path-dependent risk functionals be given uncertainty and multiplicity treatment alongside per-period return endpoints, and for CH-7 specifically, is it acceptable for the milestone's motivating risk question to be answered only descriptively if risk is demoted to a secondary endpoint?
-- **Blocking:** `BLOCKS_FREEZE`, `BLOCKS_FAMILY(FH-3)` for the risk-endpoint component. The return-only analysis for FH-3 is not blocked by D13 alone.
+  - *Uncertainty, by kind:* for **path-dependent** statistics, recompute the functional on each resampled equity path, preserving temporal ordering within blocks; for **extreme/order** statistics, recompute the order statistic over each resampled fixed-length window, noting that extreme-value statistics converge slowly and their bootstrap intervals are known to be less reliable than those for means; for **distributional tail** statistics, recompute the moment or tail functional from each resampled return series. A single common treatment across all three is a fourth alternative, and probably a mistake. Reporting point estimates with no interval, and saying so plainly, remains an honest fallback for any kind whose resampling behaviour the reviewer judges unreliable.
+  - *Endpoint status:* risk statistics primary (matching the CH-7 research question, which is explicitly about the risk-return trade-off); risk secondary and descriptive; or co-primary with a stated multivariate rule.
+  - *Multiplicity:* correct return and risk endpoints in one family; correct them in separate families; correct within each risk kind separately; or correct returns only and report risk descriptively.
+- **Preliminary recommendation:** treat the three kinds separately rather than as one bucket, matching each to its own resampling treatment; treat return as primary and risk as co-reported but separately corrected; and **do not** construct a joint null combining mean monthly return with any risk statistic unless the reviewer supplies an explicit multivariate decision rule. Not adopted.
+- **Statistical consequences:** treating any of these as a paired monthly mean would be a category error producing intervals with no valid interpretation. Beyond that, applying one uniform treatment to all three would be its own error: a resampling scheme adequate for a distributional moment may badly misstate uncertainty for an extreme statistic like worst month, whose sampling distribution is governed by tail behaviour rather than central-limit behaviour, and a scheme that ignores temporal ordering would be invalid for maximum drawdown specifically. Correcting return and risk endpoints in one family without a multivariate rule additionally risks an incoherent verdict, where an arm "wins" on one dimension and "loses" on another with no stated resolution.
+- **Reproducibility consequences:** each risk statistic's resampling procedure must be committed as code, since its distribution depends on the exact scheme used. For maximum drawdown in particular, the block construction must preserve within-block temporal ordering or the resulting distribution is meaningless.
+- **Reviewer question:** How should each kind be handled — path-dependent (maximum drawdown), extreme/order (worst month), and distributional tail (downside deviation, expected shortfall) — with respect to uncertainty characterization and multiplicity treatment alongside per-period return endpoints? Are bootstrap intervals for the extreme statistics trustworthy at these sample sizes (69 monthly observations for FH-3), or should worst month be reported descriptively regardless? And for CH-7 specifically, is it acceptable for the milestone's motivating risk question to be answered only descriptively if risk is demoted to a secondary endpoint?
+- **Blocking:** `BLOCKS_FREEZE`, `BLOCKS_RISK_ENDPOINTS(FH-1, FH-2, FH-3)`. This applies to proposed risk and tail inference across **all three families**, not FH-3 alone, since every family reports drawdown-type and worst-period outcomes; it is most consequential for CH-7, whose research question is explicitly about the risk-return trade-off. **D13 does not independently block the primary return-only analyses in any family.**
 
 ---
 
@@ -152,6 +157,6 @@ D10 to D12 arise from separating conceptual hypotheses from variant-level test i
 | D10 inference level | Yes | No | — |
 | D11 paired vs absolute families | Yes | No | FH-1, FH-3 |
 | D12 pre-M43 antecedents | Yes | No | — |
-| D13 path-dependent risk estimands | Yes | No | FH-3 risk-endpoint component |
+| D13 nonlinear risk and tail estimands | Yes | No | Risk endpoints in FH-1, FH-2, FH-3; not the return-only analyses |
 
 **All thirteen decisions block protocol freezing. Six of them (D1, D2, D3, D4, D5, D8) block all statistical execution.** No subset of the analysis can proceed until at least those six are resolved by a qualified external finance/econometrics reviewer, and none has been resolved here.
