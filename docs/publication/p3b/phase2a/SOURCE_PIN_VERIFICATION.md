@@ -2,27 +2,37 @@
 
 **Method.** Each manifest's `generation_source_file_sha256` is a SHA-256 over **file content bytes**, not a Git blob identifier. Verification therefore extracted the exact bytes at the relevant commit with `git cat-file blob` and hashed them. No file was modified to make any hash match.
 
-## Headline
+## Headline — by evidence class
 
-**All 11 source pins verify at their own generation commit.** There is **no unexplained historical mismatch and no hard stop.**
+An earlier draft reported "11/11 historical match" as a single figure. That overstated three of the eleven, and the classes are now separated.
 
-Eight verify against LF bytes and three against CRLF bytes. That split is explained below and is a reproducibility hazard worth recording, not a defect.
+| Evidence class | Count | Meaning |
+|---|---:|---|
+| `HISTORICAL_GIT_BLOB_EXACT_MATCH` | **8/11** | The expected hash equals SHA-256 of the exact Git blob bytes at that milestone's generation commit |
+| `HISTORICAL_CRLF_TRANSFORM_MATCH` | **3/11** | The expected hash is reproduced exactly by a deterministic LF to CRLF transformation of those blob bytes |
+| `UNEXPLAINED_MISMATCH` | **0/11** | — |
+
+**There is no unexplained mismatch and no hard stop.** But the three transform matches are **not** exact historical Git-object matches, and are not described as such.
+
+A Git commit stores the Git blob bytes. Reproducing a manifest hash after transforming LF to CRLF **demonstrates a deterministic explanation consistent with Windows working-tree hashing** — it does not prove the historical checkout configuration, because the repository does not commit that configuration. `core.autocrlf=true` is observed **now**; what it was at each generation moment is recorded nowhere in Git.
 
 **One pin no longer matches current `main`** — M52's `src/cross_sectional_momentum_research.py` — for a documented and expected reason. **Phase 2B must therefore use an isolated historical worktree for M52.**
 
 ## The line-ending finding
 
-Three pins did not match the raw Git blob at first comparison. Rather than assume a defect, the cause was tested directly: hashing the same bytes with `\n` translated to `\r\n` reproduces the expected hash **exactly** in all three cases.
+Three pins did not match the raw Git blob. Rather than assume a defect, the cause was tested: hashing the same bytes with LF translated to CRLF reproduces the expected hash **exactly** in all three cases.
 
-The repository has `core.autocrlf = true` and **no `.gitattributes`**, and every pinned source file is CRLF on disk. So the manifests hashed **working-tree bytes as checked out on Windows**, while Git stores LF. Whether a given pin matches LF or CRLF depends on the checkout state when that manifest was generated.
+The repository currently has `core.autocrlf = true`, **no `.gitattributes`**, and every pinned source file is CRLF on disk. The most economical explanation is that those manifests hashed **working-tree bytes as checked out on Windows** while Git stores LF.
 
-**Consequence for Phase 2B:** any pin re-verification must normalize line endings deliberately and record which convention it used. Comparing a raw Git blob hash against these manifests will produce false mismatches for three of the eleven pins.
+**Stated precisely:** the three expected hashes are reproduced exactly by deterministic LF to CRLF transformation and are consistent with working-tree-byte hashing, **but the repository does not commit the historical checkout configuration**, so this remains a well-supported explanation rather than proof. It is also unexplained why the other eight reproduce under raw LF given the same current configuration — a residual asymmetry this evidence cannot resolve.
+
+**Consequence for Phase 2B:** any pin re-verification must try both conventions deliberately and record which one reproduced each hash. Comparing raw Git blob hashes alone yields false drift for three of the eleven pins.
 
 ## Per-milestone results
 
-`HIST` = matches at that milestone's `generation_git_head_sha`. `MAIN` = matches at current `main`. Variant shows which byte convention reproduces the expected hash.
+`HIST` = reproduced at that milestone's `generation_git_head_sha`. `MAIN-CONVENTION` = reproduced at current `main` **under some checkout/line-ending convention** — it does not assert raw Git-blob equality. `Variant` names the convention required.
 
-| Milestone | Generation commit | Source file | HIST | MAIN | Variant |
+| Milestone | Generation commit | Source file | HIST | MAIN-CONVENTION | Variant |
 |---|---|---|---|---|---|
 | M48 | `f04b68bd46f6b2dc8a6773ebafcddd28b43dfee9` | `scripts/research_capital_target_strategy_family.py` | **MATCH** | **MATCH** | LF |
 | M48 | same | `src/orb_capital_target_strategy_family_research.py` | **MATCH** | **MATCH** | LF |
@@ -36,7 +46,7 @@ The repository has `core.autocrlf = true` and **no `.gitattributes`**, and every
 | M53 | same | `src/cross_sectional_momentum_research.py` | **MATCH** | **MATCH** | CRLF |
 | M53 | same | `src/momentum_risk_control_research.py` | **MATCH** | **MATCH** | LF |
 
-**Totals: HIST 11/11 MATCH. MAIN 10/11 MATCH, 1 DRIFT.**
+**Totals: HIST = 8 `HISTORICAL_GIT_BLOB_EXACT_MATCH` + 3 `HISTORICAL_CRLF_TRANSFORM_MATCH` + 0 `UNEXPLAINED_MISMATCH`. MAIN-CONVENTION = 10/11 reproduced, 1 genuine DRIFT.**
 
 ## The one current-main drift, explained
 

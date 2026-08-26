@@ -50,7 +50,7 @@ An earlier draft of this document said every Phase-2 failure would remove an ent
 |---|---|
 | M52 cross-sectional-momentum tree | **TI-09, TI-10, TI-11** — the whole of FH-3, since TI-10 and TI-11 are paired against TI-09 on the identical cache |
 | M48 `daily-bar-cache/sip/` | **TI-05, TI-06, TI-07, TI-08** — the whole of FH-2, since all four consume it |
-| M43 `period-checkpoint/` | **TI-01, TI-02, TI-03, and TI-08** — a cross-family radius: three FH-1 instances plus one FH-2 instance |
+| M43 `period-checkpoint/` | **TI-01, TI-02, TI-03, and TI-05 through TI-08** — a cross-family radius covering all of FH-1's evaluable instances plus **all four** FH-2 instances, since M48's full study also loads these checkpoints (Phase-2A correction; Phase 1 recorded TI-08 only) |
 | `research-universe-expansion/bar-cache/` | **TI-08 only** |
 | M45 `period-checkpoint/` | **TI-04 only** |
 
@@ -66,3 +66,5 @@ So a failure of TI-08's additional ORB minute inputs removes TI-08 alone and lea
 ## Standing safety state
 
 `strategy.enabled=false`. M55 remains `INITIALIZED_WAITING_FOR_FIRST_SIGNAL` with zero transactions and empty base and stress positions, ledger blob `ce8f022d1fc9f734042de4c08feef35b9de00465`, untouched by this milestone.
+
+> **Phase-2A-discovered upstream correction.** P3B Phase 2A traced the full call paths in committed source and found that **M48's full study also `pickle.load`s M43's period checkpoints** (`run_full_study` -> `load_orb_monthly_r_series`). Phase 1 recorded that dependency for TI-08 only. It applies to **TI-05 through TI-08**. The candidate count is unchanged at 11.

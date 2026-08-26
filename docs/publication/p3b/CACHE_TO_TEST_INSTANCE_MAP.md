@@ -10,7 +10,7 @@ Maps every P3A test instance and non-executable evaluation to the caches a Phase
 | TI-02 | CH-1 / FH-1 | M43 | same as TI-01 | same | `PRESENT_UNVERIFIED` | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-03 | CH-1 / FH-1 | M43 | same as TI-01 | same | `PRESENT_UNVERIFIED` | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-04 | CH-2 / FH-1 | M45 | `research-later-first-entry-recovery/period-checkpoint/` (6 pkl) | per-trade R series **plus** the per-session no-trade record | `PRESENT_UNVERIFIED` | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
-| TI-05 | CH-4 / FH-2 | M48 | `research-capital-target-strategy-family/daily-bar-cache/` (40 json) | daily portfolio return / equity series | `PRESENT_UNVERIFIED` (raw); results `PRESENT_DIRECT_HASH_MATCH` | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
+| TI-05 | CH-4 / FH-2 | M48 | **primary:** `research-capital-target-strategy-family/daily-bar-cache/sip/`; **plus, for complete artifact regeneration:** M43 `period-checkpoint/` (pickles) | daily portfolio return / equity series | `PRESENT_UNVERIFIED` (raw); results `PRESENT_DIRECT_HASH_MATCH` | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-06 | CH-4 / FH-2 | M48 | same as TI-05 | same | same | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-07 | CH-4 / FH-2 | M48 | same as TI-05 | same | same | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
 | TI-08 | CH-5 / FH-2 | M49 | **cross-directory, now statically resolved** (three locations, all present — see below) | shared-account daily equity series + per-sleeve attribution | `PARTIAL` (own dir holds results only; inputs confirmed elsewhere) | `CANDIDATE_AVAILABLE_FOR_PHASE2` |
@@ -51,7 +51,7 @@ All three caches exist and are recorded here for completeness and for search-acc
 | Family | Instances | Distinct cache trees required |
 |---|---|---|
 | FH-1 | TI-01–TI-04 | 2 (M43, M45 period checkpoints) |
-| FH-2 | TI-05–TI-08 | 1 shared (M48 `daily-bar-cache/sip/`) + two additional trees for TI-08 alone: M43's period checkpoints and the `research-universe-expansion/bar-cache/` minute cache |
+| FH-2 | TI-05–TI-08 | 1 shared (M48 `daily-bar-cache/sip/`) + **M43's period checkpoints, shared by all four** (Phase-2A correction) + the `research-universe-expansion/bar-cache/` minute cache for TI-08 |
 | FH-3 | TI-09–TI-11 | 1 shared (the M52 cross-sectional-momentum tree) |
 
 The sharing within FH-2 and FH-3 is the same structural dependence P3A already flagged for multiplicity purposes: TI-10 and TI-11 are paired against TI-09 on the identical cache, and TI-08 reuses TI-05–TI-07's arms. The blast radius of a Phase-2 failure differs by tree, and is set out precisely in `P3B_PHASE1_READINESS_DECISION.md`.
@@ -59,6 +59,8 @@ The sharing within FH-2 and FH-3 is the same structural dependence P3A already f
 ## Missing or ambiguous dependencies
 
 - **No cache directory is missing, and no input location remains unresolved.** TI-08's three input locations were traced statically and all are present (table above).
-- **The resolution surfaced a cross-family dependency**: TI-08 consumes M43's period-checkpoint directory, which TI-01 through TI-03 also depend on.
+- **The resolution surfaced a cross-family dependency**: TI-08 consumes M43's period-checkpoint directory, which TI-01 through TI-03 also depend on. **Corrected by Phase 2A:** the same directory is also consumed by **M48's full study**, so TI-05, TI-06, and TI-07 share it too. Distinguish the two roles — M43's checkpoints are **not** the primary statistical series for TI-05 to TI-07, which come from the `sip` daily-bar cache, but they **are** required for complete M48 artifact regeneration.
 - **Factor series remain absent entirely.** No Fama–French or UMD data exists in any cache. P2 classified this `NOT_AVAILABLE` and Phase 1 confirms no local cache changes that: any factor-attribution component of TI-08–TI-11 remains blocked on a new, license-reviewed acquisition outside P3B scope.
 - **Benchmark series** for the contested-comparator instances (TI-05–TI-09) would be drawn from the same Alpaca-derived caches and inherit both their unverified status and the redistribution constraint recorded in P2's licensing matrix.
+
+> **Phase-2A-discovered upstream correction.** P3B Phase 2A traced the full call paths in committed source and found that **M48's full study also `pickle.load`s M43's period checkpoints** (`run_full_study` -> `load_orb_monthly_r_series`). Phase 1 recorded that dependency for TI-08 only. It applies to **TI-05 through TI-08**. The candidate count is unchanged at 11.

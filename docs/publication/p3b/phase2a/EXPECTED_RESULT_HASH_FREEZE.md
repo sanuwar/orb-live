@@ -23,19 +23,41 @@ All five were confirmed byte-identical to the corresponding local artifacts duri
 | M50 | **Yes** (stage-0 only) | Moderate: verifies the stage-0 gate, which is all M50 ever produced — no economics exist to reproduce |
 | M52 | **Yes** | Strong, but only from the historical worktree (see the source-pin drift) |
 | M53 | **Yes** | Strong: same |
-| **M43** | **No** | Weak: reconciliation against report figures only |
-| **M44** | **No** | Weak: same |
-| **M45** | **No** | Weak: same |
-| **M46** | **No** | Weak: same |
-| **M47** | **No** | Weak: same, and its result is structurally null (n=0) |
+| **M43** | **No** | Weak: predeclared report reconciliation (criterion frozen below) |
+| **M44** | **No** | `NOT_APPLICABLE` — n=2, no statistical recovery possible |
+| **M45** | **No** | Weak: predeclared report reconciliation (criterion frozen below) |
+| **M46** | **No** | `NOT_APPLICABLE` — 20 trades, single period |
+| **M47** | **No** | `NOT_APPLICABLE` — structurally null (n=0) |
 
-## The M43–M47 gap
+## The M43–M47 gap, and the weak criterion that can still be predeclared
 
-For these five there is **no committed expected-output hash of any kind**. A Phase-2B rerun could produce an artifact, but nothing predeclared exists to compare it against.
+For these five there is **no committed expected-output hash of any kind**. Exact hash equality is unavailable and always will be.
 
-The only available reconciliation would be **weaker by construction**: comparing regenerated summary figures against the numbers written in each committed report. That is not hash equality. It depends on how the report rounds and presents values, it cannot detect changes to anything the report does not print, and it would require parsing regenerated output — which is a Phase-2B activity, not a Phase-2A one.
+An earlier draft treated that as a permanent disqualification. **That was too strong and is withdrawn.** The brief explicitly allowed weaker reconciliation where no output hash was committed. What matters is that the weaker criterion be **frozen now, before any rerun**, so a Phase-2B run cannot choose its own success condition after seeing output — the same discipline the five exact hashes enforce.
 
-**This must not be presented as equivalent to the five exact-equality cases.** It is a materially weaker form of evidence, and the asymmetry is a permanent property of the record, not something Phase 2B can repair.
+### Predeclared weak-reconciliation criterion — M43
+
+- **Authoritative report:** `docs/research/ORB_PROFIT_PROTECTION_EXIT_EXPERIMENT.md`
+- **Commit:** `264fdf3cf8ea264b14a974ce4ddaa48185b56599` · **Blob:** `9c8c4f9e5ee05621535832241fd74139adb9aa86`
+- **Comparison scope:** the pooled `PRIMARY (WAITED_FIRST_VALID_0950)` results table only.
+- **Fields to compare, per arm** (`BASELINE`, `BE_AFTER_050R`, `PROFIT_LADDER`, `STRUCTURE_TRAIL_AFTER_1R`): trade count; expectancy R/trade; profit factor; total R; max drawdown in R; R/month.
+- **Tolerance rule:** each regenerated value must equal the committed value **exactly as printed, at the report's own decimal precision**, after rounding the regenerated value half-up to that same number of decimals. No wider tolerance is permitted, and the tolerance may not be relaxed after seeing output.
+- **Fields not covered:** the `CURRENT_FIRST_VALID` sensitivity table; protection diagnostics; per-symbol contribution; any quantity the report does not print.
+
+### Predeclared weak-reconciliation criterion — M45
+
+- **Authoritative report:** `docs/research/ORB_LATER_FIRST_ENTRY_RECOVERY_EXPERIMENT.md`
+- **Commit:** `051def4f9cce366ef128613941e634863b8efa07` · **Blob:** `91548473b15e0efdbd91c40881e323017595a541`
+- **Comparison scope:** the combined-policy pooled results only.
+- **Fields to compare:** later-only closed-trade count; combined trades/month; R/trade; combined R/month; max drawdown in R; later-only expectancy R.
+- **Tolerance rule:** identical to M43 — exact equality at the report's printed precision, half-up rounding, no post-hoc relaxation.
+- **Fields not covered:** the ex-NVDA sensitivity figure; per-period breakdowns; anything not printed.
+
+**No figure above was recomputed.** Each is identified by report location and field name so a future run compares against committed text, not against anything derived here.
+
+### This is weaker than byte-hash equality, explicitly
+
+Report reconciliation cannot detect any change the report does not print; it is sensitive to the report's own rounding and presentation; and it requires parsing regenerated output, which is a Phase-2B activity. A pass under this criterion is **materially weaker evidence** than the five exact-hash cases and must never be presented as equivalent. The asymmetry is permanent; the *blockage* is not.
 
 ## Prohibitions carried into Phase 2B
 
