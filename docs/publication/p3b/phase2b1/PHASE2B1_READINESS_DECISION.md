@@ -2,7 +2,7 @@
 
 ## Decision
 
-M52 is not deterministically reproducible in the current recorded rerun environment under the frozen exact-hash criterion: observed and expected result hashes differ. M53 is not assessed because it was not permitted to run after M52 failed. Neither has a new deterministic-regeneration pass from this pilot.
+M52 failed the frozen exact-byte reproduction criterion in the current recorded rerun environment: observed and expected result hashes differ. M53 is not assessed because it was not permitted to run after M52 failed. The first invocation was externally interrupted before producing a result and only one invocation completed, so this pilot does not establish or refute internal determinism.
 
 Their granular outputs are not candidates for later statistical preparation on the strength of this pilot. A successful CLI exit or economic result contents cannot substitute for exact byte-hash equality.
 
@@ -18,3 +18,7 @@ Their granular outputs are not candidates for later statistical preparation on t
 ## Recommended next sequential unit
 
 Do not proceed to M53, M48, M49, M43, or M45 regeneration. The next sequential unit is an operator-authorized M52 exact-hash mismatch diagnosis and environment-provenance decision, constrained to preserved scratch evidence and without source changes, parameter changes, new data, statistical analysis, or prospective execution.
+
+## Independent-review correction (2026-08-27)
+
+The original `EXACT_BYTE_REPRODUCTION_FAIL` is retained. The prior wording that M52 was 'not deterministically reproducible' was too strong for one completed output. Read-only artifact comparison instead identifies a generated-at timestamp difference and a CRLF-induced source-byte provenance difference; it identifies no numerical-output difference. The unknown historical environment remains unresolved.

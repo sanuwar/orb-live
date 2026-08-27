@@ -19,3 +19,7 @@ The observed hash is for scratch-only regenerated m52_result.json, which is not 
 - The CLI printed a generic “Fetching” status while entering cache helpers. --fetch-missing remained omitted; every required cache entry was present; no credential was requested and no cache-miss/fetch error occurred. This does not reinterpret the status string as a market-data fetch.
 - The mismatch is a reproducibility finding, not a performance finding and not proof of a cache defect. Environment provenance, execution-time metadata, filesystem behaviour, and dependencies remain possible causes.
 - No M52 result or manifest was copied into M53.
+
+## Independent-review correction (2026-08-27)
+
+The frozen exact-byte failure is unchanged. Read-only comparison establishes three changed JSON scalars only: `generated_at`, plus the source-hash provenance for `scripts/research_cross_sectional_momentum.py` at the top level and in Stage 0. The latter is explained by the CRLF checkout described in `EXECUTION_ENVIRONMENT.md`; all numerical values, JSON keys, list order, object-key order, numeric representations, encoding, newline form, and file length match. One completed invocation after an externally interrupted invocation is insufficient to establish or refute internal determinism.

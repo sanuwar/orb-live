@@ -18,6 +18,10 @@
 
 Relevant installed package versions: pytest 9.1.1; PyYAML 6.0.3; python-dotenv 1.2.2; httpx 0.28.1; pydantic 2.13.4; starlette 1.3.1; uvicorn 0.51.0. No package was installed, removed, or updated.
 
+## Independent-review source-byte finding
+
+The detached M52 worktree had `core.autocrlf=true` and no root `.gitattributes`. Its `scripts/research_cross_sectional_momentum.py` was therefore 34,521 bytes with 674 CRLF endings and SHA-256 `ee5276b67febba75792faf4a7a72d05720145bce25ac9a512017d7f7b724a187`. The historical Git object is 33,847 bytes with 674 LF endings and SHA-256 `411391271c0e8adf5f866233fe9f9ebc9515eddd99adb5dd8bb31cee651dff66`; LF-normalized contents are identical. This explains the changed source-hash provenance fields in the regenerated result without implying an intentional source or frozen-parameter edit.
+
 ## Commands and timing
 
 M52 command, executed from its detached historical worktree:

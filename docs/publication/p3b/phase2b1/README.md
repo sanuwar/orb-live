@@ -8,7 +8,7 @@ The M52 CLI completed, but its result hash did not match. The hard stop applied:
 
 ## Exclusions retained
 
-No market, factor, SEC, OpenFIGI, broker, or account data was fetched or accessed. No package was installed or updated. No source or frozen parameter changed. M55 and M56 were not run. strategy.enabled remained false. No statistical testing, confidence interval, bootstrap, factor analysis, or strategy comparison was performed. No raw cache or regenerated result artifact is committed.
+No market, factor, SEC, OpenFIGI, broker, or account data was fetched or accessed. No package was installed or updated. No tracked source or frozen parameter was intentionally changed. M55 and M56 were not run. strategy.enabled remained false. No statistical testing, confidence interval, bootstrap, factor analysis, or strategy comparison was performed. No raw cache or regenerated result artifact is committed.
 
 ## Required sequence and stop gates
 
@@ -19,3 +19,7 @@ No market, factor, SEC, OpenFIGI, broker, or account data was fetched or accesse
 5. Only on equality, hand off the verified M52 result and run M53.
 
 Step 4 was FAIL. Step 5 was deliberately not performed.
+
+## Independent-review correction (2026-08-27)
+
+The original exact-byte failure remains unchanged. The preserved M52 worktree materialized `scripts/research_cross_sectional_momentum.py` with CRLF line endings under `core.autocrlf=true` and no root `.gitattributes`: its raw SHA-256 was `ee5276b67febba75792faf4a7a72d05720145bce25ac9a512017d7f7b724a187`, rather than the historical Git-object SHA-256 `411391271c0e8adf5f866233fe9f9ebc9515eddd99adb5dd8bb31cee651dff66`. LF-normalized content is identical. This is a recorded rerun-environment/provenance byte difference, not an intentional source edit or frozen-parameter change.
