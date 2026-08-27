@@ -33,3 +33,7 @@ Normalization is exactly bytewise replacement of each `0D 0A` sequence with `0A`
 Phase 2B-1 cache records report all three original and scratch cache aggregates unchanged before/after M52: daily-bar cache `0698d51e...`, SEC N-PORT cache `889fb5dc...`, and OpenFIGI cache `b2ad68c...`.  Frozen M52 parameters were not intentionally edited, and the semantic comparison found all non-provenance payload fields equal.  These facts satisfy the documented cache/frozen-parameter integrity predicate, subject to the historical environment gap below.
 
 The strongest permitted statement is exactly: `EXACT_BYTE_REPRODUCTION_FAIL` plus `RETROSPECTIVE_SEMANTIC_PAYLOAD_MATCH`.  It is not a confirmatory pass, does not establish internal determinism from one completed invocation, and does not remove the need to disclose timestamp, checkout, environment, and serializer limitations.
+
+## Independent-review correction (2026-08-27)
+
+The cache records support the cache-integrity predicate. Frozen-parameter integrity is UNVERIFIED: the record that parameters were not intentionally edited does not identify an exact committed frozen-parameter source, the historical and rerun value sets or digests, and a mechanical equality check. Semantic payload equality is not a substitute for that missing parameter evidence. REPRODUCED_WITH_METADATA_VARIANCE is therefore unavailable for M52. The strongest permitted M52 statement remains EXACT_BYTE_REPRODUCTION_FAIL plus RETROSPECTIVE_SEMANTIC_PAYLOAD_MATCH.

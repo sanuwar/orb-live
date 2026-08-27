@@ -22,3 +22,8 @@ The following are deliberately excluded from the workstream: M52 execution, M53 
 - [Threats and disclosure](REPRODUCIBILITY_THREATS_AND_DISCLOSURE.md) provides publication-safe limitations.
 
 The exclusions are fixed by this package.  A future mismatch is not grounds to add an exclusion: that would require a new reviewed, version-controlled criterion and must be reported as such.
+
+
+## Independent-review correction (2026-08-27)
+
+The three-path exclusion map is an M52-specific retrospective criterion. After review and merge, it may govern the M52 input-handoff decision only; it is not an M53 output-comparison criterion. Before any M53 execution, a separate M53-specific output criterion and exclusion map must be frozen from static M53 source and the historical expected M53 artifact, before any regenerated M53 artifact is seen. This package may support preparation of that separate execution plan, but does not authorize M53 execution.

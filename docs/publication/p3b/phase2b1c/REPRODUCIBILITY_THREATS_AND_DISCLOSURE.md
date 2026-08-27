@@ -20,3 +20,7 @@ The source provenance difference is checkout materialization: immutable LF Git-o
 Use: “The M52 regeneration did not reproduce the complete artifact byte-for-byte.  A retrospective, fixed JSON-payload comparison found no non-excluded research-payload difference; the disclosed differences were generation timestamp and raw source-provenance hashes explained by line-ending materialization.”
 
 Do not use: “exactly reproduced,” “confirmed,” “preregistered,” “deterministic,” or any wording that omits the exclusions, retrospective timing, source materialization, and environment limitations.
+
+## Independent-review correction (2026-08-27)
+
+The M52 three-path exclusion map is not an M53 output gate. A separate M53-specific output criterion and exclusion map must be derived from static source and the historical expected M53 artifact before any regenerated M53 artifact is observed.

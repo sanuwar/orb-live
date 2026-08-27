@@ -19,3 +19,7 @@ M52 was already observed to differ before this criterion was written.  Its use h
 ## Allowed M52 sentence
 
 “M52 had `EXACT_BYTE_REPRODUCTION_FAIL`; under the subsequently frozen criterion it had `RETROSPECTIVE_SEMANTIC_PAYLOAD_MATCH`, with disclosed timestamp and source-provenance variance.”
+
+## Independent-review correction (2026-08-27)
+
+For M52, REPRODUCED_WITH_METADATA_VARIANCE may appear only with EXACT_BYTE_REPRODUCTION_FAIL, retrospective-status disclosure, and every disclosed exclusion. It is currently unavailable because frozen-parameter integrity is UNVERIFIED: no committed record supplies the source, historical and rerun values or digests, and a mechanical equality check. The M52 criterion does not become an M53 output criterion after merge. Before M53 execution, a separately reviewed M53-specific output criterion and exclusion map must be frozen from static source and the historical expected M53 artifact before any regenerated M53 artifact is seen.
