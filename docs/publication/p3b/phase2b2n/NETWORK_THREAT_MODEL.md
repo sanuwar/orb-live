@@ -1,0 +1,7 @@
+﻿# Network Threat Model
+
+The guarded CPython process denies, before the corresponding Python operation reaches the operating system: DNS helpers (`getaddrinfo`, hostname and name-info calls); TCP `connect` and `connect_ex`; UDP `sendto`; socket `send`; `create_connection`; and HTTP/HTTPS library traffic that descends to those socket operations. Audit hooks provide a second pre-operation layer for supported CPython socket audit events. Proxy and credential variables are cleared only as defense in depth, never as the network control.
+
+All `subprocess.Popen`, `subprocess.run`, shell execution, `os.system`/spawn audit events, and `multiprocessing.Process.start` are denied by default. Consequently descendant Python, PowerShell, cmd, curl, wget, and arbitrary executable attempts are denied before launch. Replacing protected guard or proxy/credential environment variables triggers a denied event. The guard treats a bypass variable, missing token/hash, invalid checkout/Git identity, or evidence failure as activation failure.
+
+Residual limits: this is a process-scoped CPython guard, not machine-wide isolation or a complete operating-system sandbox. Native code that bypasses Python socket/audit facilities, a malicious interpreter embedding arrangement, or a target that defeats the declared static closure require separate assessment. The future M53 launch depends on the recorded static closure, isolated `PYTHONPATH`, no `-S`, and a hash-verified guard directory. These are explicit launcher preconditions, not proof against every native-code escape.

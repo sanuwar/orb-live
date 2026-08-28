@@ -1,0 +1,7 @@
+# Evidence Log Specification
+
+The guard creates a fresh exclusive (`O_CREAT|O_EXCL`) UTF-8 JSON Lines file at the explicit absolute path and never appends to an unknown prior record. Each security-relevant record is flushed and `fsync`ed. Creation, append, configuration, activation, and logging failures fail closed. The file must be retained by the future launcher.
+
+Every record contains `event`, `guard_version`, `guard_sha256`, UTC timestamp, PID, parent PID, `previous_hash`, and `event_hash`. `event_hash` is SHA-256 of the canonical UTF-8 JSON serialization of the record excluding `event_hash`, with `sort_keys=true`, separators `(',', ':')`, and `ensure_ascii=true`; `previous_hash` begins as 64 zeroes. `verify_evidence_log()` parses each JSONL line, recalculates that canonical SHA-256, and validates the chain.
+
+Required events include `activation`, `allowed_subprocess`, `denied_subprocess`, `denied_network`, `denied_environment`, `normal_interpreter_exit` where feasible, and `guard_failure`. Activation records executable basename plus SHA-256, a working-directory scope plus SHA-256, rule-loaded booleans, and relevant sensitive environment variable names only. Exact approved Git argv can be recorded; denied argv are represented only by argument count and SHA-256. Values of credentials, tokens, proxy settings, cache content, market data, usernames, and unrelated environment variables are never recorded.
