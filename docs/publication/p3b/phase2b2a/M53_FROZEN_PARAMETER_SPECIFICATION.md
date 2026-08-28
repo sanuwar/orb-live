@@ -30,10 +30,10 @@ This is the complete static parameter record.  Each record is one UTF-8 line `na
 | min_median_close; min_median_dollar_volume; min_median_share_volume; min_session_coverage_pct | decimal-string/integer | 10; 50000000; 500000; 0.95 | same:135-138 |
 | momentum_lookback_sessions; momentum_skip_sessions; trend_filter_sma_sessions | integer | 252; 21; 200 | same:130-132 |
 | market_vol_lookback_sessions; market_vol_target_annualized | integer/decimal-string | 63; 0.15 | risk-control source:86,89 |
-| m52_input_path; m52_input_bytes; m52_input_sha256 | path/integer/sha256 | fixed M52 path; 34124; `590672fâ€¦ac8f9` | wrapper:62; historical artifact |
+| m52_input_path; m52_input_bytes; m52_input_sha256 | path/integer/sha256 | fixed M52 path; 34124; `590672f...ac8f9` | wrapper:62; historical artifact |
 | nport_search_start | date | 2019-06-01 | M52 wrapper:78 |
 | starting_capital | decimal-string | 30000 | cross-sectional source:128 |
-| target classification | decimal/integer values | `$500`, 25%, 5 segments, 55%, âˆ’10%, 35% max symbol | cross-sectional source:169-178 |
+| target classification | decimal/integer values | `$500`, 25%, 5 segments, 55%, -10%, 35% max symbol | cross-sectional source:169-178 |
 | selection_rule | string | one feasible; else stress mean descending; base drawdown ascending; turnover ascending; else fail | risk-control source:122-163 |
 
 The exact 49-record serialization follows; it is normative.  The compact table is explanatory only.  It includes every direct CLI/default, source constant, date, cost, universe identity, baseline/stress definition, M53 arm definition, classification/selection threshold, cache selection, and M52 input that can affect output.  The static import closure is separately pinned in the source-closure record; no external configuration file is read by this historical command.  `config/strategy_v0.yaml` is not an M53 input and remains `strategy.enabled=false`.
