@@ -46,6 +46,14 @@ The criterion in this package is frozen before any regenerated M53 artifact exis
 
 The gate verifies state at the instant it runs. Nothing prevents a change between the gate pass and the invocation. That is why the protocol requires a fresh gate pass immediately before invocation, pre- and post-command cache integrity checks, and post-run source and parameter re-verification — mitigations that narrow the window rather than eliminate it.
 
+## 12. Hard links and in-flight modification are not detected
+
+A hard link is indistinguishable from an ordinary file and carries identical content, so the gate does not treat one as ambiguous; content, not inode identity, is what it verifies. Separately, a file could change between the moment the gate classifies a path and the moment it hashes it, and a scratch tree could change during the walk. The gate records a snapshot and the protocol requires pre- and post-command cache integrity checks around any later run; neither eliminates the window.
+
+## 13. Evidence is deterministic and tamper-evident, not authenticated
+
+The gate holds no key and performs no attestation. Identical inputs produce byte-identical evidence, which makes accidental divergence detectable, and the `--output` write stages and replaces so a reader never sees a half-written record. `os.replace` is atomic within a filesystem; it is not a durability guarantee across power loss, and nothing here claims one. Anyone who can write to the evidence file can replace it wholesale.
+
 ## Publication interpretation
 
 What this gate supports is one narrow methodological claim:

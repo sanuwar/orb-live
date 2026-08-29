@@ -13,6 +13,8 @@ Every value below was **reconciled from a merged record, not re-derived**. The 3
 | CRLF-materialized files | exactly 2 | Phase 2B-2A |
 | Entrypoint | `scripts/research_momentum_risk_control.py`, blob `cf049fa9cae08a4948b59f220f9f97c02621e7f4` | Phase 2B-2A |
 
+Independent review verified all 30 rows against the **immutable Git objects at the historical commit**: every declared blob SHA-1 exists in that tree, every object hashes to its declared SHA-256 and byte count, every object is LF-only, and for the two CRLF rows the LF→CRLF transform reproduces the declared materialized digest and size exactly.
+
 The reviewed mixed LF/CRLF materialization policy is reused unchanged. The two CRLF rows are `scripts/research_cross_sectional_momentum.py` (34,521 bytes, `ee5276b67febba75792faf4a7a72d05720145bce25ac9a512017d7f7b724a187`) and `src/cross_sectional_momentum_research.py` (54,292 bytes, `cde0af38c8c3c91b5a2b33d51449b67a03129d0f8bcf59630056194cbd1ce352`); the other 28 must materialize to their raw Git-object bytes. This closure was neither recreated nor silently changed.
 
 ## B. Historical M52 handoff
@@ -50,7 +52,7 @@ Raw-byte equality and canonical-payload equality are **separate classifications*
 | Command | `<approved-python-executable> -m scripts.research_momentum_risk_control` with no argument after the module |
 | `--fetch-missing` | omitted; `store_true` default `false` |
 
-Reconciled mechanically against the merged Phase 2B-2A record; all three values match. **The parameters are not claimed to be verified beyond that reconciliation succeeding** — the 49 lines were not re-derived from source in this phase.
+Reconciled mechanically against the merged Phase 2B-2A record; all three values match. Independent review additionally **reconstructed the 49-line serialization from the merged record and reproduced 5,018 bytes and `7c2b2da4…` exactly**, so the digest is verified to be self-consistent with the record it came from. That is still not the same as re-deriving the 49 values from historical source, which this phase did not do; the parameters are verified against the reviewed record, not against the source independently.
 
 ## E. Network/process guard
 

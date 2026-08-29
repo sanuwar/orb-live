@@ -13,9 +13,9 @@ The gate ends with exactly one of these, and nothing else:
 | `BLOCKED_CACHE_OR_ISOLATION` | Cache counts, byte totals, or aggregate digests disagree; scratch trees are absent or mutated; original caches are reachable; or `fetch_missing` is not `false`. |
 | `BLOCKED_GUARD_OR_EXECUTABLE` | Guard file hashes, guard configuration, readiness/terminal/verifier requirements, credential clearing, or executable content pins disagree. |
 | `BLOCKED_OUTPUT_CRITERION` | The expected artifact digest/size, exclusion set, or canonical payload disagrees, or the two classifications were merged. |
-| `BLOCKED_EVIDENCE_CONFIGURATION` | The manifest is structurally invalid, or an execution/output/evidence path is missing, ambiguous, or already exists. |
+| `BLOCKED_EVIDENCE_CONFIGURATION` | The manifest is structurally invalid, an execution/output/evidence path is missing, ambiguous, or already exists, or an unexpected internal failure occurred. |
 
-Every record, whatever the decision, carries `execution_authorized=false` and `m53_executed=false`. No option can change either.
+Every record, whatever the decision, carries `execution_authorized=false` and `m53_executed=false`. No option can change either. There is no input — malformed, hostile, or merely surprising — for which the gate emits no record: an unexpected internal exception is caught and reported as an `internal_error` finding carrying only the exception type name.
 
 ## Category precedence
 

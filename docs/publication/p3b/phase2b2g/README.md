@@ -39,7 +39,19 @@ The decision is `BLOCKED_SOURCE_OR_MATERIALIZATION` because source precedes ever
 
 `scripts/publication/m53_execution_gate.py` is verification-only. It contains **no code path that imports, launches, simulates, regenerates, or fetches anything**: it starts no subprocess, opens no socket, and imports no project module. `tests/test_publication_m53_execution_gate.py` proves this statically by parsing the gate's own AST, and proves that `execution_authorized` and `m53_executed` are assigned the literal `False` at their only two assignment sites.
 
-`tests/test_publication_m53_execution_gate.py` uses only synthetic `tmp_path` fixtures and the committed manifest. It runs 118 focused tests (3 additional symlink tests skip on accounts that cannot create symlinks, with the ambiguity branch covered directly instead).
+`tests/test_publication_m53_execution_gate.py` uses only synthetic `tmp_path` fixtures and the committed manifest: **185 pass and 3 skip** (the three skips need symlink-creation privilege; the divergence they probe is covered on every platform by the reparse tests described in the specification).
+
+## Independent review
+
+This package was independently reviewed after its first commit. The review reconciled every frozen value against merged committed evidence and immutable Git objects rather than against the prose, and found five defects, all corrected on this branch with regression tests:
+
+1. **Source paths could escape the isolated checkout.** A manifest row using `..`, an absolute path, or a UNC path could point verification at a file *outside* the checkout, and the gate returned `READY` while hashing it. Manifest paths are now required to be relative POSIX paths with no traversal, and each resolved target is additionally confirmed to lie inside its root.
+2. **Backslash separators were accepted**, so one manifest meant two different things on Windows and POSIX. Now refused.
+3. **A non-string entry in a string list crashed the gate** with no evidence record at all. String-list element types are now validated, and any unexpected internal failure now produces a blocked record carrying only the exception type.
+4. **Reserved device names, case-folded duplicate paths, duplicate list entries, non-positive byte counts, blank identity strings, and non-canonical uppercase digests** were all accepted. All are now refused.
+5. **The evidence write was not atomic.** It now stages and replaces.
+
+The review also confirmed two things the original commit stated conservatively: all 30 closure blobs verify against the immutable Git objects at the historical commit (including the exact LF→CRLF transform for the two CRLF rows), and the 49-record parameter serialization **reproduces byte for byte** from the merged Phase 2B-2A record at 5,018 bytes and `7c2b2da4…`.
 
 ## Safety state at this branch
 

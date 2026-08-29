@@ -351,6 +351,89 @@ class ManifestError(Exception):
     """Raised when the manifest cannot be interpreted at all."""
 
 
+# Windows reserved device names.  "NUL" and friends resolve to a device rather
+# than a file, and reading one yields empty bytes, so a manifest row naming one
+# must never be treated as a source file.
+_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
+
+
+def validate_relative_path(value: object) -> str | None:
+    """Return a problem string, or None when ``value`` is a safe relative path.
+
+    A manifest path must name a location *inside* the root it is resolved
+    against, and must mean the same thing on every platform.  Traversal,
+    absolute, drive-relative, UNC, and device paths are refused because they let
+    a manifest point verification outside the isolated checkout — which would
+    defeat the isolation this gate exists to enforce.  Backslash separators are
+    refused because ``src\\module.py`` is a directory separator on Windows and a
+    literal filename character on POSIX, so accepting it would make one manifest
+    mean two different things.
+    """
+    if not isinstance(value, str):
+        return "must be a string"
+    if not value:
+        return "must not be empty"
+    if "\\" in value:
+        return "must use '/' separators only"
+    if value.startswith("/") or value.startswith("//"):
+        return "must be relative, not absolute or UNC"
+    if len(value) >= 2 and value[1] == ":":
+        return "must not be a drive-qualified path"
+    if value.endswith("/"):
+        return "must not end with a separator"
+    segments = value.split("/")
+    for segment in segments:
+        if not segment:
+            return "must not contain an empty path segment"
+        if segment in (".", ".."):
+            return "must not contain '.' or '..' segments"
+        if segment.strip() != segment:
+            return "must not contain leading or trailing whitespace in a segment"
+        stem = segment.split(".")[0].upper()
+        if stem in _RESERVED_NAMES:
+            return f"must not name the reserved device '{stem}'"
+    return None
+
+
+def _check_string_list(
+    section: str,
+    values: object,
+    *,
+    allow_empty_list: bool = False,
+    paths: bool = False,
+) -> list[str]:
+    """Validate a list of strings: element types, emptiness, and duplicates.
+
+    A non-string element here previously reached path arithmetic and raised,
+    which produced no evidence record at all.
+    """
+    problems: list[str] = []
+    if not isinstance(values, list):
+        return [f"{section}: must be a list"]
+    if not values and not allow_empty_list:
+        return [f"{section}: must not be empty"]
+    seen: set[str] = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            problems.append(f"{section}[{index}]: must be a string")
+            continue
+        if not value:
+            problems.append(f"{section}[{index}]: must not be empty")
+            continue
+        if value in seen:
+            problems.append(f"{section}: duplicate entry {value!r}")
+        seen.add(value)
+        if paths:
+            problem = validate_relative_path(value)
+            if problem is not None:
+                problems.append(f"{section}[{index}]: {problem}")
+    return problems
+
+
 def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= _HEX64
 
@@ -443,7 +526,85 @@ def validate_manifest_schema(manifest: dict[str, Any]) -> list[str]:
     if isinstance(caches, dict):
         problems.extend(_check_row_list("caches.trees", caches.get("trees"), CACHE_TREE_FIELDS, "role"))
 
+    # String-list fields.  Element types matter: a non-string here used to reach
+    # path arithmetic and raise, producing no evidence record at all.
+    isolation = manifest.get("isolation")
+    if isinstance(isolation, dict):
+        problems.extend(
+            _check_string_list(
+                "isolation.original_cache_roots",
+                isolation.get("original_cache_roots"),
+                allow_empty_list=True,
+                paths=True,
+            )
+        )
+    if isinstance(guard, dict):
+        # Empty is allowed structurally so the *semantic* guard checks report a
+        # missing requirement in the guard category, which is far more useful
+        # than a generic schema error.
+        for name in ("required_environment", "forbidden_environment", "cleared_environment"):
+            problems.extend(_check_string_list(f"guard.{name}", guard.get(name), allow_empty_list=True))
+    artifact = manifest.get("input_artifact")
+    if isinstance(artifact, dict):
+        problems.extend(
+            _check_string_list(
+                "input_artifact.classification", artifact.get("classification"), allow_empty_list=True
+            )
+        )
+        problems.extend(
+            _relative_path_problems("input_artifact.relative_path", artifact.get("relative_path"))
+        )
+    criterion = manifest.get("output_criterion")
+    if isinstance(criterion, dict):
+        problems.extend(
+            _check_string_list(
+                "output_criterion.canonical_exclusions",
+                criterion.get("canonical_exclusions"),
+                allow_empty_list=True,
+            )
+        )
+    command = manifest.get("execution_command")
+    if isinstance(command, dict):
+        problems.extend(
+            _check_string_list(
+                "execution_command.argv_after_module",
+                command.get("argv_after_module"),
+                allow_empty_list=True,
+            )
+        )
+        problems.extend(_non_empty_problems("execution_command.module", command.get("module")))
+    output_paths = manifest.get("output_paths")
+    if isinstance(output_paths, dict):
+        problems.extend(
+            _relative_path_problems(
+                "output_paths.artifact_relative_path", output_paths.get("artifact_relative_path")
+            )
+        )
+        problems.extend(
+            _non_empty_problems("output_paths.evidence_log_basename", output_paths.get("evidence_log_basename"))
+        )
+    if isinstance(guard, dict):
+        for name in ("scope", "token", "ready_event", "terminal_event", "post_run_verifier"):
+            problems.extend(_non_empty_problems(f"guard.{name}", guard.get(name)))
+    if isinstance(caches, dict):
+        problems.extend(
+            _non_empty_problems("caches.aggregate_algorithm", caches.get("aggregate_algorithm"))
+        )
+
     return sorted(set(problems))
+
+
+def _non_empty_problems(section: str, value: object) -> list[str]:
+    if isinstance(value, str) and not value.strip():
+        return [f"{section}: must not be empty"]
+    return []
+
+
+def _relative_path_problems(section: str, value: object) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    problem = validate_relative_path(value)
+    return [] if problem is None else [f"{section}: {problem}"]
 
 
 def _check_row_list(
@@ -467,6 +628,10 @@ def _check_row_list(
         identity = row.get(identity_field)
         if isinstance(identity, str):
             identities.append(identity)
+        if identity_field == "path" and isinstance(identity, str):
+            problem = validate_relative_path(identity)
+            if problem is not None:
+                problems.append(f"{label}: path {problem}")
         for name in ("git_object_sha256", "expected_sha256", "aggregate_sha256"):
             if name in row and not _is_sha256(row[name]):
                 problems.append(f"{label}: {name} is not a 64-character hex digest")
@@ -474,9 +639,20 @@ def _check_row_list(
             problems.append(f"{label}: git_blob_sha1 is not a 40-character hex id")
         if row.get("materialization") not in (None, "lf", "crlf"):
             problems.append(f"{label}: materialization must be 'lf' or 'crlf'")
+        for name in ("git_object_bytes", "expected_bytes", "bytes", "files"):
+            value = row.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value <= 0:
+                problems.append(f"{label}: {name} must be positive")
     duplicates = sorted({name for name in identities if identities.count(name) > 1})
     for name in duplicates:
         problems.append(f"{section}: duplicate {identity_field} {name!r}")
+    # Case-insensitive collision: on a case-insensitive filesystem two rows
+    # differing only in case name one file, so the closure would not really
+    # contain the distinct number of files it declares.
+    folded = [name.lower() for name in identities]
+    for name in sorted({name for name in folded if folded.count(name) > 1}):
+        if name not in {value.lower() for value in duplicates}:
+            problems.append(f"{section}: {identity_field} values collide when case-folded: {name!r}")
     return problems
 
 
@@ -625,6 +801,12 @@ def check_source_closure(
 
     for row in rows:
         target = root / row["path"]
+        # Defence in depth behind the schema's relative-path rule: confirm the
+        # resolved location really is inside the isolated checkout, so no alias,
+        # link, or platform path quirk can move verification outside it.
+        if not _is_within(target, root):
+            findings.append(Finding(category, "source_file_outside_checkout", row["path"]))
+            continue
         target_state = _link_state(target)
         if target_state == "absent":
             findings.append(Finding(category, "source_file_absent", row["path"]))
@@ -683,6 +865,11 @@ def check_input_artifact(
         return sorted(findings)
 
     target = root / artifact["relative_path"]
+    if not _is_within(target, root):
+        findings.append(
+            Finding(category, "handoff_outside_checkout", "the M52 handoff path resolves outside the checkout")
+        )
+        return sorted(findings)
     state = _link_state(target)
     if state == "absent":
         findings.append(Finding(category, "handoff_absent", "the M52 handoff copy is not present"))
@@ -739,6 +926,14 @@ def check_caches_and_isolation(
     if isolation["preserved_scratch_evidence_untouched"] is not True:
         findings.append(
             Finding(category, "preserved_evidence_not_protected", "preserved Phase 2B-1 scratch evidence must remain untouched")
+        )
+    if not isolation["original_cache_roots"]:
+        findings.append(
+            Finding(
+                category,
+                "original_cache_roots_undeclared",
+                "at least one original cache root must be declared or the overlap check verifies nothing",
+            )
         )
     for tree in trees:
         if tree["files"] <= 0 or tree["bytes"] <= 0:
@@ -1169,7 +1364,25 @@ def evaluate(
     module is either name assigned.
     """
     environment = environment or GateEnvironment()
+    try:
+        return _evaluate_checked(manifest, environment)
+    except Exception as exc:  # noqa: BLE001 - any internal failure must fail closed
+        # An unexpected internal failure must still produce a blocked evidence
+        # record, never a traceback with no record and never a partially
+        # successful one.  Only the exception *type* is recorded: a message can
+        # carry a filesystem path, and evidence must stay leak-free.
+        return _build_record(
+            None,
+            [Finding("evidence_configuration", "internal_error", type(exc).__name__)],
+            environment,
+            schema_valid=False,
+        )
 
+
+def _evaluate_checked(
+    manifest: dict[str, Any],
+    environment: GateEnvironment,
+) -> dict[str, Any]:
     schema_problems = validate_manifest_schema(manifest)
     if schema_problems:
         findings = [
@@ -1290,7 +1503,13 @@ def main(argv: list[str] | None = None) -> int:
 
     text = render_record(record)
     if args.output:
-        Path(args.output).write_text(text, encoding="utf-8", newline="\n")
+        # Write-then-replace, so a reader never observes a half-written record.
+        # os.replace is atomic within a filesystem; it is not a durability
+        # guarantee across a power loss, and nothing here claims one.
+        destination = Path(args.output)
+        staging = destination.with_name(destination.name + ".partial")
+        staging.write_text(text, encoding="utf-8", newline="\n")
+        os.replace(staging, destination)
     else:
         sys.stdout.write(text)
     return 0 if record["decision"] == DECISION_READY else 1

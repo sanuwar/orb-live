@@ -12,6 +12,12 @@ It is **not** a launcher. It contains no code path that imports, executes, launc
 
 **Absence is failure, not a skipped check.** Supplying no historical checkout does not mean "the checkout is fine"; it means the gate blocks on materialization. Every filesystem input is optional to *pass*, and mandatory to *pass the gate*.
 
+**Paths are relative, contained, and platform-neutral.** Every manifest path must be a relative POSIX path: no backslash separators, no absolute or drive-qualified form, no UNC or device path, no `.` or `..` segment, no empty segment, and no Windows reserved device name (`NUL`, `CON`, `COM1`, …). Row identities must not collide when case-folded, because on a case-insensitive filesystem two such rows name one file and the closure would not contain the distinct number of files it declares. Behind that rule, each resolved target is confirmed to lie inside the root it was resolved against. Both layers exist because a manifest that could name a file outside the isolated checkout would defeat the isolation this gate exists to enforce.
+
+**Every value is type- and range-checked.** String lists are checked element by element for type, emptiness, and duplicates; byte counts must be positive; identity strings must be non-blank; digests must be canonical lowercase hex of the right length. A non-string entry in a string list previously reached path arithmetic and raised.
+
+**Unexpected failure is still a decision.** Any internal exception is caught and turned into a `BLOCKED_EVIDENCE_CONFIGURATION` record carrying an `internal_error` finding with **only the exception type name** — never its message, which could contain a filesystem path. There is no input for which the gate produces a traceback and no record, and none for which it produces a partially successful one.
+
 **Manifest driven, reference reconciled.** The manifest is schema-checked (required fields, exact types, unknown fields rejected, duplicate JSON keys rejected, duplicate row identities rejected, `NaN`/`Infinity` rejected, booleans rejected where integers are required, unknown schema versions rejected). A manifest declaring the real `M53_PHASE2B2A` profile is then reconciled field by field against `FROZEN_REFERENCE`, which is transcribed from the merged Phase 2A/2B-1/2B-2A/2B-2N records. A synthetic test manifest declares `SYNTHETIC_TEST_ONLY` and is exempt from that reconciliation — and its profile is recorded on every evidence record it produces, so a synthetic result can never be presented as a real one.
 
 **Deterministic and leak-free evidence.** The record carries no timestamp, no absolute path, no username, no credential, no raw market data, and no cache content. Supplied paths appear only as SHA-256 digests of their normalized text. Two runs over identical inputs therefore produce byte-identical evidence, and a test asserts exactly that.
@@ -24,7 +30,7 @@ Reconciles the manifest's 30-file closure against the reviewed Phase 2B-2A closu
 
 Each row is checked for internal materialization consistency, which is a real invariant rather than a restatement. Historical Git blobs in this closure are LF-only, so an `lf` row must materialize to exactly the Git-object bytes and digest, and a `crlf` row must materialize to strictly *more* bytes with a *different* digest. A row claiming `lf` while declaring a different materialized hash fails; so does a `crlf` row that does not grow.
 
-When a checkout is supplied, every one of the 30 files is hashed on disk and must equal its declared materialized digest and size. Absent, ambiguous (symlink or junction), or unreadable files fail.
+When a checkout is supplied, every one of the 30 files is hashed on disk and must equal its declared materialized digest and size. Absent, ambiguous, unreadable, or outside-the-checkout files fail. "Ambiguous" is keyed on a resolved location differing from the literal one, which covers symlinks, Windows directory junctions, and other reparse points, and covers a linked **parent directory** as well as a linked leaf file.
 
 ### 2. M52 handoff
 
@@ -63,6 +69,12 @@ The complete expected artifact is `a3d3ebbd62f45331115a74583f7f8c378e9f2e786fb69
 ### 7. Evidence configuration
 
 The frozen command takes no argument after the module name, so any `argv_after_module` entry fails. The guard evidence log basename is fixed at `m53-network-guard.jsonl`. The evidence directory must be a real, absolute, non-symlink directory, and the evidence log must **not** already exist there. The M53 output artifact must not already exist in the checkout. A pre-existing execution or output path is a failure, never something to overwrite.
+
+## Reparse-point and privilege note
+
+Creating a symlink on Windows requires Developer Mode or elevation, and creating a directory junction requires an external tool, so three symlink tests skip on ordinary accounts. The property they probe — a resolved location differing from the literal one — is covered on **every** platform by tests that redirect `realpath` for a leaf file, a parent directory, a scratch root, a guard directory, and an aliased original cache root. Junction and reparse behaviour is therefore tested everywhere, not only where symlinks can be created.
+
+A **hard link** is deliberately not treated as ambiguous: it is indistinguishable from an ordinary file and has identical content, and content is what the gate verifies.
 
 ## Decision precedence
 

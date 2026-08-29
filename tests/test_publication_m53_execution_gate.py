@@ -20,6 +20,7 @@ import pytest
 
 from scripts.publication import m53_execution_gate as gate
 
+BACKSLASH = chr(92)
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 COMMITTED_MANIFEST_PATH = (
     REPOSITORY_ROOT / "docs" / "publication" / "p3b" / "phase2b2g" / "M53_EXECUTION_GATE_MANIFEST.json"
@@ -530,9 +531,13 @@ def test_scratch_root_inside_the_repository_fails(synthetic):
 
 
 def test_original_cache_root_overlap_fails(synthetic):
+    """A declared original cache root that resolves into the scratch tree fails.
+
+    The overlap is expressed with a legal relative path, because a traversal
+    path is now refused by the schema before this check is ever reached.
+    """
     manifest = _mutate(synthetic)
-    # Declare an original root that resolves to the scratch root itself.
-    manifest["isolation"]["original_cache_roots"] = [".."]
+    manifest["isolation"]["original_cache_roots"] = ["scratch/daily_bar"]
     environment = gate.GateEnvironment(
         checkout_root=synthetic["checkout"],
         guard_dir=synthetic["guard_dir"],
@@ -540,10 +545,19 @@ def test_original_cache_root_overlap_fails(synthetic):
         evidence_dir=synthetic["evidence"],
         python_executable=synthetic["tmp_path"] / "python.bin",
         git_executable=synthetic["tmp_path"] / "git.bin",
-        repository_root=synthetic["scratch"],
+        repository_root=synthetic["tmp_path"],
     )
     record = _evaluate(synthetic, manifest=manifest, environment=environment)
     assert record["decision"] == gate.DECISION_CACHE
+    assert any(finding["code"] == "original_cache_root_overlap" for finding in record["findings"])
+
+
+def test_declaring_no_original_cache_roots_fails(synthetic):
+    manifest = _mutate(synthetic)
+    manifest["isolation"]["original_cache_roots"] = []
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] == gate.DECISION_CACHE
+    assert any(finding["code"] == "original_cache_roots_undeclared" for finding in record["findings"])
 
 
 def test_checkout_inside_the_repository_fails(synthetic):
@@ -1068,6 +1082,322 @@ def test_changed_cache_evidence_fails_reconciliation(field):
 
 def test_synthetic_profile_is_exempt_from_reconciliation(synthetic):
     assert gate.reconcile_with_frozen_reference(synthetic["manifest"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Independent-review regressions (Phase 2B-2G review of PR #385)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../outside_secret.py",
+        "src/../../outside_secret.py",
+        "C:/Windows/System32/x.py",
+        "/etc/passwd",
+        "//server/share/x.py",
+        "//./PhysicalDrive0",
+    ],
+)
+def test_source_path_escaping_the_checkout_is_refused(synthetic, path):
+    """A manifest must not be able to verify a file outside the isolated checkout.
+
+    Before this regression the gate returned READY while hashing a real,
+    hash-matching file outside the checkout, which defeats the isolation the
+    gate exists to enforce.
+    """
+    outside = synthetic["tmp_path"] / "outside_secret.py"
+    outside.write_bytes((synthetic["checkout"] / "src" / "lf_module.py").read_bytes())
+    manifest = _mutate(synthetic)
+    manifest["source_closure"]["files"][0]["path"] = path
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+    assert record["manifest_schema_valid"] is False
+
+
+def test_absolute_source_path_to_a_real_matching_file_is_refused(synthetic):
+    outside = synthetic["tmp_path"] / "outside_secret.py"
+    outside.write_bytes((synthetic["checkout"] / "src" / "lf_module.py").read_bytes())
+    manifest = _mutate(synthetic)
+    manifest["source_closure"]["files"][0]["path"] = str(outside).replace(BACKSLASH, "/")
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+
+
+def test_handoff_path_escaping_the_checkout_is_refused(synthetic):
+    manifest = _mutate(synthetic)
+    manifest["input_artifact"]["relative_path"] = "../outside.json"
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+
+
+def test_backslash_separator_is_refused(synthetic):
+    """One manifest must not mean two different things on Windows and POSIX."""
+    manifest = _mutate(synthetic)
+    manifest["source_closure"]["files"][0]["path"] = "src" + BACKSLASH + "lf_module.py"
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+    assert any("separators" in finding["detail"] for finding in record["findings"])
+
+
+@pytest.mark.parametrize("name", ["NUL", "CON", "COM1", "nul.py", "src/AUX"])
+def test_reserved_device_names_are_refused(synthetic, name):
+    manifest = _mutate(synthetic)
+    manifest["source_closure"]["files"][0]["path"] = name
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+
+
+def test_case_folded_duplicate_paths_are_refused(synthetic):
+    manifest = _mutate(synthetic)
+    duplicate = deepcopy(manifest["source_closure"]["files"][0])
+    duplicate["path"] = duplicate["path"].upper()
+    manifest["source_closure"]["files"].append(duplicate)
+    manifest["source_closure"]["file_count"] = len(manifest["source_closure"]["files"])
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+    assert any("case-folded" in finding["detail"] for finding in record["findings"])
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("isolation", "original_cache_roots"),
+        ("guard", "required_environment"),
+        ("guard", "cleared_environment"),
+        ("guard", "forbidden_environment"),
+        ("output_criterion", "canonical_exclusions"),
+        ("input_artifact", "classification"),
+        ("execution_command", "argv_after_module"),
+    ],
+)
+@pytest.mark.parametrize("bad", [123, None, {}, []])
+def test_non_string_entries_in_string_lists_fail_closed(synthetic, section, field, bad):
+    """A non-string entry used to reach path arithmetic and raise with no record."""
+    manifest = _mutate(synthetic)
+    manifest[section][field] = [bad]
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+    assert record["execution_authorized"] is False
+    assert record["m53_executed"] is False
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("guard", "cleared_environment"),
+        ("guard", "required_environment"),
+        ("output_criterion", "canonical_exclusions"),
+        ("isolation", "original_cache_roots"),
+    ],
+)
+def test_duplicate_string_list_entries_are_refused(synthetic, section, field):
+    manifest = _mutate(synthetic)
+    values = list(manifest[section][field])
+    manifest[section][field] = values + [values[0]]
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+    assert any("duplicate entry" in finding["detail"] for finding in record["findings"])
+
+
+@pytest.mark.parametrize("size", [0, -1, -4096])
+def test_non_positive_byte_counts_are_refused(synthetic, size):
+    manifest = _mutate(synthetic)
+    row = manifest["source_closure"]["files"][0]
+    row["git_object_bytes"] = size
+    row["expected_bytes"] = size
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] != gate.DECISION_READY
+
+
+def test_non_positive_guard_byte_counts_are_refused(synthetic):
+    manifest = _mutate(synthetic)
+    manifest["guard"]["files"][0]["git_object_bytes"] = 0
+    manifest["guard"]["files"][0]["expected_bytes"] = 0
+    assert _evaluate(synthetic, manifest=manifest)["decision"] != gate.DECISION_READY
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [("execution_command", "module"), ("output_paths", "evidence_log_basename"), ("guard", "scope")],
+)
+def test_blank_identity_strings_are_refused(synthetic, section, field):
+    manifest = _mutate(synthetic)
+    manifest[section][field] = "   "
+    assert _evaluate(synthetic, manifest=manifest)["decision"] != gate.DECISION_READY
+
+
+def test_uppercase_digests_are_refused(synthetic):
+    """Digests are compared as text; a non-canonical form must not slip through."""
+    manifest = _mutate(synthetic)
+    row = manifest["source_closure"]["files"][0]
+    row["git_object_sha256"] = row["git_object_sha256"].upper()
+    row["expected_sha256"] = row["expected_sha256"].upper()
+    assert _evaluate(synthetic, manifest=manifest)["decision"] != gate.DECISION_READY
+
+
+def test_internal_error_fails_closed_without_leaking_the_message(synthetic):
+    """An unexpected internal failure must still produce a blocked record."""
+
+    class Exploding(dict):
+        def __getitem__(self, key):
+            if key == "files":
+                raise RuntimeError("C:/private/secret/path")
+            return dict.__getitem__(self, key)
+
+    manifest = _mutate(synthetic)
+    manifest["source_closure"] = Exploding(manifest["source_closure"])
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] == gate.DECISION_EVIDENCE
+    assert record["execution_authorized"] is False
+    assert record["m53_executed"] is False
+    assert [finding["code"] for finding in record["findings"]] == ["internal_error"]
+    assert "C:/private/secret/path" not in gate.render_record(record)
+
+
+def test_row_order_does_not_change_the_decision_or_evidence(synthetic):
+    """Order independence is a property, not an accident: prove it explicitly."""
+    reordered = _mutate(synthetic)
+    reordered["source_closure"]["files"].reverse()
+    reordered["caches"]["trees"].reverse()
+    reordered["guard"]["files"].reverse()
+    assert gate.render_record(_evaluate(synthetic, manifest=reordered)) == gate.render_record(
+        _evaluate(synthetic)
+    )
+
+
+def test_cli_output_write_is_atomic(synthetic, tmp_path):
+    """The staging file must not survive a successful write."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(synthetic["manifest"]), encoding="utf-8")
+    output = tmp_path / "evidence.json"
+    gate.main(["--manifest", str(manifest_path), "--output", str(output)])
+    assert output.exists()
+    assert not (tmp_path / "evidence.json.partial").exists()
+
+
+def test_validate_relative_path_accepts_ordinary_repository_paths():
+    for good in ("src/config.py", "scripts/research_momentum_risk_control.py", "a/b/c.json"):
+        assert gate.validate_relative_path(good) is None
+
+
+def test_committed_manifest_paths_all_pass_the_relative_path_rule():
+    manifest = json.loads(COMMITTED_MANIFEST_PATH.read_text(encoding="utf-8"))
+    paths = [row["path"] for row in manifest["source_closure"]["files"]]
+    paths += [row["path"] for row in manifest["guard"]["files"]]
+    paths += list(manifest["isolation"]["original_cache_roots"])
+    paths += [
+        manifest["input_artifact"]["relative_path"],
+        manifest["output_paths"]["artifact_relative_path"],
+    ]
+    assert [p for p in paths if gate.validate_relative_path(p) is not None] == []
+
+
+# ---------------------------------------------------------------------------
+# Reparse-point coverage that does not depend on symlink privilege
+# ---------------------------------------------------------------------------
+
+# Creating a symlink needs Developer Mode or elevation on Windows, and creating
+# a directory junction needs an external tool, so the three symlink tests above
+# skip on ordinary accounts.  These tests exercise the same divergence the guard
+# actually keys on -- a resolved location that differs from the literal one --
+# by redirecting realpath, so junction/reparse behaviour is covered everywhere.
+
+
+def test_junctioned_parent_directory_makes_a_source_file_ambiguous(synthetic, monkeypatch):
+    """A junctioned *parent* must be caught, not only a linked leaf file."""
+    checkout = synthetic["checkout"]
+    real_realpath = gate.os.path.realpath
+    target = checkout / "src" / "lf_module.py"
+
+    def fake_realpath(path, *args, **kwargs):
+        if str(path) == str(target):
+            return str(synthetic["tmp_path"] / "elsewhere" / "lf_module.py")
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(gate.os.path, "realpath", fake_realpath)
+    record = _evaluate(synthetic)
+    assert record["decision"] != gate.DECISION_READY
+    codes = {finding["code"] for finding in record["findings"]}
+    assert codes & {"source_file_ambiguous", "source_file_outside_checkout"}
+
+
+def test_junctioned_scratch_root_is_unusable(synthetic, monkeypatch):
+    scratch = synthetic["scratch"]
+    real_realpath = gate.os.path.realpath
+
+    def fake_realpath(path, *args, **kwargs):
+        if str(path) == str(scratch):
+            return str(synthetic["tmp_path"] / "junction_target")
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(gate.os.path, "realpath", fake_realpath)
+    record = _evaluate(synthetic)
+    assert record["decision"] != gate.DECISION_READY
+    assert any(finding["code"] == "scratch_root_unusable" for finding in record["findings"])
+
+
+def test_original_cache_overlap_is_detected_through_a_resolved_alias(synthetic, monkeypatch):
+    """An alias that resolves onto the scratch root must still count as overlap."""
+    manifest = _mutate(synthetic)
+    manifest["isolation"]["original_cache_roots"] = ["aliased/daily_bar"]
+    repository = synthetic["repository"]
+    alias = repository / "aliased" / "daily_bar"
+    scratch_tree = synthetic["scratch"] / "daily_bar"
+    real_realpath = gate.os.path.realpath
+
+    def fake_realpath(path, *args, **kwargs):
+        if str(path) == str(alias):
+            return real_realpath(scratch_tree)
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(gate.os.path, "realpath", fake_realpath)
+    record = _evaluate(synthetic, manifest=manifest)
+    assert record["decision"] == gate.DECISION_CACHE
+    assert any(finding["code"] == "original_cache_root_overlap" for finding in record["findings"])
+
+
+def test_guard_directory_overlap_is_detected_through_a_resolved_alias(synthetic, monkeypatch):
+    guard_dir = synthetic["guard_dir"]
+    checkout = synthetic["checkout"]
+    real_realpath = gate.os.path.realpath
+
+    def fake_realpath(path, *args, **kwargs):
+        if str(path) == str(guard_dir):
+            return real_realpath(checkout / "nested_guard")
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(gate.os.path, "realpath", fake_realpath)
+    record = _evaluate(synthetic)
+    assert record["decision"] != gate.DECISION_READY
+    codes = {finding["code"] for finding in record["findings"]}
+    assert codes & {"guard_dir_overlaps_checkout", "guard_dir_unusable"}
+
+
+def test_unreadable_source_file_fails_closed(synthetic, monkeypatch):
+    """An OSError while hashing must produce a finding, never an exception."""
+    real_read = gate.Path.read_bytes
+
+    def fake_read(self, *args, **kwargs):
+        if self.name == "lf_module.py":
+            raise OSError("device not ready")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(gate.Path, "read_bytes", fake_read)
+    record = _evaluate(synthetic)
+    assert record["decision"] != gate.DECISION_READY
+    assert any(finding["code"] == "source_file_unreadable" for finding in record["findings"])
+
+
+def test_unreadable_scratch_tree_fails_closed(synthetic, monkeypatch):
+    def fake_walk(*args, **kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(gate.os, "walk", fake_walk)
+    record = _evaluate(synthetic)
+    assert record["decision"] == gate.DECISION_CACHE
+    assert any(finding["code"] == "scratch_tree_unreadable" for finding in record["findings"])
 
 
 # ---------------------------------------------------------------------------
