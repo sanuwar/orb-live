@@ -220,15 +220,24 @@ def _require_absolute_directory(value: str | None, name: str) -> pathlib.Path:
 
 
 def _require_pinned_executable(value: str | None, expected: str | None, name: str) -> pathlib.Path:
+    """Resolve an executable and pin it by the SHA-256 of its file bytes.
+
+    Symlinks are resolved rather than refused: a venv or toolchain interpreter is
+    normally a symlink, and refusing one would block a legitimate launch without
+    adding protection.  Content pinning, not path shape, is the control here --
+    a substituted target changes the digest and fails closed.
+    """
     path = pathlib.Path(value or "")
-    if not path.is_absolute() or not path.exists() or not path.is_file() or path.is_symlink():
-        raise GuardConfigurationError(f"{name} must be an existing non-symlink absolute file")
+    if not path.is_absolute():
+        raise GuardConfigurationError(f"{name} must be an absolute path")
+    resolved = path.resolve()
+    if not resolved.exists() or not resolved.is_file():
+        raise GuardConfigurationError(f"{name} must resolve to an existing regular file")
     if not expected or len(expected) != 64:
         raise GuardConfigurationError(f"{name} requires an explicit expected SHA-256")
-    actual = _cached_file_sha256(path)
-    if actual != expected.lower():
+    if _cached_file_sha256(resolved) != expected.lower():
         raise GuardConfigurationError(f"{name} content SHA-256 does not match the pinned value")
-    return path.resolve()
+    return resolved
 
 
 def _is_within(child: pathlib.Path, parent: pathlib.Path) -> bool:

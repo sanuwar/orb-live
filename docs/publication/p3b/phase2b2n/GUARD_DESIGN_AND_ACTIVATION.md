@@ -11,7 +11,7 @@ A future launcher must use an isolated guard directory that is outside the histo
 - `ORB_M53_GUARD_EXPECTED_SHA256`: SHA-256 of the exposed `guard_core.py` file bytes.
 - `ORB_M53_GUARD_EXPECTED_SITECUSTOMIZE_SHA256`: SHA-256 of the exposed `sitecustomize.py` file bytes.
 - `ORB_M53_GUARD_CHECKOUT`: existing non-symlink isolated M53 checkout.
-- `ORB_M53_GUARD_GIT_EXECUTABLE`: existing non-symlink absolute Git executable.
+- `ORB_M53_GUARD_GIT_EXECUTABLE`: absolute path to an existing Git executable.
 - `ORB_M53_GUARD_GIT_SHA256`: SHA-256 of that Git executable's **file bytes**.
 - `ORB_M53_GUARD_PYTHON_SHA256`: SHA-256 of the running interpreter's **file bytes** (`sys.executable`).
 
@@ -37,7 +37,7 @@ Steps 1–3 are a launcher precondition, not something the guard can prove about
 
 ## Executable provenance
 
-`ORB_M53_GUARD_GIT_SHA256` and `ORB_M53_GUARD_PYTHON_SHA256` are required, and both are checked against the hash of the executable **file bytes** before any target import; an absent, malformed, or mismatched pin is an activation failure. Evidence fields are named for what they contain: `executable_content_sha256` and `git_executable_content_sha256` hash file bytes, while `executable_path_sha256` hashes only the path string and exists solely to correlate paths without disclosing them.
+`ORB_M53_GUARD_GIT_SHA256` and `ORB_M53_GUARD_PYTHON_SHA256` are required, and both are checked against the hash of the executable **file bytes** before any target import; an absent, malformed, or mismatched pin is an activation failure. A symlinked executable is resolved and its target's bytes are pinned rather than refused, because a venv or toolchain interpreter is normally a symlink and refusing one would block a legitimate launch without adding protection; content pinning, not path shape, is the control. Evidence fields are named for what they contain: `executable_content_sha256` and `git_executable_content_sha256` hash file bytes, while `executable_path_sha256` hashes only the path string and exists solely to correlate paths without disclosing them.
 
 ## Activation versus readiness
 

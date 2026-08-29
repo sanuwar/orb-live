@@ -40,10 +40,7 @@ def _git() -> pathlib.Path:
     value = shutil.which("git")
     if value is None:
         pytest.skip("Git executable unavailable")
-    path = pathlib.Path(value).resolve()
-    if path.is_symlink():
-        pytest.skip("platform Git resolution is a symlink and cannot be pinned by this guard")
-    return path
+    return pathlib.Path(value).resolve()
 
 
 def _repository(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -324,6 +321,22 @@ def test_absent_executable_content_pin_fails_closed(tmp_path: pathlib.Path, vari
     result, _ = _run_guarded(tmp_path, "print('must-not-run')", extra_env={variable: ""})
     assert result.returncode != 0
     assert "must-not-run" not in result.stdout
+
+
+def test_symlinked_executable_is_pinned_by_resolved_content_not_refused(tmp_path: pathlib.Path) -> None:
+    """A venv or toolchain interpreter is normally a symlink and must still pin."""
+    core = _core()
+    real = tmp_path / "real-executable.bin"
+    real.write_bytes(b"pretend executable bytes")
+    link = tmp_path / "linked-executable.bin"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform does not permit creating symlinks in tests")
+    digest = hashlib.sha256(real.read_bytes()).hexdigest()
+    assert core._require_pinned_executable(os.fspath(link), digest, "probe") == real.resolve()
+    with pytest.raises(core.GuardConfigurationError, match="SHA-256"):
+        core._require_pinned_executable(os.fspath(link), "0" * 64, "probe")
 
 
 def test_allowed_git_child_records_the_pinned_executable_content_hash(tmp_path: pathlib.Path) -> None:

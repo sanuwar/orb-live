@@ -14,7 +14,7 @@ The match is exact and positional, on a list or tuple only. A string command, an
 The wrapper accepts those literal vectors only and then **overwrites** rather than trusts the caller's request:
 
 - `shell` is forced to `False`, and a truthy `shell` denies before that.
-- `executable` is forced to the pinned absolute Git path, whose **file-byte** SHA-256 was verified against `ORB_M53_GUARD_GIT_SHA256` at activation. A caller-supplied `executable` other than that exact path denies.
+- `executable` is forced to the pinned absolute Git path, whose **file-byte** SHA-256 (following any symlink) was verified against `ORB_M53_GUARD_GIT_SHA256` at activation. A caller-supplied `executable` other than that exact path denies.
 - `cwd` is forced to the resolved checkout, and a caller `cwd` that does not resolve to the checkout — including `None` — denies before that.
 - `close_fds` is forced to `True`.
 - `env` is replaced with `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=<checkout>/.git/info/empty-global-config`, `GIT_ATTR_NOSYSTEM=1`, and, on Windows only, `SystemRoot` for loader operation. Nothing else is inherited: no `PATH`, no proxy variable, no credential variable, no `GIT_*` override supplied by the caller. The controlled global-config file must exist in the checkout and be non-symlink, or the child is denied.
