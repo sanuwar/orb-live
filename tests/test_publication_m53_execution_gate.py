@@ -889,12 +889,38 @@ def _can_symlink(tmp_path: Path) -> bool:
     return True
 
 
-def test_symlinked_source_file_fails(synthetic):
+def test_symlinked_source_file_pointing_outside_the_checkout_fails(synthetic):
+    """A symlink whose target escapes the checkout is refused as an escape.
+
+    Containment is evaluated before ambiguity, so this reports
+    ``source_file_outside_checkout`` rather than ``source_file_ambiguous``.
+    Both are fail-closed; the containment code is the more precise one, because
+    escaping the isolated checkout is the specific thing that matters here.
+    """
     tmp_path = synthetic["tmp_path"]
     if not _can_symlink(tmp_path):
         pytest.skip("this platform/account cannot create symlinks")
     target = synthetic["checkout"] / "src" / "lf_module.py"
     real = tmp_path / "real_lf_module.py"
+    real.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(real)
+    record = _evaluate(synthetic)
+    assert record["decision"] == gate.DECISION_SOURCE
+    assert any(finding["code"] == "source_file_outside_checkout" for finding in record["findings"])
+
+
+def test_symlinked_source_file_pointing_inside_the_checkout_fails(synthetic):
+    """A symlink that stays inside the checkout is still refused, as ambiguous.
+
+    This is the case containment cannot catch, so it proves the ambiguity check
+    is still doing work rather than being shadowed by the new rule.
+    """
+    tmp_path = synthetic["tmp_path"]
+    if not _can_symlink(tmp_path):
+        pytest.skip("this platform/account cannot create symlinks")
+    target = synthetic["checkout"] / "src" / "lf_module.py"
+    real = synthetic["checkout"] / "src" / "real_lf_module.py"
     real.write_bytes(target.read_bytes())
     target.unlink()
     target.symlink_to(real)

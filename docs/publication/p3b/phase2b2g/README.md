@@ -39,7 +39,7 @@ The decision is `BLOCKED_SOURCE_OR_MATERIALIZATION` because source precedes ever
 
 `scripts/publication/m53_execution_gate.py` is verification-only. It contains **no code path that imports, launches, simulates, regenerates, or fetches anything**: it starts no subprocess, opens no socket, and imports no project module. `tests/test_publication_m53_execution_gate.py` proves this statically by parsing the gate's own AST, and proves that `execution_authorized` and `m53_executed` are assigned the literal `False` at their only two assignment sites.
 
-`tests/test_publication_m53_execution_gate.py` uses only synthetic `tmp_path` fixtures and the committed manifest: **185 pass and 3 skip** (the three skips need symlink-creation privilege; the divergence they probe is covered on every platform by the reparse tests described in the specification).
+`tests/test_publication_m53_execution_gate.py` uses only synthetic `tmp_path` fixtures and the committed manifest: **189 tests**, all of which run in CI on Linux. On a Windows account without symlink privilege, four of them skip and 185 pass; the divergence those four probe is covered on every platform by the reparse tests described in the specification.
 
 ## Independent review
 
