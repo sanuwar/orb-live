@@ -4,7 +4,7 @@
 
 **`READY_FOR_SEPARATELY_AUTHORIZED_M53_EXECUTION`**, with `execution_authorized=false` and `m53_executed=false`.
 
-Zero findings in all seven gate categories, against real materialized inputs, reproduced byte-identically across two independent runs.
+Zero findings in all seven gate categories, against real materialized inputs, reproduced byte-identically across **three** independent runs to three separate evidence paths — two during materialization and one during independent review, none overwriting another.
 
 ## What this means
 
@@ -34,6 +34,14 @@ This decision specifically does **not** establish that:
 - the historical environment has been recreated. It has not, and cannot be: the OS image, Python build, dependency resolution, clock, locale, and filesystem behaviour of the original run are unrecorded. This phase records *its own* environment.
 
 Cache **originality** also remains unestablished. No committed hash exists anywhere in the repository for any raw cache file, so the frozen aggregate digests fix the current local state and make mutation detectable — they are not evidence that these bytes are the bytes the original runs consumed, nor of vendor-side integrity. That Phase 1 limit is unchanged.
+
+## Evidentiary limits of the preserved scratch evidence
+
+The scratch root is preserved rather than deleted, which lets a reviewer with access to this machine re-verify every claim in this package against the actual materialized inputs. Independent review did exactly that.
+
+**That is not the same as a durable, public, independently archived reproduction package, and must not be presented as one.** The materialized inputs live in one local directory on one operator machine. They are not published, not mirrored, not content-addressed in any external store, not covered by any retention guarantee, and not independently custodied — an accidental deletion, a disk failure, or a machine rebuild would end their availability, and nothing in this repository would detect it. The cache trees in particular cannot be published at all: they are Alpaca-derived and confirmed non-redistributable.
+
+What *is* durable is the committed aggregate evidence — counts, byte totals, digests, and the gate's own record — which lets a reader detect that something no longer matches, but does not let them reconstruct the inputs. Anyone re-running this preflight elsewhere would have to re-materialize from their own licensed sources.
 
 ## Gates that remain before any M53 execution
 

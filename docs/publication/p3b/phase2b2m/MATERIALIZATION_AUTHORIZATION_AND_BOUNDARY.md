@@ -44,3 +44,5 @@ Nothing in the repository working tree was modified outside the committed docume
 This package commits aggregate, publication-safe evidence only. It contains no cache file, no historical checkout file, no raw market row, no private absolute path, no username, no credential, no environment dump, no raw scratch command log, no Phase 2B-1 evidence, and no regenerated M53 artifact.
 
 The one machine-generated file committed verbatim, `M53_REAL_PREFLIGHT_RESULT.json`, is the gate's own record. It was audited before commit and contains no username, no drive letter, no absolute or scratch path, no credential-shaped token, and no cache or market content — supplied paths appear in it only as SHA-256 digests of their normalized text.
+
+Those digests are **pseudonymous identifiers, not anonymization**: they are unsalted hashes of low-entropy, guessable strings, and independent review confirmed all seven from guessed paths. They remove casual disclosure and give a stable correlation handle; they are not a confidentiality control. See `REAL_PREFLIGHT_EVIDENCE_SUMMARY.md`.

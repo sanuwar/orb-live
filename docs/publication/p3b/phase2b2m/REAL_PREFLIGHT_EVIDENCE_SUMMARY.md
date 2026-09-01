@@ -51,13 +51,15 @@ The findings list is empty. Every one of the seven materialization gaps that pro
 | Evidence bytes | 1,103 |
 | Evidence SHA-256 | `f1386ea33fd4925cf50e1c387874052ba102b4a6658c760ee36d109c5939d700` |
 
-The identical invocation was run a **second** time to a **separate fresh evidence path**, never overwriting the first record. Both runs produced byte-identical output — same length, same digest — confirming the gate's determinism claim against real inputs rather than only against synthetic fixtures. Both records are preserved in the scratch evidence directory. No staging file was left behind by either atomic write.
+The identical invocation was run a **second** time to a **separate fresh evidence path**, never overwriting the first record, and independent review later ran it a **third** time to another fresh path. All three runs produced byte-identical output — same length, same digest — confirming the gate's determinism claim against real inputs rather than only against synthetic fixtures. All three records are preserved in the scratch evidence directory, and no staging file was left behind by any atomic write.
 
 The committed `M53_REAL_PREFLIGHT_RESULT.json` is the first record, byte-for-byte.
 
 ## Privacy audit of the committed record
 
-The record was audited before commit and contains **no** username, drive letter, absolute path, scratch location, repository path, toolchain or virtual-environment directory fragment, credential-shaped token, cache filename, or market-data value. The seven supplied input paths appear **only** as SHA-256 digests of their normalized text, which lets a reviewer confirm that two inputs were distinct without learning where either lives.
+The record was audited before commit and contains **no** username, drive letter, absolute path, scratch location, repository path, toolchain or virtual-environment directory fragment, credential-shaped token, cache filename, or market-data value. The seven supplied input paths appear only as SHA-256 digests of their normalized text.
+
+**Those digests are pseudonymous identifiers, not anonymization, and must not be described as hiding the paths.** They are unsalted SHA-256 values over low-entropy, highly guessable strings, so anyone who guesses a candidate path can confirm it instantly by hashing it. Independent review demonstrated exactly this: **all seven** digests in the committed record were confirmed from guessed paths on the first attempt. What the digests actually provide is a stable correlation handle — a reviewer can tell that two inputs were distinct, or that a later run used the same input as an earlier one — plus the removal of *casual* disclosure. They provide no confidentiality guarantee against anyone who cares to guess, and none is claimed.
 
 ## Output and evidence isolation
 

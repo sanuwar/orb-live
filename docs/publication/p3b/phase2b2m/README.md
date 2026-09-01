@@ -33,6 +33,8 @@ This is the first time the gate has reached readiness against real inputs. **It 
 
 The scratch root is **preserved, not deleted**, for independent review. Its location is reported to the operator only and is deliberately absent from every committed file.
 
+Preservation is local, not archival: the materialized inputs sit in one directory on one machine, unpublished and uncustodied. See the evidentiary-limits section of [`PHASE2B2M_READINESS_DECISION.md`](PHASE2B2M_READINESS_DECISION.md).
+
 ## Boundary
 
 **M52 and M53 were not imported or executed.** No historical simulation, regeneration, or statistical analysis ran. No market, factor, SEC, OpenFIGI, broker, or account data was fetched. No broker or account was accessed. The guard was materialized but **not activated**, and neither guard file was imported. **No regenerated M53 artifact was created or observed.**
